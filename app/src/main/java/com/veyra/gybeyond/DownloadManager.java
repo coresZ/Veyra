@@ -240,7 +240,8 @@ final class DownloadManager {
                 task.output = publicUri != null ? publicUri.toString() : merged.getAbsolutePath();
                 mergedOk = true;
             } catch (Exception mergeErr) {
-                // 合并失败 → 回退分集导出
+                // 合并失败 → 记录原因，回退分集导出
+                task.error = "合并失败：" + (mergeErr.getMessage() == null ? mergeErr.getClass().getSimpleName() : mergeErr.getMessage());
                 StringBuilder outList = new StringBuilder();
                 for (int i = 0; i < plain.size(); i++) {
                     if (task.canceled) return;
