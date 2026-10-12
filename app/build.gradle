@@ -1,0 +1,85 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.veyra.gybeyond'
+    compileSdk 37
+
+    defaultConfig {
+        applicationId 'com.veyra.gybeyond'
+        minSdk 26
+        targetSdk 36
+        versionCode 59
+        versionName '0.8.0'
+        testInstrumentationRunner 'com.veyra.gybeyond.PlaybackTestRunner'
+    }
+
+    signingConfigs {
+        release {
+            // 接手版签名：从环境变量读取，未设置时回退到本地交付文件（不入库）。
+            def ks = System.getenv('CHENGZI_KEYSTORE') ?: '/path/to/chengzi-release.keystore'
+            def sp = System.getenv('CHENGZI_STORE_PASS') ?: 'CHANGE_ME_STORE_PASS'
+            def kp = System.getenv('CHENGZI_KEY_PASS') ?: 'CHANGE_ME_KEY_PASS'
+            storeFile file(ks)
+            storePassword sp
+            keyAlias System.getenv('CHENGZI_KEY_ALIAS') ?: 'chengzi'
+            keyPassword kp
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled false
+        }
+    }
+
+    // Install device regression tests beside the user's signed app, with separate local data.
+    if (providers.gradleProperty('playbackQa').isPresent()) {
+        buildTypes.debug.applicationIdSuffix = '.playbackqa'
+    }
+
+    compileOptions {
+        coreLibraryDesugaringEnabled true
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+configurations { hongguoCompile }
+def hongguoJar = layout.buildDirectory.file('libs/hongguo-core.jar')
+def compileHongguo = tasks.register('compileHongguoCore', Exec) {
+    inputs.files(fileTree('../third_party/hongguo/src') { include '**/*.kt' })
+    inputs.file('../scripts/build-hongguo-core.py')
+    outputs.file(hongguoJar)
+    doFirst {
+        def sdkPath = System.getenv('ANDROID_HOME') ?: System.getenv('ANDROID_SDK_ROOT') ?: "${System.getenv('LOCALAPPDATA')}/Android/Sdk"
+        def platform = file("${sdkPath}/platforms/android-37.0/android.jar")
+        if (!platform.exists()) platform = file("${sdkPath}/platforms/android-37/android.jar")
+        commandLine 'python', '-X', 'utf8', file('../scripts/build-hongguo-core.py'),
+                '--classpath', (configurations.hongguoCompile.files + [platform]).collect { it.absolutePath }.join(File.pathSeparator),
+                '--output', hongguoJar.get().asFile.absolutePath
+    }
+}
+
+dependencies {
+    hongguoCompile('com.squareup.okhttp3:okhttp:4.10.0') { transitive = false }
+    hongguoCompile('com.squareup.okio:okio-jvm:3.0.0') { transitive = false }
+    hongguoCompile('org.bouncycastle:bcprov-jdk18on:1.80.2') { transitive = false }
+    hongguoCompile('org.jsoup:jsoup:1.23.2') { transitive = false }
+    hongguoCompile('org.jetbrains.kotlin:kotlin-stdlib:2.2.10') { transitive = false }
+    implementation files(hongguoJar).builtBy(compileHongguo)
+    implementation 'com.squareup.okhttp3:okhttp:4.10.0'
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.80.2'
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.2.10'
+    implementation 'androidx.webkit:webkit:1.17.1'
+    androidTestImplementation 'androidx.test:runner:1.7.0'
+    androidTestImplementation 'junit:junit:4.13.2'
+    implementation 'androidx.core:core:1.7.0'
+    implementation 'org.jsoup:jsoup:1.23.2'
+    implementation 'androidx.media3:media3-exoplayer:1.11.1'
+    implementation 'androidx.media3:media3-exoplayer-hls:1.11.1'
+    implementation 'androidx.media3:media3-ui:1.11.1'
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs_nio:2.0.1'
+}

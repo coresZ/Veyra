@@ -1,0 +1,4 @@
+<resources>
+    <!-- 通用版：不内置任何后端域名，登录/注册时由用户填写服务器地址 -->
+    <string name="api_base_url" translatable="false"></string>
+</resources>

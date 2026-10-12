@@ -1,0 +1,24 @@
+.gradle/
+.idea/
+build/
+app/build/
+local.properties
+*.iml
+
+merge-*.log
+.signing/
+outputs/
+
+archives/
+
+verification/
+
+qa/*-browser/
+
+qa/
+*.log
+__pycache__/
+.local-docs/
+Android Version/
+server/node_modules/
+chengzi-data/

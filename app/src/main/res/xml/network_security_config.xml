@@ -1,0 +1,12 @@
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false"/>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">douyinvod.com</domain>
+        <domain includeSubdomains="true">byteicdn.com</domain>
+        <domain includeSubdomains="true">byteimg.com</domain>
+    </domain-config>
+    <!-- 自建后端明文放行：部署时把你的服务器 IP/域名加进下面的 domain-config（示例见注释）
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">your-server-ip-or-domain</domain>
+    </domain-config> -->
+</network-security-config>
