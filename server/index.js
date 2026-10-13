@@ -25,12 +25,23 @@ const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const http = require('http');
 const https = require('https');
 const downloader = require('./downloader');
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
-const DATA_DIR = process.env.DATA_DIR || '/data';
+// 数据目录：环境变量指定，默认 /data（docker-compose volume 挂载）。
+// 裸跑/本地运行根目录不可写时自动回退到可写目录，避免服务因 EACCES 直接崩溃。
+let DATA_DIR = process.env.DATA_DIR || '/data';
+(function resolveDataDir() {
+  const candidates = [DATA_DIR, path.join(process.cwd(), 'data'), path.join(os.tmpdir(), 'veyra-data')];
+  for (const dir of candidates) {
+    try { fs.mkdirSync(dir, { recursive: true }); fs.accessSync(dir, fs.constants.W_OK); DATA_DIR = dir; return; }
+    catch { /* try next */ }
+  }
+  console.warn(`[veyra] 数据目录均不可写，继续使用 ${DATA_DIR}（配置将无法持久化）`);
+})();
 const TOKEN_TTL_MS = 90 * 24 * 3600 * 1000; // 90 天
 const MAX_AVATAR_BYTES = 512 * 1024;
 const MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;

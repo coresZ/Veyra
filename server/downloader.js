@@ -13,13 +13,23 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const http = require('http');
 const https = require('https');
 const { spawnSync, spawn } = require('child_process');
 
-const DATA_DIR = process.env.DATA_DIR || '/data';
-// 下载合并产物目录：固定 /video，由 docker-compose 挂载 NAS 目录出来（本地测试可用 DOWNLOAD_DIR 覆盖）
-const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || '/video';
+// 数据/下载目录：环境变量指定，默认 /data、/video（docker-compose 挂载）。
+// 裸跑/本地运行时根目录不可写 → 自动回退到可写目录，避免服务因 EACCES 直接崩溃。
+let DATA_DIR = process.env.DATA_DIR || '/data';
+let DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || '/video';
+function resolveWritableDir(preferred, fallbacks) {
+  for (const dir of [preferred, ...fallbacks]) {
+    try { fs.mkdirSync(dir, { recursive: true }); fs.accessSync(dir, fs.constants.W_OK); return dir; }
+    catch { /* try next */ }
+  }
+  return null;
+}
+DATA_DIR = resolveWritableDir(DATA_DIR, [path.join(process.cwd(), 'data'), path.join(os.tmpdir(), 'veyra-data')]) || DATA_DIR;
 const CONCURRENCY = Math.max(1, parseInt(process.env.DOWNLOAD_CONCURRENCY || '2', 10) || 2);
 const RETRIES = 2;
 const TASKS_FILE = path.join(DATA_DIR, 'downloads.json');
@@ -463,7 +473,17 @@ function deleteTask(id, owner, isAdmin) {
   return true;
 }
 function ensureDirs() {
-  fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+  // /video 不可写时回退：DATA_DIR/video → 当前目录/video → 系统临时目录
+  const resolved = resolveWritableDir(DOWNLOAD_DIR, [
+    path.join(DATA_DIR, 'video'),
+    path.join(process.cwd(), 'video'),
+    path.join(os.tmpdir(), 'veyra-video'),
+  ]);
+  if (!resolved) throw new Error('没有可用的下载目录（请设置 DOWNLOAD_DIR）');
+  if (resolved !== DOWNLOAD_DIR) {
+    console.warn(`[downloader] 默认下载目录 ${DOWNLOAD_DIR} 不可写，回退为 ${resolved}`);
+    DOWNLOAD_DIR = resolved;
+  }
 }
 function status() {
   ensureDirs();

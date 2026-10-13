@@ -11,6 +11,7 @@ RUN npm install --omit=dev --no-audit --no-fund
 COPY index.js ./
 COPY downloader.js ./
 COPY hongguo-decrypt.js ./
+COPY proxy-fetch.js ./
 
 ENV PORT=8080
 EXPOSE 8080
