@@ -20,8 +20,14 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Set up Android SDK (preinstalled)
+        run: |
+          SDK=/usr/local/lib/android/sdk
+          echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
+          yes | $SDK/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
+          yes | $SDK/cmdline-tools/latest/bin/sdkmanager "platforms;android-37" "build-tools;37.0.0" > /dev/null || true
+          ls $SDK/platforms $SDK/build-tools
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,11 +39,6 @@ jobs:
           curl -fsSL -o /tmp/kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.2.10/kotlin-compiler-2.2.10.zip
           unzip -q /tmp/kotlin.zip -d /opt/
           echo "KOTLIN_HOME=/opt/kotlinc" >> $GITHUB_ENV
-
-      - name: Accept SDK licenses & install platform
-        run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          yes | sdkmanager "platforms;android-37" > /dev/null || true
 
       - name: Compute version
         run: |
