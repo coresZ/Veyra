@@ -6,21 +6,6 @@ Veyra 是一个**短剧聚合播放器**：Android 客户端（APK）+ 自建 No
 
 ---
 
-## 与旧「橙子视频」的关系
-
-Veyra 就是原「橙子短剧 / chengzi」项目的**后继独立版**，部署命名已完全划清：
-
-| 项 | 旧（橙子 / chengzi） | 新（Veyra） |
-|---|---|---|
-| 后端镜像 | `gybeyond/chengzi-backend` | `gybeyond/veyra-backend` |
-| 容器名 | `chengzi-backend` | `veyra` |
-| 数据目录 | `./chengzi-data` | `./data` |
-| NAS 产物目录 | `./chengzi-video` | `/volume1/gy/veyra:/video` |
-| APK | 旧包名 | `com.veyra.gybeyond`（已独立） |
-
-> 老实例的账号数据在 `chengzi-data` 卷里；如需迁到 Veyra，把该卷内容复制到新数据卷即可。APK 内登录态存储 key（`chengzi-auth` 等）为保证老用户不掉登录而保留，属内部实现，不影响品牌划分。
-
----
 
 ## 功能特性
 
@@ -56,7 +41,7 @@ Veyra 就是原「橙子短剧 / chengzi」项目的**后继独立版**，部署
 
 ## 部署后端（Docker Compose，无 SSH）
 
-**Synology NAS / 任意 Docker 主机**，用 Docker Compose 即可，不需要 SSH 远程管理：
+**Synology NAS / 任意 Docker 主机**，用 Docker Compose 即可：
 
 ```bash
 # 1. 建目录（NAS 上建议放 /volume1/docker/veyra）
@@ -93,7 +78,7 @@ docker compose up -d
 ## APK 使用
 
 1. 安装 `app-release.apk`（GitHub Releases 或自行构建）。
-2. 首次打开进入登录 / 注册页，**填写你自己的后端地址**（如 `http://192.168.x.x:8080`）。
+2. 首次打开进入登录 / 注册页，**填写你自己的后端地址**（如 `http://192.168.x.x:8888`）。
 3. 公开模式直接看红果；设置 → 进入私密模式需输入后端动态码（管理员免输）。
 4. 设置 → 黄果网络代理：填 `host:port`（仅黄果走代理，代理不通自动后端绕行）。
 5. 详情页 → 下载：选择集数 → 下载到手机（本地，合并优先）或下载到 NAS（管理员）。
