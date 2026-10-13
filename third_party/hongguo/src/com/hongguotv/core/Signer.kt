@@ -7,7 +7,7 @@ import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-internal class Signer(private val clock: () -> Long = System::currentTimeMillis, private val random: () -> Double = Math::random) {
+class Signer(private val clock: () -> Long = System::currentTimeMillis, private val random: () -> Double = Math::random) {
     data class Request(val url: String, val headers: Map<String, String>, val body: ByteArray?)
     private fun rand() = (random() * 4294967296.0).toLong().toInt()
     private fun unsigned(v: Int) = v.toLong() and 0xffffffffL

@@ -125,30 +125,35 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
-        val payload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}""".toByteArray()
-        val signed=signer.sign("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/",VendorConstants.device,payload)
-        val data=JSONObject(text(signed.url,signed))
-        if(data.optInt("Code",data.optInt("code",0))!=0) throw IOException("播放接口暂不可用")
-        val map=data.optJSONObject("data") ?: throw IOException("播放信息为空")
-        val entry=map.optJSONObject(id) ?: map.keys().asSequence().mapNotNull { map.optJSONObject(it) }.firstOrNull() ?: throw IOException("播放信息为空")
-        val model=entry.optJSONObject("video_model") ?: JSONObject(entry.str("video_model"))
-        val raw=model.opt("fallback_api")
-        val fallback=when(raw) { is JSONObject -> raw.str("fallback_api"); is JSONArray -> raw.optString(0); else -> runCatching { JSONObject(raw.toString()).str("fallback_api") }.getOrDefault(raw.toString()) }
-        if(!fallback.startsWith("https://")) throw IOException("播放地址格式异常")
-        val info=JSONObject(text(fallback)).optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
-        val videoList=info.optJSONObject("video_list") ?: throw IOException("没有可用清晰度")
-        // ByteVC2 resources can expose playable audio but no video track in Android's MP4 extractor.
-        // Keep missing legacy codec labels usable, but never select a known incompatible variant.
-        val rows=videoList.keys().asSequence().mapNotNull { k -> videoList.optJSONObject(k)?.let { k to it } }.filter {
-            it.second.str("main_url").isNotEmpty() && it.second.str("codec_type").lowercase() !in setOf("bytevc2","bvc2")
-        }.map { (k,o) -> Triple(qualityNumber(o.str("quality_desc").ifEmpty { o.str("height").ifEmpty { o.str("vheight").ifEmpty { o.str("quality").ifEmpty { k } } } }),k,o) }.sortedByDescending { it.first }.toList()
-        val selected=rows.firstOrNull { it.first<=maxQuality } ?: rows.lastOrNull() ?: throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
-        val item=selected.third; var url=cleanUrl(item.str("main_url")); val seed=info.str("key_seed")
-        if(seed.isNotEmpty()) url=MediaCrypto.decryptUrl(url,decode64(seed))
-        if(!url.startsWith("https://") && !url.startsWith("http://")) throw IOException("播放地址无效")
-        val key=item.str("spade_a").takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
-        val quality=if(selected.first>0) "${selected.first}P"+(if(selected.first>maxQuality) "（兼容资源）" else "") else "自动"
-        return StreamInfo(url,key,quality)
+        // 红果新版单集取流接口：video_model/v1/ + 随机设备 + 简单 XOR 版 X-Gorgon（guoapp 同款）。
+        // 旧版 multi_video_model/v1/ + 固定设备已被红果拒绝（Code≠0），实测新版接口正常返回明文 mp4 直链。
+        val payload = """{"video_id":"$id","content_type":1,"biz_param":{"need_all_video_definition":true,"video_platform":3}}""".toByteArray()
+        val signed = GuoSigner.sign("/novel/player/video_model/v1/", payload)
+        val data = JSONObject(text(signed.url, signed))
+        if (data.optInt("Code", data.optInt("code", 0)) != 0) throw IOException("播放接口暂不可用")
+        val map = data.optJSONObject("data") ?: throw IOException("播放信息为空")
+        val model = map.optJSONObject("video_model") ?: JSONObject(map.str("video_model"))
+        val rawList = model.opt("video_list")
+        val variants = when (rawList) {
+            is JSONArray -> (0 until rawList.length()).mapNotNull { rawList.optJSONObject(it) }
+            is JSONObject -> rawList.keys().asSequence().mapNotNull { rawList.optJSONObject(it) }.toList()
+            else -> emptyList()
+        }
+        // ByteVC2 资源可能在 Android MP4 extractor 里只有音频没有视频轨，绝不选；只选有直链的清晰度。
+        val rows = variants.filter { o ->
+            o.str("main_url").isNotEmpty() && (o.optJSONObject("video_meta")?.str("codec_type") ?: "").lowercase() !in setOf("bytevc2", "bvc2")
+        }.map { o ->
+            val meta = o.optJSONObject("video_meta")
+            val label = meta?.str("definition").orEmpty().ifEmpty { meta?.str("vheight").orEmpty() }
+            Triple(qualityNumber(label), o, o.str("main_url"))
+        }.sortedByDescending { it.first }
+        if (rows.isEmpty()) throw IOException("没有可用清晰度")
+        val selected = rows.firstOrNull { it.first <= maxQuality } ?: rows.lastOrNull() ?: throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
+        val url = cleanUrl(selected.third)
+        if (!url.startsWith("https://") && !url.startsWith("http://")) throw IOException("播放地址无效")
+        val key = selected.second.optJSONObject("encrypt_info")?.str("spade_a")?.takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
+        val quality = if (selected.first > 0) "${selected.first}P" else "自动"
+        return StreamInfo(url, key, quality)
     }
     companion object {
         fun extractRouter(html: String): JSONObject {

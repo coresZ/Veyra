@@ -122,7 +122,12 @@ final class SiteRepository {
     }
 
     private byte[] fetch(String url) throws Exception {
-        URL parsed = new URL(url);
+        URL parsed;
+        try {
+            parsed = new URL(url);
+        } catch (Exception error) {
+            throw new IOException("站点地址配置无效（" + url + "）：请检查站点配置或稍后重试", error);
+        }
         if (!"https".equals(parsed.getProtocol())) throw new IllegalArgumentException("仅支持 HTTPS");
         final HttpURLConnection connection;
         if (proxyReady()) {

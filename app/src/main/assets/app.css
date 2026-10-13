@@ -136,8 +136,9 @@ html[data-theme=dark] .dl-primary{background:#ffd45b;color:#171409}
 html[data-theme=dark] .download-track i{background:#ffd45b}
 .download-task-foot{display:flex;align-items:center;gap:10px;margin-top:8px;min-height:28px}
 .dl-output{font-size:11px;color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dl-error{font-size:11px;color:#bb3c2d;flex:1}
+.dl-error{font-size:11px;color:#bb3c2d;flex:1;max-height:150px;overflow:auto;line-height:1.6;word-break:break-all;cursor:pointer;padding:4px 6px;border-radius:6px;background:rgba(187,60,45,.06)}
 .dl-cancel{border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--text);padding:6px 14px;font-size:12px}
+.dl-retry{border-color:#2f7fe0;background:#2f7fe0;color:#fff;font-weight:600;margin-left:8px}
 .page-empty{color:var(--muted);font-size:12px;text-align:center;padding:26px 0}
 .page-loading{color:var(--muted);font-size:12px;text-align:center;padding:26px 0}
 /* ---- 全局禁用长按选中 ---- */

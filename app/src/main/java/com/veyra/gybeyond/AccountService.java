@@ -323,6 +323,9 @@ final class AccountService {
 
     /** 后端 HTTP 调用。非 2xx 抛 AccountApiException（带服务端 error 文案）；网络异常原样抛出。 */
     private JSONObject call(String method, String path, JSONObject body, boolean auth) throws Exception {
+        if (baseUrl == null || baseUrl.trim().isEmpty()) {
+            throw new IllegalStateException("服务器地址未设置：请到登录页重新填写服务器地址并登录，再使用下载到 NAS");
+        }
         Request.Builder builder = new Request.Builder().url(baseUrl + path);
         if (body != null) builder.method(method, RequestBody.create(JSON, body.toString()));
         else builder.method(method, null);

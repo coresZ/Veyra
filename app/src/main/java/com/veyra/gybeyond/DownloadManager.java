@@ -28,12 +28,16 @@ import java.net.URL;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import okhttp3.OkHttpClient;
 
@@ -81,6 +85,7 @@ final class DownloadManager {
         volatile String detail = "";
         volatile String output = "";
         volatile String error = "";
+        volatile String debug = "";   // 合并/下载详细排查日志（多行，UI 换行展示）
         final long createdAt = System.currentTimeMillis();
         volatile boolean canceled = false;
 
@@ -95,7 +100,7 @@ final class DownloadManager {
                         .put("id", id).put("source", source).put("title", title)
                         .put("status", status).put("doneCount", doneCount).put("totalCount", totalCount)
                         .put("percent", percent).put("detail", detail)
-                        .put("output", output).put("error", error).put("createdAt", createdAt);
+                        .put("output", output).put("error", error).put("debug", debug).put("createdAt", createdAt);
             } catch (Exception e) { return new JSONObject(); }
         }
     }
@@ -110,7 +115,8 @@ final class DownloadManager {
                             .put("id", t.id).put("source", t.source).put("title", t.title)
                             .put("status", t.status).put("percent", t.percent)
                             .put("doneCount", t.doneCount).put("totalCount", t.totalCount)
-                            .put("detail", t.detail).put("output", t.output).put("error", t.error)
+                            .put("detail", t.detail).put("output", t.output).put("error", t.error).put("debug", t.debug)
+                            .put("episodes", t.episodes)
                             .put("createdAt", t.createdAt));
                 }
             }
@@ -137,7 +143,26 @@ final class DownloadManager {
                 t.doneCount = o.optInt("doneCount", 0);
                 t.totalCount = Math.max(o.optInt("totalCount", 0), 1);
                 t.output = o.optString("output", "");
+                t.debug = o.optString("debug", "");
+                // 恢复分集列表（episodes 为 final JSONArray，用 put 拷贝），否则重试恢复的任务分集数=0
+                JSONArray saved = o.optJSONArray("episodes");
+                if (saved != null) {
+                    for (int k = 0; k < saved.length(); k++) t.episodes.put(saved.optJSONObject(k));
+                }
                 tasks.add(t);
+            }
+        } catch (Exception ignored) { }
+        // 孤儿目录清理：files/downloads/ 下已无任务记录的历史目录（旧版 delete 只删产物不删分集，
+        // 遗留大量 ep*.mp4 密文分集 + seg_v6 规范化缓存 + merged.mp4，导致存储膨胀）一次性删除。
+        try {
+            File base = new File(context.getFilesDir(), "downloads");
+            File[] dirs = base.listFiles();
+            if (dirs != null) {
+                HashSet<String> alive = new HashSet<>();
+                synchronized (tasks) { for (Task t : tasks) alive.add(t.id); }
+                for (File d : dirs) {
+                    if (d.isDirectory() && !alive.contains(d.getName())) deleteRecursive(d);
+                }
             }
         } catch (Exception ignored) { }
     }
@@ -176,7 +201,33 @@ final class DownloadManager {
         persist();
     }
 
-    /** 删除已完成/失败的任务：移除任务记录，并删除已保存的产物（MediaStore 或文件，支持 | 分隔的多产物）。 */
+    /** 重试失败/取消的任务：重置状态重新执行 run()；已下载分集自动复用（v0.12.2 起保留分集）。 */
+    void retry(String id) {
+        Task found = null;
+        synchronized (tasks) {
+            for (Task t : tasks) {
+                if (t.id.equals(id)) { found = t; break; }
+            }
+        }
+        if (found == null) return;
+        final Task target = found;
+        synchronized (target) {
+            target.canceled = false;
+            target.status = "running";
+            target.percent = 0;
+            target.doneCount = 0;
+            target.detail = "重新下载";
+            target.error = "";
+            target.debug = "";
+            target.output = "";
+        }
+        persist();
+        pool.execute(() -> run(target));
+    }
+
+    /** 删除已完成/失败的任务：移除任务记录，删除已保存的产物（MediaStore 或文件，支持 | 分隔的多产物），
+     *  并删除该任务的分集目录（files/downloads/<id>/：密文分集 ep*.mp4 + seg_v6 规范化缓存 + merged.mp4 + 日志），
+     *  防止存储膨胀。 */
     void delete(String id) {
         synchronized (tasks) {
             for (Task t : tasks) {
@@ -197,6 +248,9 @@ final class DownloadManager {
                             } catch (Exception ignored) { }
                         }
                     }
+                    // 删除整个分集/缓存目录（含正在合并的 merged.mp4、seg_v6 缓存、native.log）
+                    File dir = new File(context.getFilesDir(), "downloads/" + t.id);
+                    if (dir.exists()) deleteRecursive(dir);
                     break;
                 }
             }
@@ -205,34 +259,86 @@ final class DownloadManager {
     }
 
     // ---- 执行 ----
+    // 并发下载数：一次最多同时下载 N 集（与后端 worker 并发思路一致），跑完一集线程池自动接下一集
+    private static final int DL_CONCURRENCY = 10;
+
     private void run(Task task) {
         File dir = new File(context.getFilesDir(), "downloads/" + task.id);
+        boolean mergedOk = false;
         try {
             dir.mkdirs();
-            List<File> plain = new ArrayList<>();
-            for (int i = 0; i < task.episodes.length(); i++) {
-                if (task.canceled) return;
-                JSONObject ep = task.episodes.optJSONObject(i);
-                String url = ep.optString("url");
-                String key = ep.optString("key", "");
-                File out = new File(dir, String.format(Locale.US, "ep%03d.mp4", i + 1));
-                task.detail = "下载第 " + (i + 1) + "/" + task.episodes.length() + " 集";
-                if ("hongguo".equals(task.source)) downloadHongguo(task, url, key, out, i);
-                else downloadPlain(task, url, out, i);
-                plain.add(out);
-                task.doneCount = i + 1;
+            int n = task.episodes.length();
+            File[] plainArr = new File[n];
+            AtomicLong dlBytes = new AtomicLong();
+            AtomicLong totalBytes = new AtomicLong();
+            AtomicInteger finished = new AtomicInteger();
+            ExecutorService dl = Executors.newFixedThreadPool(DL_CONCURRENCY);
+            List<Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                final int idx = i;
+                futures.add(dl.submit(() -> {
+                    if (task.canceled) return;
+                    JSONObject ep = task.episodes.optJSONObject(idx);
+                    String url = ep.optString("url");
+                    String key = ep.optString("key", "");
+                    File out = new File(dir, String.format(Locale.US, "ep%03d.mp4", idx + 1));
+                    // 重试/复用：仅复用「v0.13.8+ 新格式」分集（dlv=raw-v2，原始密文/明文，合并时由 C 层 ffmpeg
+                    // 原生解密重封装保持 CFR）。旧版分集（MediaMuxer 重封装产物，帧率被弄成 VFR）一律不复用，
+                    // 强制重新下载，避免"快切鬼畜/MPV 卡顿"翻回来。
+                    if (out.exists() && out.length() > 0 && "raw-v2".equals(ep.optString("dlv", ""))) {
+                        plainArr[idx] = out;
+                        int f = finished.incrementAndGet();
+                        task.doneCount = f;
+                        task.detail = "复用已下载分集 " + f + "/" + n + "（并发 " + DL_CONCURRENCY + "）";
+                        return;
+                    }
+                    try {
+                        if ("hongguo".equals(task.source)) downloadHongguo(task, url, key, out, idx, dlBytes, totalBytes, n);
+                        else downloadPlain(task, url, out, dlBytes, totalBytes, n);
+                        ep.put("dlv", "raw-v2");   // 标记新格式（随任务持久化，重试时据此判定可复用）
+                        plainArr[idx] = out;
+                        int f = finished.incrementAndGet();
+                        task.doneCount = f;
+                        task.detail = "下载中 " + f + "/" + n + " 集完成（并发 " + DL_CONCURRENCY + "）";
+                    } catch (Exception e) {
+                        task.canceled = true;   // 一集失败 → 停掉其余并发集（保持"失败即停"语义）
+                        throw new RuntimeException(e);
+                    }
+                }));
             }
+            Exception firstErr = null;
+            for (Future<?> f : futures) {
+                try { f.get(); }
+                catch (Exception e) {
+                    if (firstErr == null) {
+                        Throwable cause = e.getCause() != null ? e.getCause() : e;
+                        firstErr = cause instanceof Exception ? (Exception) cause : new RuntimeException(cause);
+                    }
+                }
+            }
+            dl.shutdown();
+            if (task.canceled && firstErr == null) return;   // 用户取消：不合并
+            if (firstErr != null) throw firstErr;
+            List<File> plain = new ArrayList<>();
+            for (File f : plainArr) if (f != null) plain.add(f);
+            if (plain.size() != n) throw new java.io.IOException("部分分集下载失败（" + plain.size() + "/" + n + "）");
             if (task.canceled) return;
             // 优先合并成单个文件（v0.7.9 修复 ContainerFixer stco 后分集文件正确，MediaExtractor 可读到正确样本）；
             // 若合并仍失败（个别设备 MediaMuxer 兼容问题），自动回退为分集逐个导出，下载不白费。
             String subDir = task.title.replaceAll("[\\\\/:*?\"<>|]", "_");
             String displayName = task.title.replaceAll("[\\\\/:*?\"<>|]", "_") + ".mp4";
-            boolean mergedOk = false;
             try {
                 task.detail = "合并分集";
                 File merged = new File(dir, "merged.mp4");
-                if (plain.size() == 1) copyFile(plain.get(0), merged);
-                else mergeMp4(plain, merged, task);
+                if (plain.size() == 1) {
+                    // 单集也要 C 层规范化（解密+时间轴归零），不能直接复制密文分集
+                    List<String> k1 = new ArrayList<>();
+                    JSONObject ep0 = task.episodes.optJSONObject(0);
+                    k1.add(ep0 != null ? ep0.optString("key", "") : "");
+                    StringBuilder dbg = new StringBuilder();
+                    FFmpegConcat.concat(plain, k1, merged, "hev1", dbg, new File(context.getFilesDir(), "native.log"));
+                    task.debug = dbg.toString();
+                } else mergeMp4(plain, merged, task);
                 if (task.canceled) return;
                 task.percent = 97;
                 task.detail = "保存到手机";
@@ -240,8 +346,22 @@ final class DownloadManager {
                 task.output = publicUri != null ? publicUri.toString() : merged.getAbsolutePath();
                 mergedOk = true;
             } catch (Exception mergeErr) {
-                // 合并失败 → 记录原因，回退分集导出
-                task.error = "合并失败：" + (mergeErr.getMessage() == null ? mergeErr.getClass().getSimpleName() : mergeErr.getMessage());
+                // 合并失败 → 记录详细原因（阶段日志+异常+堆栈），回退分集导出
+                StringBuilder eb = new StringBuilder();
+                eb.append("合并失败：").append(mergeErr.getMessage() == null ? mergeErr.getClass().getSimpleName() : mergeErr.getMessage());
+                if (task.debug != null && !task.debug.isEmpty()) eb.append('\n').append(task.debug);
+                eb.append("\n异常类型: ").append(mergeErr.getClass().getName());
+                int stCnt = 0;
+                for (StackTraceElement st : mergeErr.getStackTrace()) {
+                    String cn = st.getClassName();
+                    if (cn.contains("gybeyond") || cn.contains("MediaMuxer") || cn.contains("MediaExtractor") || cn.contains("MediaCodec")) {
+                        eb.append("\n  at ").append(cn).append('.').append(st.getMethodName())
+                          .append('(').append(st.getFileName()).append(':').append(st.getLineNumber()).append(')');
+                        if (++stCnt >= 15) break;
+                    }
+                }
+                task.error = eb.toString();
+                task.debug = eb.toString();
                 StringBuilder outList = new StringBuilder();
                 for (int i = 0; i < plain.size(); i++) {
                     if (task.canceled) return;
@@ -253,44 +373,119 @@ final class DownloadManager {
                 task.output = outList.toString();
             }
             if (task.canceled) return;
-            task.status = "done"; task.percent = 100;
-            task.detail = mergedOk ? "完成（已合并）" : "完成（合并失败，已保存 " + plain.size() + " 集分集）";
+            if (mergedOk) {
+                task.status = "done"; task.percent = 100;
+                task.detail = "完成（已合并）";
+            } else {
+                // 合并失败：状态置 failed → 下载列表显示「重试」按钮（分集已导出保留，
+                // 点重试会复用已下载分集直接合并，无需重新下载）。
+                task.status = "failed"; task.percent = 100;
+                task.detail = "合并失败（已保存 " + plain.size() + " 集分集，可直接重试合并）";
+            }
         } catch (Exception e) {
             if (!task.canceled) { task.status = "failed"; task.error = e.getMessage() == null ? "下载失败" : e.getMessage(); task.detail = "失败"; }
         } finally {
             persist();
-            // 成功后删分集；失败删半成品
-            try { deleteRecursive(dir); } catch (Exception ignored) {}
-        }
-    }
-
-    private void downloadHongguo(Task task, String url, String keyHex, File out, int idx) throws Exception {
-        byte[] key = keyHex.isEmpty() ? null : hexDecode(keyHex);
-        File raw = new File(out.getParentFile(), out.getName() + ".raw");
-        try (RemoteVideo video = new RemoteVideo(http, new StreamInfo(url, key, "1080P"))) {
-            video.prepare();
-            long total = video.getTotal();
-            long pos = 0;
-            try (FileOutputStream fos = new FileOutputStream(raw)) {
-                while (pos < total) {
-                    if (task.canceled) return;
-                    long len = Math.min(512 * 1024, total - pos);
-                    byte[] chunk = video.read(pos, (int) len);
-                    if (chunk.length == 0) throw new java.io.IOException("视频流意外结束");
-                    fos.write(chunk);
-                    pos += chunk.length;
-                    task.percent = Math.min(90, (int) ((idx + (double) pos / total) * 90.0 / task.totalCount));
+            // 调试模式：保留已下载分集（ep*.mp4）与合并产物副本，供换版本后直接重新合并；
+            // 只清理合并失败残留的半成品（merged.mp4）与临时 concat 列表。
+            try {
+                File merged = new File(dir, "merged.mp4");
+                if (!mergedOk && merged.exists()) deleteRecursive(merged);
+                File[] kids = dir.listFiles();
+                if (kids != null) for (File f : kids) {
+                    if (f.isFile() && f.getName().startsWith("inputs_") && f.getName().endsWith(".ffconcat")) f.delete();
                 }
-            }
-        }
-        // RemoteVideo 输出的是明文数据，但容器头仍标 encv/senca 加密 → 修复为普通明文 MP4
-        if (!task.canceled) {
-            ContainerFixer.fix(raw, out);
-            if (!raw.delete()) raw.deleteOnExit();
+            } catch (Exception ignored) {}
         }
     }
 
-    private void downloadPlain(Task task, String url, File out, int idx) throws Exception {
+    private void downloadHongguo(Task task, String url, String keyHex, File out, int idx,
+                                 AtomicLong dlBytes, AtomicLong totalBytes, int n) throws Exception {
+        // 与后端 1:1：直接下载原始分集（CENC 密文或明文），解密+重封装统一放到合并阶段由
+        // ffmpeg -decryption_key 原生处理（等价后端 downloader.js：下载密文 → ffmpeg 解密重封装）。
+        // 彻底绕开 MediaExtractor+MediaMuxer 重封装——它会把源 CFR 时间戳弄成 VFR（MPV 卡顿根因）。
+        downloadPlain(task, url, out, dlBytes, totalBytes, n);
+    }
+
+    /** 整体下载进度：已下载字节 / 已探测到的总字节（各集下载线程各自累计，90% 封顶，合并阶段再走 90-99）。 */
+    private static void updateDownloadProgress(Task task, AtomicLong dlBytes, AtomicLong totalBytes) {
+        long tb = totalBytes.get();
+        if (tb <= 0) return;
+        int p = Math.min(90, (int) (dlBytes.get() * 90.0 / tb));
+        if (p > task.percent) task.percent = p;   // 只升不降（总字节渐进探知时避免百分比回跳）
+    }
+
+    /** 等价后端 ffmpeg -decryption_key -i <raw> -c copy -f mp4 <out>：把解密产物完整重新封装为标准明文 MP4。
+     *  MediaExtractor 读样本 → MediaMuxer 重写（stco/stsz/stss/mdhd 全部由 muxer 正确生成）。
+     *  处理 avc3/hev1 缺 csd（流式扫描首关键帧提取 SPS/PPS，HEVC 含 VPS）；
+     *  音视频保留源内相对偏移（统一基准 = min(首视频PTS, 首音频PTS)，与后端 concat 行为一致）。
+     *  流式两遍（首遍定位/提取，第二遍写），不整集驻留内存。 */
+    private static void normalizeEpisode(File in, File out) throws Exception {
+        MediaExtractor ex = new MediaExtractor();
+        ex.setDataSource(in.getAbsolutePath());
+        int vIdx = -1, aIdx = -1;
+        for (int t = 0; t < ex.getTrackCount(); t++) {
+            String mime = ex.getTrackFormat(t).getString(MediaFormat.KEY_MIME);
+            if (mime != null && mime.startsWith("video/")) vIdx = t;
+            else if (mime != null && mime.startsWith("audio/")) aIdx = t;
+        }
+        if (vIdx < 0) throw new java.io.IOException("分集没有视频轨道");
+        MediaFormat vf = ex.getTrackFormat(vIdx);
+        MediaFormat af = aIdx >= 0 ? ex.getTrackFormat(aIdx) : null;
+        ex.release();
+        String vmime = vf.getString(MediaFormat.KEY_MIME);
+        // 1) avc3/hev1 缺 csd：流式扫描首个关键帧，提取 SPS/PPS（HEVC 含 VPS）
+        if (!vf.containsKey("csd-0")) {
+            boolean hevc = vmime != null && vmime.startsWith("video/hevc");
+            List<byte[]> nal = null;
+            MediaExtractor se = new MediaExtractor();
+            try {
+                se.setDataSource(in.getAbsolutePath());
+                se.selectTrack(vIdx);
+                while (se.advance()) {
+                    if ((se.getSampleFlags() & MediaCodec.BUFFER_FLAG_KEY_FRAME) == 0) continue;
+                    long sz = se.getSampleSize();
+                    if (sz <= 0 || sz > 4 * 1024 * 1024) continue;
+                    ByteBuffer bb = ByteBuffer.allocate((int) sz);
+                    int n = se.readSampleData(bb, 0);
+                    if (n <= 0) continue;
+                    bb.position(0); bb.limit(n);
+                    List<byte[]> p = extractParameterSets(bb, hevc);
+                    if (!p.isEmpty()) { nal = p; break; }
+                }
+            } finally { se.release(); }
+            if (nal == null) throw new java.io.IOException("无法提取视频参数集(csd)");
+            int total = 0; for (byte[] b : nal) total += b.length;
+            ByteBuffer csd = ByteBuffer.allocate(total);
+            for (byte[] b : nal) csd.put(b);
+            csd.position(0);
+            vf.setByteBuffer("csd-0", csd);
+        }
+        // 2) 音视频各自归零基准（等价后端 ffmpeg -c copy 输出从 0 起），并交错写入
+        long vFirst = Math.max(0, firstSamplePts(in, vIdx));
+        long aFirst = af != null ? Math.max(0, firstSamplePts(in, aIdx)) : vFirst;
+        // 3) 流式重写
+        MediaMuxer muxer = new MediaMuxer(out.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+        try {
+            int vt = muxer.addTrack(vf);
+            int at = af != null ? muxer.addTrack(af) : -1;
+            muxer.start();
+            writeInterleavedStream(in, vIdx, aIdx, muxer, vt, at, vFirst, aFirst);
+            muxer.stop();
+        } finally { muxer.release(); }
+    }
+
+    private static long firstSamplePts(File file, int track) throws Exception {
+        MediaExtractor ex = new MediaExtractor();
+        try {
+            ex.setDataSource(file.getAbsolutePath());
+            ex.selectTrack(track);
+            return ex.advance() ? ex.getSampleTime() : -1;
+        } finally { ex.release(); }
+    }
+
+    /** 整轨流式写入（解码序，PTS 单调化），等价 mergeMp4 的 writeSamples 但按文件边读边写。 */
+    private void downloadPlain(Task task, String url, File out, AtomicLong dlBytes, AtomicLong totalBytes, int n) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setConnectTimeout(15_000);
         conn.setReadTimeout(60_000);
@@ -299,14 +494,16 @@ final class DownloadManager {
             int code = conn.getResponseCode();
             if (code != 200) throw new java.io.IOException("下载失败 HTTP " + code);
             long total = conn.getContentLengthLong();
+            totalBytes.addAndGet(Math.max(total, 0));
             try (InputStream in = conn.getInputStream(); FileOutputStream fos = new FileOutputStream(out)) {
                 byte[] buffer = new byte[128 * 1024];
-                int n; long received = 0;
-                while ((n = in.read(buffer)) > 0) {
+                int k; long received = 0;
+                while ((k = in.read(buffer)) > 0) {
                     if (task.canceled) return;
-                    fos.write(buffer, 0, n);
-                    received += n;
-                    if (total > 0) task.percent = Math.min(90, (int) ((idx + (double) received / total) * 90.0 / task.totalCount));
+                    fos.write(buffer, 0, k);
+                    received += k;
+                    dlBytes.addAndGet(k);
+                    updateDownloadProgress(task, dlBytes, totalBytes);
                 }
             }
         } finally { conn.disconnect(); }
@@ -335,29 +532,155 @@ final class DownloadManager {
             long pts = ex.getSampleTime();
             long size = ex.getSampleSize();
             long flags = ex.getSampleFlags();
+            if (size <= 0) continue;
             ByteBuffer buf = ByteBuffer.allocate((int) size);
             int n = ex.readSampleData(buf, 0);
+            if (n <= 0) continue;   // 读取失败的样本直接跳过，绝不把垃圾数据交给 muxer
             buf.position(0);
-            buf.limit(n < 0 ? buf.capacity() : n);
-            out.add(new Sample(pts, n < 0 ? size : n, flags, buf));
+            buf.limit(n);
+            out.add(new Sample(pts, n, flags, buf));
         }
         try { ex.release(); } catch (Exception ignored) {}
         return out;
     }
 
+    /** 单样本写入 muxer（复用 BufferInfo）。 */
+    private static void writeSample(MediaMuxer muxer, int track, long t, long size, long flags, ByteBuffer data, MediaCodec.BufferInfo info) {
+        ByteBuffer buffer = data.duplicate();
+        info.offset = 0;
+        info.size = (int) size;
+        info.presentationTimeUs = t;
+        info.flags = (int) flags;
+        muxer.writeSampleData(track, buffer, info);
+    }
+
+    /** 音视频按写入时间交错归并（等价 ffmpeg 输出交错，mdat 内视频/音频块交替排布，seek 友好）。
+     *  视频轨保持解码序（列表顺序）不被归并打乱，仅决定与音频的穿插；
+     *  音频按 aMaxRel 截断（相对 aBase，对齐视频时长）；传 -1 不截断。
+     *  返回 {视频maxT, 音频maxT}（相对各自 offset）。 */
+    private static long[] writeInterleaved(MediaMuxer muxer, int vTrack, int aTrack,
+            List<Sample> vSamples, List<Sample> aSamples,
+            long vBase, long vOffset, long aBase, long aOffset,
+            long[] vLastRef, long[] aLastRef, long aMaxRel) {
+        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+        long lastV = vLastRef[0], lastA = aLastRef[0], maxV = 0, maxA = 0;
+        int vi = 0, ai = 0;
+        while (vi < vSamples.size() || ai < aSamples.size()) {
+            boolean takeV;
+            if (vi >= vSamples.size()) takeV = false;
+            else if (ai >= aSamples.size()) takeV = true;
+            else {
+                long vT = vSamples.get(vi).pts - vBase + vOffset; if (vT < 0) vT = 0; if (vT <= lastV) vT = lastV + 1;
+                long aT = aSamples.get(ai).pts - aBase + aOffset; if (aT < 0) aT = 0; if (aT <= lastA) aT = lastA + 1;
+                takeV = vT <= aT;
+            }
+            if (takeV) {
+                Sample s = vSamples.get(vi++);
+                long t = s.pts - vBase + vOffset;
+                if (t < 0) t = 0;
+                if (t <= lastV) t = lastV + 1;
+                lastV = t; if (t > maxV) maxV = t;
+                writeSample(muxer, vTrack, t, s.size, s.flags, s.data, info);
+            } else {
+                Sample s = aSamples.get(ai++);
+                long rel = s.pts - aBase;
+                if (aMaxRel >= 0 && rel > aMaxRel) continue;
+                long t = rel + aOffset;
+                if (t < 0) t = 0;
+                if (t <= lastA) t = lastA + 1;
+                lastA = t; if (t > maxA) maxA = t;
+                writeSample(muxer, aTrack, t, s.size, s.flags, s.data, info);
+            }
+        }
+        vLastRef[0] = lastV; aLastRef[0] = lastA;
+        return new long[]{maxV, maxA};
+    }
+
+    /** 流式单轨游标（归并用）：按解码序推进，PTS 单调化，保留当前样本供比较。
+     *  注意：构造时必须 selectTrack——MediaExtractor 默认读轨道 0，红果分集第 0 轨常为音频，
+     *  不选轨会把音频样本当成视频样本读，导致产物视频轨为空（合并报"分集没有视频轨道"）。 */
+    private static final class Cursor {
+        final MediaExtractor ex;
+        final long base;
+        final int muxTrack;
+        long t, size, flags;
+        ByteBuffer buffer;
+        ByteBuffer reusable;
+        boolean eof;
+        private long lastT = Long.MIN_VALUE;
+        Cursor(MediaExtractor ex, int track, long base, int muxTrack) {
+            this.ex = ex; this.base = base; this.muxTrack = muxTrack;
+            ex.selectTrack(track);
+        }
+        void advance() throws java.io.IOException {
+            if (eof) return;
+            while (ex.advance()) {
+                long sz = ex.getSampleSize();
+                if (sz <= 0) continue;
+                if (reusable == null || reusable.capacity() < sz) reusable = ByteBuffer.allocate((int) Math.max(sz, 1 << 18));   // 复用缓冲，避免每样本 allocate
+                reusable.clear();
+                int n = ex.readSampleData(reusable, 0);
+                if (n <= 0) continue;
+                reusable.position(0); reusable.limit(n);
+                long tt = ex.getSampleTime() - base;
+                if (tt < 0) tt = 0;
+                if (tt <= lastT) tt = lastT + 1;
+                lastT = tt;
+                this.t = tt; this.size = n; this.flags = ex.getSampleFlags(); this.buffer = reusable;
+                return;
+            }
+            eof = true;
+        }
+    }
+
+    /** 音视频各自归零基准 + 按时间交错写入（流式版，normalizeEpisode 用）。
+     *  等价 ffmpeg -c copy 单集输出：视频从 0 起、音频从 0 起、mdat 交错。 */
+    private static void writeInterleavedStream(File file, int vTrack, int aTrack, MediaMuxer muxer,
+            int vMux, int aMux, long vBase, long aBase) throws Exception {
+        MediaExtractor vx = new MediaExtractor();
+        vx.setDataSource(file.getAbsolutePath());
+        Cursor vc = new Cursor(vx, vTrack, vBase, vMux);
+        vc.advance();
+        Cursor ac = null;
+        if (aTrack >= 0) {
+            MediaExtractor ax = new MediaExtractor();
+            ax.setDataSource(file.getAbsolutePath());
+            ac = new Cursor(ax, aTrack, aBase, aMux);
+            ac.advance();
+        }
+        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+        while (!vc.eof || (ac != null && !ac.eof)) {
+            boolean takeV;
+            if (vc.eof) takeV = false;
+            else if (ac == null || ac.eof) takeV = true;
+            else takeV = vc.t <= ac.t;
+            Cursor c = takeV ? vc : ac;
+            writeSample(muxer, c.muxTrack, c.t, c.size, c.flags, c.buffer, info);
+            c.advance();
+        }
+        try { vx.release(); } catch (Exception ignored) {}
+    }
+
     /** 按解码序整轨写入样本，返回本轨最大 PTS（相对 offset）。
      *  H.264 含 B 帧时解码序的 PTS 会摆动（B 帧 PTS < 相邻 P 帧），部分设备 MediaMuxer 要求时间戳单调，
      *  直接写会抛 writeSampleData returned an error。做法：物理顺序保持解码序，只把回退的时间戳
-     *  单调化（抬到不早于前一样本）——解码引用顺序不受影响（画面正常），B 帧呈现仅滞后 1µs（无感知）。 */
-    private static long writeSamples(MediaMuxer muxer, int track, List<Sample> samples, long base, long offset) {
+     *  单调化（抬到不早于前一样本）——解码引用顺序不受影响（画面正常），B 帧呈现仅滞后 1µs（无感知）。
+     *  lastTRef[0] 为跨集持久的上一样本时间戳（每轨独立），保证多集合并时时间戳绝对单调。
+     *  maxRel 为本集相对时长上限（相对 base）；样本相对时间超过上限直接跳过——用于音频按视频时长
+     *  截断，与后端转码 `-t 视频时长` 对齐：红果每集视频轨比音频轨短（视频首样本 PTS≈533333µs、音频≈0），
+     *  若音频不截断，音视频轨时长差会逐集累积，合并产物 seek 后音画错位（画面快进追赶、声音乱码）。
+     *  传 -1 表示不截断（视频轨）。 */
+    private static long writeSamples(MediaMuxer muxer, int track, List<Sample> samples, long base, long offset, long[] lastTRef, long maxRel) {
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-        long lastT = Long.MIN_VALUE;
+        long lastT = lastTRef[0];
         long maxT = 0;
         for (Sample s : samples) {
+            long rel = s.pts - base;
+            if (maxRel >= 0 && rel > maxRel) continue;   // 截断（音频对齐视频时长）
             ByteBuffer buffer = s.data.duplicate();
             info.offset = 0;
             info.size = (int) s.size;
-            long t = s.pts - base + offset;
+            long t = rel + offset;
             if (t < 0) t = 0;
             if (t <= lastT) t = lastT + 1;   // PTS 单调化（解码序保持，仅修正回退）
             info.presentationTimeUs = t;
@@ -366,61 +689,183 @@ final class DownloadManager {
             lastT = t;
             if (t > maxT) maxT = t;
         }
+        lastTRef[0] = lastT;
         return maxT;
     }
 
     private void mergeMp4(List<File> inputs, File output, Task task) throws Exception {
-        MediaMuxer muxer = null;
-        int videoTrack = -1, audioTrack = -1;
-        long videoTotal = 0, audioTotal = 0;
+        StringBuilder debug = new StringBuilder("合并详细日志\n分集数=").append(inputs.size()).append('\n');
+        String stage = "初始化";
         try {
+            // 0 集保护：分集列表为空（如旧版本任务未持久化 episodes 被重试）直接报明确错误，不进 concat（避免 native 层异常/闪退）
+            if (inputs == null || inputs.isEmpty()) {
+                throw new java.io.IOException("分集数=0，无法合并。若为重试旧任务：其分集列表未持久化，请删除该任务后重新下载");
+            }
+            // 探测各集视频编码（majority 判定 → avc3/hev1）与可读性（等价后端 buildPlan 的 majorityKey）
+            int hevc = 0, h264 = 0, bad = 0;
             for (int i = 0; i < inputs.size(); i++) {
                 if (task.canceled) return;
-                task.detail = "合并中 " + (i + 1) + "/" + inputs.size();
-                task.percent = 90 + (int) ((i + 1) * 9.0 / inputs.size());
-                MediaExtractor vx = new MediaExtractor(), ax = new MediaExtractor();
-                vx.setDataSource(inputs.get(i).getAbsolutePath());
-                ax.setDataSource(inputs.get(i).getAbsolutePath());
-                int vIdx = -1, aIdx = -1;
-                for (int t = 0; t < vx.getTrackCount(); t++) {
-                    String mime = vx.getTrackFormat(t).getString(MediaFormat.KEY_MIME);
-                    if (mime != null && mime.startsWith("video/")) vIdx = t;
-                    else if (mime != null && mime.startsWith("audio/")) aIdx = t;
-                }
-                if (vIdx < 0) throw new java.io.IOException("分集没有视频轨道");
-                MediaFormat vf = vx.getTrackFormat(vIdx);
-                MediaFormat af = null;
-                if (aIdx >= 0) af = ax.getTrackFormat(aIdx);
-                if (i == 0) {
-                    muxer = new MediaMuxer(output.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
-                    videoTrack = muxer.addTrack(vf);
-                    if (af != null) audioTrack = muxer.addTrack(af);
-                    muxer.start();
-                }
-                // 后续集定位到关键帧后完整收集；base 取收集到的第一个样本 PTS（避免 seekTo 后 getSampleTime 语义不确定）
-                if (i > 0) { vx.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC); }
-                if (aIdx >= 0 && i > 0) { ax.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC); }
-                List<Sample> vSamples = collectSamples(vx, vIdx);
-                List<Sample> aSamples = aIdx >= 0 ? collectSamples(ax, aIdx) : null;
-                if (vSamples.isEmpty()) throw new java.io.IOException("分集没有可读样本");
-                long vBase = Math.max(0, vSamples.get(0).pts);
-                long aBase = (aSamples == null || aSamples.isEmpty()) ? 0 : Math.max(0, aSamples.get(0).pts);
-                // 先整轨写视频（解码序），再整轨写音频。
-                // 注意：writeSamples 返回的是含 offset 的绝对最大时间戳，天然跨集连续，
-                // 累计必须用「=」而不是「+=」（+= 会把上一集总时长再叠加一次 → 每集翻倍 → 59:39:08 虚增根因）
-                long vEnd = writeSamples(muxer, videoTrack, vSamples, vBase, videoTotal);
-                videoTotal = vEnd;
-                if (task.canceled) return;
-                if (aSamples != null && !aSamples.isEmpty()) {
-                    long aEnd = writeSamples(muxer, audioTrack, aSamples, aBase, audioTotal);
-                    audioTotal = aEnd;
-                }
-                if (task.canceled) return;
+                stage = "检测第" + (i + 1) + "集编码";
+                MediaExtractor ex = new MediaExtractor();
+                try {
+                    ex.setDataSource(inputs.get(i).getAbsolutePath());
+                    String vmime = null;
+                    for (int t = 0; t < ex.getTrackCount(); t++) {
+                        String mime = ex.getTrackFormat(t).getString(MediaFormat.KEY_MIME);
+                        if (mime != null && mime.startsWith("video/")) { vmime = mime; break; }
+                    }
+                    if (vmime == null) { bad++; debug.append("第").append(i + 1).append("集: 无视频轨道\n"); }
+                    else {
+                        if (vmime.startsWith("video/hevc")) hevc++;
+                        else if (vmime.startsWith("video/avc")) h264++;
+                        debug.append("第").append(i + 1).append("集: 视频mime=").append(vmime).append('\n');
+                    }
+                } catch (Exception e) {
+                    // CENC 密文文件部分设备 MediaExtractor 读不了 → 容错（C 层规范化会逐个复检并解密），
+                    // 不中断合并；tag 判定由 C 层 majority 兜底
+                    debug.append("第").append(i + 1).append("集探测失败(容错，C层将解密复检): ").append(e.getMessage()).append('\n');
+                } finally { try { ex.release(); } catch (Exception ignored) {} }
             }
-            if (muxer != null) muxer.stop();
-        } finally {
-            if (muxer != null) { try { muxer.release(); } catch (Exception ignored) {} }
+            if (bad > 0) throw new java.io.IOException("有 " + bad + " 集无视频轨道");
+
+            // ffmpeg concat（自写 NDK JNI，直调 C API）：与后端 server/downloader.js 合并命令 1:1
+            // （下载密文 → C 层 ffmpeg -decryption_key 原生解密重封装 → concat：
+            //   -f concat -safe 0 -c copy + -video_track_timescale + -movflags +faststart
+            //   + -tag:v avc3/hev1 in-band SPS/PPS：播放器 seek 任何段按帧内参数解码，杜绝快进花屏/乱码）
+            String tag = h264 >= hevc ? "avc3" : "hev1";   // majority 编码（红果短剧一般为 HEVC → hev1）
+            List<String> keys = new ArrayList<>();
+            for (int i = 0; i < inputs.size(); i++) {
+                JSONObject ep = task.episodes.optJSONObject(i);
+                keys.add(ep != null ? ep.optString("key", "") : "");
+            }
+            stage = "运行 ffmpeg concat 合并";
+            File nativeLog = new File(context.getFilesDir(), "native.log");
+            FFmpegConcat.concat(inputs, keys, output, tag, debug, nativeLog);
+            stage = "完成";
+            debug.append("完成: 产物=").append(output.length() / 1048576).append("MB tag=").append(tag).append('\n');
+            task.debug = debug.toString();
+        } catch (Exception e) {
+            debug.append("失败阶段: ").append(stage).append('\n');
+            debug.append("异常: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append('\n');
+            task.debug = debug.toString();
+            throw e;
         }
+    }
+
+    /** 把产物视频轨 sample entry 标签 avc1→avc3、hvc1→hev1（in-band 参数集，等价后端 concat 的 -tag:v avc3/hev1）。
+     *  MediaMuxer 强制要求 csd 且默认写 avc1/hvc1，但样本数据仍保留源（avc3/hev1）内联的 SPS/PPS/VPS，
+     *  改标签后播放器即按帧内参数集解码：seek 到任何集都用该集自己的参数集，杜绝快进花屏/乱码。
+     *  只改 stsd 内的 4 字节标签；moov 在文件末尾（MediaMuxer 无 faststart），读尾部定位足够。 */
+    private static void patchInbandTag(File file) throws Exception {
+        java.io.RandomAccessFile raf = new java.io.RandomAccessFile(file, "rw");
+        try {
+            long len = raf.length();
+            long tailSize = Math.min(len, 8L << 20);   // 尾部 8MB（12 集 moov 约 1-2MB）
+            long start = len - tailSize;
+            byte[] tail = new byte[(int) tailSize];
+            raf.seek(start);
+            raf.readFully(tail);
+            boolean changed = false;
+            for (int i = 0; i + 4 <= tail.length; i++) {
+                if (tail[i] == 'a' && tail[i + 1] == 'v' && tail[i + 2] == 'c' && tail[i + 3] == '1') {
+                    tail[i + 3] = '3'; changed = true;                 // avc1 → avc3
+                } else if (tail[i] == 'h' && tail[i + 1] == 'v' && tail[i + 2] == 'c' && tail[i + 3] == '1') {
+                    tail[i + 1] = 'e'; tail[i + 2] = 'v'; changed = true;   // hvc1 → hev1
+                }
+            }
+            if (changed) { raf.seek(start); raf.write(tail); }
+        } finally { raf.close(); }
+    }
+
+    /** 若 format 缺 csd（avc3/hev1 内联参数集场景），从首个关键帧样本提取 SPS/PPS（HEVC 另含 VPS）注入 csd-0。
+     *  返回 true=已有 csd 或注入成功；false=未注入（缺 csd 且提取失败）。 */
+    private static boolean ensureCodecSpecificData(MediaFormat format, List<Sample> samples, String mime) {
+        try {
+            if (format == null || samples == null || samples.isEmpty()) return false;
+            if (format.containsKey("csd-0")) return true;   // moov 自带 avcC（avc1 等），无需注入
+            boolean hevc = mime != null && mime.startsWith("video/hevc");
+            int[] want = hevc ? new int[]{32, 33, 34} : new int[]{7, 8};   // hevc: VPS/SPS/PPS；h264: SPS/PPS
+            for (Sample s : samples) {
+                if ((s.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) == 0) continue;
+                List<byte[]> nal = extractParameterSets(s.data, hevc);
+                if (nal.isEmpty()) continue;
+                int total = 0;
+                for (byte[] n : nal) total += n.length;
+                ByteBuffer csd = ByteBuffer.allocate(total);
+                for (byte[] n : nal) csd.put(n);
+                csd.position(0);
+                format.setByteBuffer("csd-0", csd);
+                return true;
+            }
+            return false;   // 缺 csd 且关键帧内未提取到参数集
+        } catch (Exception ignored) {
+            // 提取失败不阻断合并（可能仍有其它设备可写），保留原 format
+            return false;
+        }
+    }
+
+    /** 扫描样本字节，按 H.264/HEVC 的 NAL 起始码切分，返回按序的 SPS/PPS（HEVC 含 VPS），数据不含起始码。
+     *  兼容两种样本布局：AnnexB（00 00 01 起始码）与 AVCC length-prefixed（4 字节大端长度）。 */
+    private static List<byte[]> extractParameterSets(ByteBuffer sample, boolean hevc) {
+        List<byte[]> out = new ArrayList<>();
+        byte[] d = new byte[sample.remaining()];
+        sample.duplicate().get(d);
+        int n = d.length;
+        if (n < 5) return out;
+        int[] found = new int[]{0, 0, 0};   // [vps, sps, pps]
+        boolean annexb = false;
+        // 判断首 NAL 分隔方式：00 00 01 / 00 00 00 01 → AnnexB；否则尝试 AVCC 长度前缀
+        int b0 = d[0] & 0xFF, b1 = d[1] & 0xFF, b2 = d[2] & 0xFF, b3 = d[3] & 0xFF;
+        if (b0 == 0 && b1 == 0 && (b2 == 1 || (b2 == 0 && b3 == 1))) annexb = true;
+        if (annexb) {
+            int i = 0;
+            while (i < n - 4) {
+                int start = -1;
+                if ((d[i] & 0xFF) == 0 && (d[i + 1] & 0xFF) == 0) {
+                    if ((d[i + 2] & 0xFF) == 1) start = i + 3;
+                    else if ((d[i + 2] & 0xFF) == 0 && (d[i + 3] & 0xFF) == 1) start = i + 4;
+                }
+                if (start < 0) { i++; continue; }
+                int end = -1;
+                for (int j = start; j < n - 3; j++) {
+                    if ((d[j] & 0xFF) == 0 && (d[j + 1] & 0xFF) == 0) {
+                        if ((d[j + 2] & 0xFF) == 1) { end = j; break; }
+                        if ((d[j + 2] & 0xFF) == 0 && (d[j + 3] & 0xFF) == 1) { end = j; break; }
+                    }
+                }
+                int nalEnd = end < 0 ? n : end;
+                if (start < nalEnd) {
+                    int type = hevc ? ((d[start] & 0xFF) >> 1) & 0x3F : (d[start] & 0xFF) & 0x1F;
+                    int idx = hevc ? (type == 32 ? 0 : type == 33 ? 1 : type == 34 ? 2 : -1)
+                                   : (type == 7 ? 1 : type == 8 ? 2 : -1);
+                    if (idx >= 0 && found[idx] == 0) {
+                        found[idx] = 1;
+                        out.add(java.util.Arrays.copyOfRange(d, start, nalEnd));
+                    }
+                }
+                if (end < 0) break;
+                i = end;
+            }
+        } else {
+            // AVCC length-prefixed：4 字节大端长度 + NAL 数据，循环跳过
+            int i = 0;
+            while (i + 4 <= n) {
+                int len = ((d[i] & 0xFF) << 24) | ((d[i + 1] & 0xFF) << 16)
+                        | ((d[i + 2] & 0xFF) << 8) | (d[i + 3] & 0xFF);
+                if (len <= 0 || i + 4 + len > n) break;
+                int start = i + 4;
+                int nalEnd = start + len;
+                int type = hevc ? ((d[start] & 0xFF) >> 1) & 0x3F : (d[start] & 0xFF) & 0x1F;
+                int idx = hevc ? (type == 32 ? 0 : type == 33 ? 1 : type == 34 ? 2 : -1)
+                               : (type == 7 ? 1 : type == 8 ? 2 : -1);
+                if (idx >= 0 && found[idx] == 0) {
+                    found[idx] = 1;
+                    out.add(java.util.Arrays.copyOfRange(d, start, nalEnd));
+                }
+                i += 4 + len;
+            }
+        }
+        return out;
     }
 
     // ---- 导出到公共 Download（MediaStore，API 29+；旧版回退 app 专属目录）----
@@ -477,5 +922,138 @@ final class DownloadManager {
         byte[] data = new byte[s.length() / 2];
         for (int i = 0; i < data.length; i++) data[i] = (byte) Integer.parseInt(s.substring(i * 2, i * 2 + 2), 16);
         return data;
+    }
+
+    /** 音频转码管线：LATM(HE-AAC) → AAC-LC（与后端 server/downloader.js 的 juku 方案一致）。
+     *  红果分集音频为 audio/mp4a-latm（HE-AAC，含 SBR/PS），MediaMuxer 直写 LATM 后系统播放器
+     *  在快进/seek 时因采样率/声道动态切换而声音乱码；统一转成 AAC-LC（aac_low/192k）后 seek 稳定。
+     *  流程：MediaCodec 解码器 → PCM → MediaCodec AAC 编码器 → 直接写 MediaMuxer（不落盘）。
+     *  每集一个实例（各集 srcFormat 独立），轨道 csd 由第 1 集 pumpConfig() 产出并在 addTrack 前注入。 */
+    private static final class AudioTranscoder {
+        final MediaCodec dec, enc;
+        final List<Sample> samples;
+        final long[] lastRef;
+        int si = 0;
+        boolean decEos = false, encEos = false;
+        final ByteBuffer[] decIn, decOut, encIn, encOut;
+        final MediaCodec.BufferInfo decInfo = new MediaCodec.BufferInfo();
+        final MediaCodec.BufferInfo encInfo = new MediaCodec.BufferInfo();
+        final int srcSr, srcCh;
+
+        AudioTranscoder(MediaFormat srcFmt, List<Sample> sampleList, long[] lastTRef) throws Exception {
+            String mime = srcFmt.getString(MediaFormat.KEY_MIME);
+            srcSr = srcFmt.containsKey(MediaFormat.KEY_SAMPLE_RATE) ? srcFmt.getInteger(MediaFormat.KEY_SAMPLE_RATE) : 48000;
+            srcCh = srcFmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT) ? srcFmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT) : 2;
+            dec = MediaCodec.createDecoderByType(mime);
+            dec.configure(srcFmt, null, null, 0);
+            dec.start();
+            enc = MediaCodec.createEncoderByType("audio/mp4a-latm");
+            MediaFormat e = MediaFormat.createAudioFormat("audio/mp4a-latm", srcSr, srcCh);
+            e.setInteger(MediaFormat.KEY_BIT_RATE, 192000);
+            e.setInteger("aac-profile", 2);            // AAC-LC（KEY_AAC_PROFILE 常量高 SDK 才有，用字面量）
+            e.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 65536);
+            enc.configure(e, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+            enc.start();
+            samples = sampleList;
+            lastRef = lastTRef;
+            decIn = dec.getInputBuffers(); decOut = dec.getOutputBuffers();
+            encIn = enc.getInputBuffers(); encOut = enc.getOutputBuffers();
+        }
+
+        /** 泵送直到拿到编码器的 codec-config（含 csd-0），返回该 format（用于 addTrack）；失败返回 null。 */
+        MediaFormat pumpConfig() throws Exception {
+            int spin = 0;
+            while (spin++ < 4000) {
+                feedDecoder();
+                if (pipeDecoderToEncoder()) {
+                    int eOut = enc.dequeueOutputBuffer(encInfo, 0);
+                    if (eOut >= 0) {
+                        if ((encInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                            MediaFormat f = enc.getOutputFormat();
+                            enc.releaseOutputBuffer(eOut, false);
+                            return f;
+                        }
+                        enc.releaseOutputBuffer(eOut, false);   // 数据帧暂不入 muxer，等轨道注册后再写（队列保留后续帧）
+                    }
+                }
+                if (decEos && si >= samples.size()) break;
+            }
+            return null;
+        }
+
+        /** 泵完剩余全部音频帧，收集为已绝对化 PTS 的样本列表（供与视频交错写入，等价后端转码输出交错）。
+         *  自动跳过 codec-config 帧；maxRel 为本集相对时长上限（相对 base）：超过直接丢弃（音频按视频时长截断，对齐后端 -t）。
+         *  注意：返回列表的 Sample.pts 已是绝对写入时间（含 offset），归并写入时按 aBase=0/aOffset=0 处理。 */
+        List<Sample> pumpAllCollect(long base, long offset, long maxRel) throws Exception {
+            List<Sample> out = new ArrayList<>();
+            int spin = 0;
+            while (!encEos && spin++ < 2000000) {
+                feedDecoder();
+                pipeDecoderToEncoder();
+                int eOut = enc.dequeueOutputBuffer(encInfo, 0);
+                if (eOut < 0) continue;
+                if ((encInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) { enc.releaseOutputBuffer(eOut, false); continue; }
+                long rel = encInfo.presentationTimeUs - base;
+                if (maxRel >= 0 && rel > maxRel) { enc.releaseOutputBuffer(eOut, false); continue; }   // 截断
+                long t = rel + offset;
+                if (t < 0) t = 0;
+                if (t <= lastRef[0]) t = lastRef[0] + 1;   // 跨集绝对单调（与 writeSamples 一致）
+                lastRef[0] = t;
+                ByteBuffer outBuf = encOut[eOut];
+                outBuf.position(encInfo.offset);
+                outBuf.limit(encInfo.offset + encInfo.size);
+                ByteBuffer copy = ByteBuffer.allocate(encInfo.size);
+                copy.put(outBuf);
+                copy.flip();
+                out.add(new Sample(t, encInfo.size, encInfo.flags, copy));
+                enc.releaseOutputBuffer(eOut, false);
+                if ((encInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) encEos = true;
+            }
+            if (!encEos && !out.isEmpty()) return out;   // 编码器 EOS 偶发丢失/延迟（解码端 EOS 帧被丢）：用已收集音频，避免整次合并失败
+            if (!encEos) throw new java.io.IOException("音频转码未正常结束");
+            return out;
+        }
+
+        private void feedDecoder() throws Exception {
+            int inIdx = dec.dequeueInputBuffer(0);
+            if (inIdx < 0) return;
+            if (si < samples.size()) {
+                Sample s = samples.get(si++);
+                ByteBuffer b = decIn[inIdx];
+                b.clear();
+                if (s.size > b.capacity()) throw new java.io.IOException("音频样本超过解码器输入容量: " + s.size);
+                s.data.duplicate().get(b.array(), 0, (int) s.size);
+                dec.queueInputBuffer(inIdx, 0, (int) s.size, s.pts, (int) s.flags);
+            } else if (!decEos) {
+                decEos = true;
+                dec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+            }
+        }
+
+        /** 解码器输出 → 编码器输入；返回是否有可继续取的编码器输出。 */
+        private boolean pipeDecoderToEncoder() throws Exception {
+            int outIdx = dec.dequeueOutputBuffer(decInfo, 0);
+            if (outIdx < 0) return true;
+            if ((decInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) { dec.releaseOutputBuffer(outIdx, false); return true; }
+            int eIn = enc.dequeueInputBuffer(0);
+            if (eIn < 0) { dec.releaseOutputBuffer(outIdx, false); return true; }
+            ByteBuffer src = decOut[outIdx];
+            src.position(decInfo.offset);
+            src.limit(decInfo.offset + decInfo.size);
+            ByteBuffer dst = encIn[eIn];
+            dst.clear();
+            dst.put(src);
+            enc.queueInputBuffer(eIn, 0, decInfo.size, decInfo.presentationTimeUs, decInfo.flags);
+            dec.releaseOutputBuffer(outIdx, false);
+            if ((decInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) decEos = true;
+            return true;
+        }
+
+        void release() {
+            try { enc.stop(); } catch (Exception ignored) {}
+            try { dec.stop(); } catch (Exception ignored) {}
+            try { enc.release(); } catch (Exception ignored) {}
+            try { dec.release(); } catch (Exception ignored) {}
+        }
     }
 }

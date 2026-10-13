@@ -799,12 +799,27 @@ async function renderLibraryDownloads() {
   if (state.route !== 'library' || state.libraryTab !== 'downloads' || token !== libraryDownloadsToken) return;
   const list = document.getElementById('library-downloads');
   if (!list) return;
-  const running = [...phone, ...nas].some(task => task.status === 'running');
-  stopDownloadsTimer();
-  if (running) downloadsTimer = setInterval(() => renderLibraryDownloads(), 2000);
+  syncDownloadsTimer([...phone, ...nas]);
   const phoneTasks = phone.map(t => Object.assign({}, t, { kind: 'phone' }));
   const nasTasks = nas.map(t => Object.assign({}, t, { kind: 'nas' }));
   list.innerHTML = renderDownloadList([...phoneTasks, ...nasTasks]);
+}
+
+// 下载任务是否仍在进行（手机端 running；NAS 端 queued/downloading/merging）
+function downloadTaskActive(task) {
+  return ['queued', 'downloading', 'merging', 'running'].includes(task && task.status);
+}
+
+// 有进行中任务则维持 2s 轮询，全部终态则停止；避免反复 stop/start 重置定时器
+function syncDownloadsTimer(tasks) {
+  const active = tasks.some(downloadTaskActive);
+  if (active) {
+    if (!downloadsTimer) downloadsTimer = setInterval(() => {
+      if (state.route === 'downloads') refreshDownloads(routeToken, true);
+      else if (state.route === 'library' && state.libraryTab === 'downloads') renderLibraryDownloads();
+      else stopDownloadsTimer();
+    }, 2000);
+  } else stopDownloadsTimer();
 }
 
 // ---- 下载（手机本地 + NAS 后端）----
@@ -818,11 +833,10 @@ function goDownloads() {
   state.settingsReturn = { route: state.route };
   setRoute('downloads');
   content.innerHTML = `<div class="settings-page downloads-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回设置</button><h1>下载管理</h1><div id="downloads-list"><p class="page-loading">正在加载…</p></div></div>`;
-  refreshDownloads(token);
-  downloadsTimer = setInterval(() => refreshDownloads(token, true), 2000);
+  refreshDownloads(token, true);
 }
 
-async function refreshDownloads(token) {
+async function refreshDownloads(token, keepTimer) {
   if (state.route !== 'downloads' || routeToken !== token) { stopDownloadsTimer(); return; }
   let phone = [], nas = [];
   try { phone = await api('download-list'); } catch (error) { phone = []; }
@@ -832,8 +846,7 @@ async function refreshDownloads(token) {
   if (state.route !== 'downloads' || routeToken !== token) return;
   const list = document.getElementById('downloads-list');
   if (!list) return;
-  const running = [...phone, ...nas].some(task => task.status === 'running');
-  if (!running) stopDownloadsTimer();
+  if (keepTimer) syncDownloadsTimer([...phone, ...nas]);
   const phoneTasks = phone.map(t => Object.assign({}, t, { kind: 'phone' }));
   const nasTasks = nas.map(t => Object.assign({}, t, { kind: 'nas' }));
   list.innerHTML = renderDownloadList([...phoneTasks, ...nasTasks]);
@@ -860,12 +873,19 @@ function downloadTaskRow(task, kind) {
     : '<span class="dl-source-badge phone">手机</span>';
   const output = task.output && task.output.startsWith('content://') ? '已保存到系统下载目录' : task.output || '';
   const cancelBtn = running ? `<button type="button" class="dl-cancel" data-dl-cancel="${kind}" data-dl-id="${esc(task.id)}">取消</button>` : '';
+  const retryBtn = !running && kind === 'phone' && (task.status === 'failed' || task.status === 'canceled')
+    ? `<button type="button" class="dl-cancel dl-retry" data-dl-retry="phone" data-dl-id="${esc(task.id)}">重试</button>` : '';
+  const remergeBtn = !running && kind === 'phone' && task.status === 'done'
+    ? `<button type="button" class="dl-cancel dl-retry" data-dl-retry="phone" data-dl-id="${esc(task.id)}">重新合并</button>` : '';
   const deleteBtn = !running ? `<button type="button" class="dl-cancel" data-dl-delete="${kind}" data-dl-id="${esc(task.id)}">删除</button>` : '';
+  const errLog = task.error || task.debug || '';
+  const errBlock = errLog
+    ? `<span class="dl-error" data-dl-copy="${esc(task.id)}" data-dl-log="${esc(errLog.replace(/\n/g, '\\n'))}" title="点击复制全部日志">${task.error ? esc(task.error.split('\n').slice(0, 4).join('<br>')) : '<span class="dl-log-link">复制合并日志</span>'}</span>` : '';
   return `<div class="download-task">
     <div class="download-task-head"><strong>${esc(task.title || '未知剧集')}</strong>${sourceBadge}<span class="dl-status ${running ? 'is-running' : ''}">${statusText}</span></div>
     <div class="download-task-meta">${task.doneCount}/${task.totalCount} 集 · ${task.doneCount === task.totalCount && task.status !== 'running' ? '已下载全部集' : ''}</div>
     <div class="download-track"><i style="width:${Math.max(0, Math.min(100, Number(task.percent) || 0))}%"></i></div>
-    <div class="download-task-foot">${output ? `<span class="dl-output">${esc(output)}</span>` : ''}${task.error ? `<span class="dl-error">${esc(task.error)}</span>` : ''}${cancelBtn}${deleteBtn}</div>
+    <div class="download-task-foot">${output ? `<span class="dl-output">${esc(output)}</span>` : ''}${errBlock}${remergeBtn}${retryBtn}${cancelBtn}${deleteBtn}</div>
   </div>`;
 }
 
@@ -942,9 +962,21 @@ async function resolveEpisodesForDownload(episodes) {
   for (const n of episodes) {
     const meta = detailEpisodes.find(ep => Number(ep.number) === n);
     if (meta && meta.url) { resolved.push({ index: n, url: meta.url, key: '' }); continue; }
-    const data = await api('episode', { id: state.detail.id, episode: n });
-    resolved.push({ index: n, url: data.source, key: data.key || '' });
+    let data;
+    try {
+      data = await api('episode', { id: state.detail.id, episode: n });
+    } catch (error) {
+      throw new Error(`第 ${n} 集播放地址解析失败：${error.message || '未知错误'}`);
+    }
+    const source = String(data && data.source || '');
+    if (!/^https?:\/\//i.test(source)) {
+      throw new Error(`第 ${n} 集没有拿到有效的播放地址（${source.slice(0, 40) || '为空'}），请稍后重试`);
+    }
+    resolved.push({ index: n, url: source, key: data.key || '' });
   }
+  if (!resolved.length) throw new Error('没有可下载的分集');
+  const bad = resolved.find(r => !/^https?:\/\//i.test(String(r.url || '')));
+  if (bad) throw new Error(`第 ${bad.index} 集播放地址无效，已取消提交`);
   return resolved;
 }
 
@@ -1861,16 +1893,49 @@ document.addEventListener('click', async event => {
     const button = event.target.closest('[data-dl-cancel]');
     const kind = button.dataset.dlCancel, id = button.dataset.dlId;
     const action = kind === 'nas' ? 'nas-download-cancel' : 'download-cancel';
-    api(action, { id }).then(() => toast('已取消任务')).catch(error => toast(error.message, true));
+    api(action, { id }).then(() => { toast('已取消任务'); removeDownloadRow(kind, id); refreshCurrentDownloads(); }).catch(error => toast(error.message, true));
+    return;
+  }
+  if (event.target.closest('[data-dl-copy]')) {
+    const node = event.target.closest('[data-dl-copy]');
+    const log = (node.dataset.dlLog || '').replace(/\\n/g, '\n');
+    if (log) {
+      api('copy-text', { text: log }).then(() => toast('日志已复制到剪贴板')).catch(() => toast('复制失败', true));
+    }
+    return;
+  }
+  if (event.target.closest('[data-dl-retry]')) {
+    const button = event.target.closest('[data-dl-retry]');
+    const id = button.dataset.dlId;
+    api('download-retry', { id }).then(() => { toast('已重新开始下载'); refreshCurrentDownloads(); }).catch(error => toast(error.message, true));
     return;
   }
   if (event.target.closest('[data-dl-delete]')) {
     const button = event.target.closest('[data-dl-delete]');
     const kind = button.dataset.dlDelete, id = button.dataset.dlId;
     const action = kind === 'nas' ? 'nas-download-cancel' : 'download-delete';
-    api(action, { id }).then(() => toast('已删除下载内容')).catch(error => toast(error.message, true));
+    api(action, { id }).then(() => { toast('已删除下载内容'); removeDownloadRow(kind, id); refreshCurrentDownloads(); }).catch(error => toast(error.message, true));
     return;
   }
+
+// 删除/取消后先从当前 DOM 即时移除该行（立即消失，不再受路由/竞态影响），再后台拉最新列表
+function removeDownloadRow(kind, id) {
+  const button = document.querySelector(`[data-dl-delete="${kind}"][data-dl-id="${id}"], [data-dl-cancel="${kind}"][data-dl-id="${id}"]`);
+  if (!button) return;
+  const card = button.closest('.download-task');
+  if (!card || !card.parentElement) return;
+  const list = card.parentElement;
+  card.remove();
+  if (list && !list.querySelector('.download-task')) {
+    list.innerHTML = '<div class="empty-state">还没有下载内容，去详情页点击「下载」吧</div>';
+  }
+}
+
+// 删除/取消后立即刷新当前下载列表（我的下载 tab 或下载管理页）
+function refreshCurrentDownloads() {
+  if (state.route === 'library' && state.libraryTab === 'downloads') renderLibraryDownloads();
+  else if (state.route === 'downloads') refreshDownloads(routeToken, true);
+}
   if (event.target.closest('[data-choose-avatar]')) { api('choose-avatar').catch(error => toast(error.message, true)); return; }
   if (event.target.closest('[data-account-action]')) {
     if (state.account.loggedIn) goAccountManagement();
@@ -2018,6 +2083,14 @@ api('app-version').then(version => {
 }).catch(() => {});
 api('cached-update').then(result => { if (result.status === 'available') setAvailableUpdate(result); }).catch(() => {});
 function startHome() { goHome(); setTimeout(() => checkUpdate(false), 3000); }
+// 崩溃日志提示：上次运行发生未捕获异常（含闪退）时，启动后提示并支持复制，便于把日志发给开发者排查
+api('crash-log').then(result => {
+  const log = (result && result.log || '').trim();
+  if (log) {
+    api('copy-text', { text: log }).then(() => {}).catch(() => {});
+    toast('检测到上次运行发生崩溃，崩溃日志已复制到剪贴板，请粘贴发给开发者', true);
+  }
+}).catch(() => {});
 document.getElementById('age-confirm').addEventListener('click', async () => { await api('confirm-private-age'); location.reload(); });
 document.getElementById('age-exit').textContent = '返回红果';
 document.getElementById('age-exit').addEventListener('click', () => { document.getElementById('age-gate').hidden = true; });

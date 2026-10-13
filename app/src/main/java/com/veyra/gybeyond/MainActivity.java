@@ -1,6 +1,8 @@
 package com.veyra.gybeyond;
 
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.ActivityNotFoundException;
 import android.content.res.Configuration;
@@ -72,8 +74,60 @@ public final class MainActivity extends Activity {
     private volatile float statusBarInsetDp;
     private boolean detailSystemBars;
 
+    /** 全局崩溃日志：任何未捕获 Throwable（含 native 崩前能到 Java 层的 Error）都写入 filesDir/crash.log，
+     *  app.js 启动时经 "crash-log" bridge 读取展示，便于排查闪退。每次启动先清空并写版本头：日志永远只属于当前版本。 */
+    private void installCrashLogger() {
+        try {
+            // 每次启动清空旧 crash.log 并写入版本头：区分新旧版本日志，避免历史残留误导排查
+            try {
+                String ver = "unknown";
+                try { ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception ignored) { }
+                java.io.File f0 = new java.io.File(getFilesDir(), "crash.log");
+                java.io.FileOutputStream fos0 = new java.io.FileOutputStream(f0, false);
+                fos0.write(("=== Veyra " + ver + " 启动于 "
+                        + new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(new java.util.Date()) + " ===\n").getBytes("UTF-8"));
+                fos0.close();
+            } catch (Exception ignored) { }
+            Thread.UncaughtExceptionHandler prev = Thread.getDefaultUncaughtExceptionHandler();
+            Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+                try {
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("time=").append(System.currentTimeMillis()).append(" thread=").append(thread.getName()).append('\n');
+                    java.io.StringWriter sw = new java.io.StringWriter();
+                    throwable.printStackTrace(new java.io.PrintWriter(sw));
+                    sb.append(sw);
+                    sb.append('\n');
+                    java.io.File f = new java.io.File(getFilesDir(), "crash.log");
+                    java.io.FileOutputStream fos = new java.io.FileOutputStream(f, true);
+                    fos.write(sb.toString().getBytes("UTF-8"));
+                    fos.close();
+                    android.util.Log.e(TAG, "uncaught crash", throwable);
+                } catch (Exception ignored) { }
+                if (prev != null) prev.uncaughtException(thread, throwable);
+            });
+        } catch (Exception ignored) { }
+    }
+
+    private String crashLog() {
+        try {
+            StringBuilder sb = new StringBuilder();
+            java.io.File f = new java.io.File(getFilesDir(), "crash.log");
+            if (f.exists()) {
+                byte[] b = java.nio.file.Files.readAllBytes(f.toPath());
+                String s = new String(b, "UTF-8");
+                // 启动版本头（=== Veyra x 启动于 ===）不是崩溃；真正的未捕获异常以 "time=" 开头。
+                // 只有存在真实堆栈时才返回，避免每次启动误报"上次崩溃"并写剪贴板。
+                int idx = s.indexOf("time=");
+                if (idx >= 0) sb.append(s.substring(idx));
+            }
+            // 注意：filesDir/native.log 是合并引擎的普通阶段日志，不是崩溃日志，不再作为崩溃提示来源。
+            return sb.toString();
+        } catch (Exception e) { return ""; }
+    }
+
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        installCrashLogger();
         ContentMode.get(this).startPublic();
         hotUpdates = HotUpdateManager.get(this);
         hotSession = hotUpdates.beginSession();
@@ -518,6 +572,8 @@ public final class MainActivity extends Activity {
             case "download-list": return DownloadManager.get(this).list();
             case "download-cancel": DownloadManager.get(this).cancel(args.optString("id")); return new JSONObject().put("ok", true);
             case "download-delete": DownloadManager.get(this).delete(args.optString("id")); return new JSONObject().put("ok", true);
+            case "download-retry": DownloadManager.get(this).retry(args.optString("id")); return new JSONObject().put("ok", true);
+            case "crash-log": return new JSONObject().put("log", crashLog());
             case "nas-download-start": return account.postJson("api/download/tasks", new JSONObject()
                     .put("source", args.optString("source")).put("title", args.optString("title"))
                     .put("seriesId", args.optString("seriesId")).put("episodes", args.optJSONArray("episodes")));
@@ -601,6 +657,16 @@ public final class MainActivity extends Activity {
             case "clear-history": store.clearHistory(); if (account.isLoggedIn()) requests.execute(() -> { try { account.sync(); } catch (Exception ignored) { } }); return true;
             case "clear-bookmarks": store.clearBookmarks(); if (account.isLoggedIn()) requests.execute(() -> { try { account.sync(); } catch (Exception ignored) { } }); return true;
             case "clear-content-cache": store.clearCache(); repository.clearCovers(); return true;
+            case "copy-text": {
+                String text = args.optString("text", "");
+                if (!text.isEmpty()) {
+                    runOnUiThread(() -> {
+                        ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("Veyra", text));
+                    });
+                }
+                return !text.isEmpty();
+            }
             case "quit": runOnUiThread(this::finish); return true;
             case "open-player": {
                 args.put("source", mode.active());
