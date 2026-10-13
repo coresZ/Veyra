@@ -26,7 +26,9 @@ jobs:
           echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
           echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
           yes | $SDK/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
-          yes | $SDK/cmdline-tools/latest/bin/sdkmanager "platforms;android-37" "build-tools;37.0.0" > /dev/null || true
+          yes | $SDK/cmdline-tools/latest/bin/sdkmanager --channel=0 "platforms;android-37" > /dev/null 2>&1 || true
+          yes | $SDK/cmdline-tools/latest/bin/sdkmanager --channel=0 "platforms;android-37.0" > /dev/null 2>&1 || true
+          yes | $SDK/cmdline-tools/latest/bin/sdkmanager --channel=0 "build-tools;37.0.0" > /dev/null 2>&1 || true
           ls $SDK/platforms $SDK/build-tools
 
       - name: Set up Python
@@ -37,8 +39,8 @@ jobs:
       - name: Set up Kotlin compiler
         run: |
           curl -fsSL -o /tmp/kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.2.10/kotlin-compiler-2.2.10.zip
-          unzip -q /tmp/kotlin.zip -d /opt/
-          echo "KOTLIN_HOME=/opt/kotlinc" >> $GITHUB_ENV
+          unzip -q /tmp/kotlin.zip -d /opt/kotlin/
+          echo "KOTLIN_HOME=/opt/kotlin/kotlinc" >> $GITHUB_ENV
 
       - name: Compute version
         run: |
