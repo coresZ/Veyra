@@ -39,17 +39,11 @@ Veyra 是一个**短剧聚合播放器**：Android 客户端（APK）+ 自建 No
 └── docs/                     # 部署与交接文档
 ```
 
-## 部署后端（Docker Compose，无 SSH）
+## 部署后端（Docker Compose）
 
 **Synology NAS / 任意 Docker 主机**，用 Docker Compose 即可：
 
 ```bash
-# 1. 建目录（NAS 上建议放 /volume1/docker/veyra）
-mkdir -p /volume1/docker/veyra && cd /volume1/docker/veyra
-
-# 2. 放 docker-compose.yml（仓库根目录这份直接拷过去即可）
-#    核心内容如下：
-cat > docker-compose.yml <<'EOF'
 services:
   veyra-backend:
     image: gybeyond/veyra-backend:latest
@@ -66,8 +60,7 @@ services:
       - ./video:/video          # NAS 下载合并产物（固定 /video 挂载）
 EOF
 
-# 3. 启动
-docker compose up -d
+
 ```
 
 - 端口默认 `8888`（可用 `PORT` 改，APK 登录时填 `http://<NAS-IP>:8888`）。
