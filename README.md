@@ -58,9 +58,6 @@ services:
     volumes:
       - ./data:/data            # 用户 / 任务 / 头像等数据（备份此目录）
       - ./video:/video          # NAS 下载合并产物（固定 /video 挂载）
-EOF
-
-
 ```
 
 - 端口默认 `8888`（可用 `PORT` 改，APK 登录时填 `http://<NAS-IP>:8888`）。
