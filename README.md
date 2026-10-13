@@ -13,12 +13,12 @@ Veyra 就是原「橙子短剧 / chengzi」项目的**后继独立版**，部署
 | 项 | 旧（橙子 / chengzi） | 新（Veyra） |
 |---|---|---|
 | 后端镜像 | `gybeyond/chengzi-backend` | `gybeyond/veyra-backend` |
-| 容器名 | `chengzi-backend` | `veyra-backend` |
-| 数据目录 | `./chengzi-data` | `./veyra-data` |
-| NAS 产物目录 | `./chengzi-video` | `./veyra-video` |
+| 容器名 | `chengzi-backend` | `veyra` |
+| 数据目录 | `./chengzi-data` | `./data` |
+| NAS 产物目录 | `./chengzi-video` | `/volume1/gy/veyra:/video` |
 | APK | 旧包名 | `com.veyra.gybeyond`（已独立） |
 
-> 老实例的账号数据在 `chengzi-data` 卷里；如需迁到 Veyra，把该卷内容复制到 `veyra-data` 即可。APK 内登录态存储 key（`chengzi-auth` 等）为保证老用户不掉登录而保留，属内部实现，不影响品牌划分。
+> 老实例的账号数据在 `chengzi-data` 卷里；如需迁到 Veyra，把该卷内容复制到新数据卷即可。APK 内登录态存储 key（`chengzi-auth` 等）为保证老用户不掉登录而保留，属内部实现，不影响品牌划分。
 
 ---
 
@@ -67,28 +67,28 @@ mkdir -p /volume1/docker/veyra && cd /volume1/docker/veyra
 cat > docker-compose.yml <<'EOF'
 services:
   veyra-backend:
-    build: ./server          # 有源码时本地构建
-    image: gybeyond/veyra-backend:latest   # 或直接从 Docker Hub 拉取
-    container_name: veyra-backend
+    image: gybeyond/veyra-backend:latest
+    container_name: veyra
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "8888:8888"
     environment:
-      - PORT=8080
-      - ADMIN_PASSWORD=change-me-admin-pass   # WebUI 管理台密码（务必修改）
+      - PORT=8888
+      - DATA_DIR=/data
+      - ADMIN_PASSWORD=change-me   # WebUI 管理台密码（务必修改）
     volumes:
-      - ./veyra-data:/data      # 用户 / 任务 / 头像等数据（备份此目录）
-      - ./veyra-video:/video    # NAS 下载合并产物（固定 /video 挂载）
+      - ./data:/data            # 用户 / 任务 / 头像等数据（备份此目录）
+      - ./video:/video          # NAS 下载合并产物（固定 /video 挂载）
 EOF
 
 # 3. 启动
-docker compose up -d          # 已有源码/镜像时；首次本地构建用 docker compose up -d --build
+docker compose up -d
 ```
 
-- 端口默认 `8080`（可用 `PORT` 改，APK 登录时填 `http://<NAS-IP>:8080`）。
-- **Docker Hub 拉不动**（国内网络）时的离线方案：在能访问 Docker Hub 的机器上 `docker pull gybeyond/veyra-backend:latest` → `docker save -o veyra-backend.tar gybeyond/veyra-backend:latest` → 把 tar 拷到 NAS → `docker load -i veyra-backend.tar` → `docker compose up -d`。
-- 健康检查：`curl http://<NAS-IP>:8080/api/health` → `{"status":"ok"}`。
-- 升级：`docker compose pull && docker compose up -d`（自建则 `docker compose up -d --build`）。
+- 端口默认 `8888`（可用 `PORT` 改，APK 登录时填 `http://<NAS-IP>:8888`）。
+- **Docker Hub 拉不动**（国内网络）时的离线方案：在 GitHub Release 页下载 `veyra-backend.tar` → 拷到 NAS → `docker load -i veyra-backend.tar` → `docker compose up -d`。
+- 健康检查：`curl http://<NAS-IP>:8888/api/health` → `{"status":"ok"}`。
+- 升级：`docker compose pull && docker compose up -d`。
 
 ## APK 使用
 

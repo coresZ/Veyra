@@ -1,0 +1,88 @@
+name: Release (APK + Docker Image)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Kotlin compiler
+        run: |
+          curl -fsSL -o /tmp/kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.2.10/kotlin-compiler-2.2.10.zip
+          unzip -q /tmp/kotlin.zip -d /opt/
+          echo "KOTLIN_HOME=/opt/kotlinc" >> $GITHUB_ENV
+
+      - name: Accept SDK licenses & install platform
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-37" > /dev/null || true
+
+      - name: Restore signing keystore
+        run: |
+          echo "${{ secrets.Veyra_KEYSTORE_B64 }}" | base64 -d > $RUNNER_TEMP/veyra-release.keystore
+          ls -la $RUNNER_TEMP/veyra-release.keystore
+
+      - name: Build release APK
+        env:
+          CHENGZI_KEYSTORE: ${{ runner.temp }}/veyra-release.keystore
+          CHENGZI_STORE_PASS: ${{ secrets.Veyra_STORE_PASS }}
+          CHENGZI_KEY_PASS: ${{ secrets.Veyra_KEY_PASS }}
+          CHENGZI_KEY_ALIAS: ${{ secrets.Veyra_KEY_ALIAS }}
+        run: ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Verify APK signature & version
+        run: |
+          ls -la app/build/outputs/apk/release/app-release.apk
+          $ANDROID_HOME/build-tools/*/aapt2 dump badging app/build/outputs/apk/release/app-release.apk | grep versionName || true
+
+      - name: Save Docker image tar
+        run: |
+          docker build -t gybeyond/veyra-backend:${GITHUB_REF_NAME#v} server
+          docker tag gybeyond/veyra-backend:${GITHUB_REF_NAME#v} gybeyond/veyra-backend:latest
+          docker save -o veyra-backend.tar gybeyond/veyra-backend:latest
+          ls -la veyra-backend.tar
+
+      - name: Push image to Docker Hub (if credentials configured)
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          docker push gybeyond/veyra-backend:${GITHUB_REF_NAME#v}
+          docker push gybeyond/veyra-backend:latest
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk Veyra-${GITHUB_REF_NAME#v}-release.apk
+          gh release create ${GITHUB_REF_NAME} \
+            Veyra-${GITHUB_REF_NAME#v}-release.apk \
+            veyra-backend.tar \
+            --title "Veyra ${GITHUB_REF_NAME#v}" \
+            --notes "APK（自签名） + Docker 镜像 tar（NAS 离线 docker load 用）" || \
+            gh release upload ${GITHUB_REF_NAME} \
+            Veyra-${GITHUB_REF_NAME#v}-release.apk veyra-backend.tar --clobber
