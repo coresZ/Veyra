@@ -36,8 +36,14 @@ jobs:
 
       - name: Accept SDK licenses & install platform
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-37" > /dev/null || true
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          yes | sdkmanager "platforms;android-37" > /dev/null || true
+
+      - name: Compute version
+        run: |
+          VER=$(grep "versionName" app/build.gradle | sed -E "s/.*versionName '([^']+)'.*/\1/")
+          echo "VER=$VER" >> $GITHUB_ENV
+          echo "Veyra version: $VER"
 
       - name: Restore signing keystore
         run: |
@@ -59,8 +65,8 @@ jobs:
 
       - name: Save Docker image tar
         run: |
-          docker build -t gybeyond/veyra-backend:${GITHUB_REF_NAME#v} server
-          docker tag gybeyond/veyra-backend:${GITHUB_REF_NAME#v} gybeyond/veyra-backend:latest
+          docker build -t gybeyond/veyra-backend:$VER server
+          docker tag gybeyond/veyra-backend:$VER gybeyond/veyra-backend:latest
           docker save -o veyra-backend.tar gybeyond/veyra-backend:latest
           ls -la veyra-backend.tar
 
@@ -71,18 +77,18 @@ jobs:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
-          docker push gybeyond/veyra-backend:${GITHUB_REF_NAME#v}
+          docker push gybeyond/veyra-backend:$VER
           docker push gybeyond/veyra-backend:latest
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/release/app-release.apk Veyra-${GITHUB_REF_NAME#v}-release.apk
-          gh release create ${GITHUB_REF_NAME} \
-            Veyra-${GITHUB_REF_NAME#v}-release.apk \
+          cp app/build/outputs/apk/release/app-release.apk Veyra-$VER-release.apk
+          gh release create v$VER \
+            Veyra-$VER-release.apk \
             veyra-backend.tar \
-            --title "Veyra ${GITHUB_REF_NAME#v}" \
+            --title "Veyra $VER" \
             --notes "APK（自签名） + Docker 镜像 tar（NAS 离线 docker load 用）" || \
-            gh release upload ${GITHUB_REF_NAME} \
-            Veyra-${GITHUB_REF_NAME#v}-release.apk veyra-backend.tar --clobber
+            gh release upload v$VER \
+            Veyra-$VER-release.apk veyra-backend.tar --clobber
