@@ -1,4 +1,4 @@
-# 橙子短剧（接手版）轻量后端镜像
+# Veyra 轻量后端镜像
 FROM node:22-alpine
 
 # 下载/合并依赖：ffmpeg（concat 合并 + ffprobe 编码探测），alpine 官方包含两件套

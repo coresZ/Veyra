@@ -1,11 +1,14 @@
 services:
-  chengzi-backend:
+  veyra-backend:
     build: ./server
-    container_name: chengzi-backend
+    image: gybeyond/veyra-backend:latest
+    container_name: veyra-backend
+    restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
       - PORT=8080
+      - ADMIN_PASSWORD=change-me-admin-pass   # WebUI 管理台密码（必改）
     volumes:
-      - ./chengzi-data:/data
-    restart: unless-stopped
+      - ./veyra-data:/data      # 用户 / 任务 / 头像等数据
+      - ./veyra-video:/video    # NAS 下载合并产物（固定 /video）

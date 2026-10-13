@@ -29,6 +29,6 @@ jobs:
         with:
           context: ./server
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/chengzi-backend:latest
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/veyra-backend:latest
           # 不用层缓存，避免旧代码被 Buildx 复用进镜像
           no-cache: true

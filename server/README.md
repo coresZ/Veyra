@@ -1,7 +1,8 @@
-# 橙子短剧自建后端（chengzi-backend）
+# Veyra 自建后端（veyra-backend）
 
-零原生依赖的轻量后端：注册 / 登录 / 改密 / 头像 / 片单云同步。
+Veyra 短剧聚合播放器的轻量后端：账号 / 动态码 / 下载任务 / 用户管理 / 管理台。
 数据全部落在挂载卷 `/data`（JSON 文件 + 头像文件），删容器不丢数据。
+与旧「橙子短剧（chengzi-backend）」为独立命名：镜像 `gybeyond/veyra-backend`、容器 `veyra-backend`、数据卷 `./veyra-data:/data`。
 
 ## 接口
 
@@ -29,8 +30,10 @@ docker compose up -d --build
 ```
 
 - 端口：`8080`（可用环境变量 PORT 改）
-- 数据卷：`./chengzi-data:/data`（备份这一个目录即可）
-- 容器名：`chengzi-backend`，`restart: unless-stopped`
+- 数据卷：`./veyra-data:/data`（备份这一个目录即可）
+- 产物卷：`./veyra-video:/video`（NAS 下载合并产物，固定 /video 挂载）
+- 容器名：`veyra-backend`，`restart: unless-stopped`
+- 管理台密码：环境变量 `ADMIN_PASSWORD`（未配置则管理功能不可用）
 
 验证：`curl http://<NAS-IP>:8080/api/health`
 

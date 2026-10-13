@@ -1,8 +1,24 @@
 # Veyra
 
-Veyra 是一个短剧聚合播放器，由 **Android 客户端（APK）+ 自建 Node 后端（Docker）** 组成，支持红果/黄果等短剧源的在线播放、私密模式鉴权、代理绕行与手机 / NAS 下载合并。
+Veyra 是一个**短剧聚合播放器**：Android 客户端（APK）+ 自建 Node 后端（Docker），支持红果 / 黄果短剧的在线播放、私密模式鉴权、代理绕行，以及**手机端 / NAS 端下载合并**。
 
-> 本项目为 [MrSsg/HuangguoAPP-for-Andriod](https://github.com/MrSsg/HuangguoAPP-for-Andriod) 的二次开发版（GPL-3.0）。内容版权归各内容源所有，本项目仅提供技术实现，请勿用于非法用途。
+> 本项目脱胎于 [MrSsg/HuangguoAPP-for-Andriod](https://github.com/MrSsg/HuangguoAPP-for-Andriod)（GPL-3.0），但已独立演进为 **Veyra** 品牌：独立包名、独立后端镜像、独立数据目录。内容版权归各内容源所有，本项目仅提供技术实现，请勿用于非法用途。
+
+---
+
+## 与旧「橙子视频」的关系
+
+Veyra 就是原「橙子短剧 / chengzi」项目的**后继独立版**，部署命名已完全划清：
+
+| 项 | 旧（橙子 / chengzi） | 新（Veyra） |
+|---|---|---|
+| 后端镜像 | `gybeyond/chengzi-backend` | `gybeyond/veyra-backend` |
+| 容器名 | `chengzi-backend` | `veyra-backend` |
+| 数据目录 | `./chengzi-data` | `./veyra-data` |
+| NAS 产物目录 | `./chengzi-video` | `./veyra-video` |
+| APK | 旧包名 | `com.veyra.gybeyond`（已独立） |
+
+> 老实例的账号数据在 `chengzi-data` 卷里；如需迁到 Veyra，把该卷内容复制到 `veyra-data` 即可。APK 内登录态存储 key（`chengzi-auth` 等）为保证老用户不掉登录而保留，属内部实现，不影响品牌划分。
 
 ---
 
@@ -10,61 +26,76 @@ Veyra 是一个短剧聚合播放器，由 **Android 客户端（APK）+ 自建 
 
 - **多源播放**：红果 / 黄果短剧在线播放；后端地址由用户在登录 / 注册页自填，**不内置任何私有域名**。
 - **账号体系**：登录 / 注册（注册开关在 WebUI 动态控制），账号与设备无关。
-- **私密模式**：进入私密模式需后端下发的动态码（OTP，鉴权一次、跟账号走）；**管理员账号免动态码直进**。
-- **代理绕行**：设置中可配置代理端口，仅对黄果内容生效；代理不通时自动经后端转发加载，红果不受影响。
-- **角色权限**：WebUI 可把用户设为 **普通用户 / 管理员**——普通用户只能下载到手机，管理员可下载到 NAS。
+- **私密模式**：需后端动态码（OTP，鉴权一次、跟账号走）；管理员账号免动态码直进。
+- **代理绕行**：设置中可配置代理端口（仅黄果生效），代理不通自动经后端转发，红果不受影响。
+- **角色权限**：普通用户只能下载到手机；管理员可下载到 NAS。
 - **下载与合并**：
-  - 手机端：下载到本地，优先合并为单个文件（合并失败自动回退为分集导出，下载不白费）。
-  - NAS 端：由后端 ffmpeg 下载、解密并合并（avc3 + 时间基统一），产物直接可播。
-  - "我的下载"：状态（下载中 / 已下载 / 已合并 / 失败）、进度、删除一应俱全。
-- **WebUI 管理台**：用户列表（用户名 / 密码 / 手机型号等）、角色切换、删除用户、注册开关——进入需管理员密码。
+  - 手机端：并发下载（10 路）→ 本地规范化 + 合并为单文件；合并失败自动降级保留分集，可重试 / 重新合并。
+  - NAS 端：后端 ffmpeg 下载、解密并合并（avc3/hev1 + 时间基统一），产物直接可播。
+  - 手机端合并引擎为**自研 NDK 移植 ffmpeg + 手写 JNI**（C 层解密 / 规范化 / concat），与后端下载器 `server/downloader.js` 语义 1:1 对齐。
+- **WebUI 管理台**：用户列表、角色切换、删除用户、注册开关——进入需管理员密码（`ADMIN_PASSWORD`）。
 
 ## 项目结构
 
 ```
-├── app/                 # Android 客户端源码（Java + WebView UI）
+├── app/                      # Android 客户端（Java + WebView UI）
 │   └── src/main/
-│       ├── java/com/veyra/gybeyond/   # 主程序（播放、下载、账号、代理、热更新）
-│       └── assets/                    # WebView 前端（app.js / app.html / css）
-├── server/              # 自建后端（Node.js，无框架）
-│   ├── index.js         # API：账号 / 动态码 / 下载任务 / 用户管理 / 管理台
-│   ├── downloader.js    # 下载器 + ffmpeg 解密 + 合并
-│   └── Dockerfile       # 后端镜像
-├── third_party/hongguo/ # 红果内容接入层（Kotlin，含 CENC 解密 / 分享链接解析）
-└── docs/                # 部署与交接文档
+│       ├── java/com/veyra/gybeyond/   # 主程序（播放 / 下载 / 合并 / 账号 / 代理 / 热更新）
+│       ├── cpp/ffconcat_jni.c         # 自研合并引擎 JNI（解密 / 规范化 / 统一音轨转码 / concat）
+│       ├── jniLibs/                   # 预编译 libffconcat.so（arm64-v8a）
+│       └── assets/                    # WebView 前端（app.js / html / css）
+├── server/                   # 自建后端（Node.js，无框架）
+│   ├── index.js              # API：账号 / 动态码 / 下载任务 / 用户管理 / 管理台
+│   ├── downloader.js         # 下载器 + ffmpeg 解密 + 合并（手机端合并的对照基准）
+│   ├── hongguo-decrypt.js    # 红果 CENC 解密
+│   └── Dockerfile            # 后端镜像
+├── third_party/hongguo/      # 红果内容接入层（Kotlin，含分享链接解析）
+├── docker-compose.yml        # 后端一键部署
+└── docs/                     # 部署与交接文档
 ```
 
-## 快速开始（后端，Docker）
+## 部署后端（Docker Compose，无 SSH）
+
+**Synology NAS / 任意 Docker 主机**，用 Docker Compose 即可，不需要 SSH 远程管理：
 
 ```bash
-mkdir -p /volume1/docker/shortvideo && cd /volume1/docker/shortvideo
-cat > docker-compose.yaml <<'EOF'
+# 1. 建目录（NAS 上建议放 /volume1/docker/veyra）
+mkdir -p /volume1/docker/veyra && cd /volume1/docker/veyra
+
+# 2. 放 docker-compose.yml（仓库根目录这份直接拷过去即可）
+#    核心内容如下：
+cat > docker-compose.yml <<'EOF'
 services:
-  chengzi-backend:
-    image: gybeyond/chengzi-backend:latest
-    container_name: chengzi-backend
+  veyra-backend:
+    build: ./server          # 有源码时本地构建
+    image: gybeyond/veyra-backend:latest   # 或直接从 Docker Hub 拉取
+    container_name: veyra-backend
     restart: unless-stopped
     ports:
-      - "8888:8080"
+      - "8080:8080"
     environment:
-      - ADMIN_PASSWORD=change-me-admin-pass   # WebUI 管理台密码
-      - JWT_SECRET=change-me-jwt-secret       # Token 签名密钥
+      - PORT=8080
+      - ADMIN_PASSWORD=change-me-admin-pass   # WebUI 管理台密码（务必修改）
     volumes:
-      - ./chengzi-data:/data    # 用户 / 任务等数据
-      - ./chengzi-video:/video  # NAS 下载合并产物目录（固定挂载）
+      - ./veyra-data:/data      # 用户 / 任务 / 头像等数据（备份此目录）
+      - ./veyra-video:/video    # NAS 下载合并产物（固定 /video 挂载）
 EOF
-docker compose up -d
+
+# 3. 启动
+docker compose up -d          # 已有源码/镜像时；首次本地构建用 docker compose up -d --build
 ```
 
-- 国内网络拉不动 Docker Hub 时，可用 crane 拉取 `gybeyond/chengzi-backend:latest` 导出 tar，`docker load` 后 `docker compose up -d`。
-- 后端健康检查：`curl http://<服务器>:8888/api/health` → `{"status":"ok"}`。
+- 端口默认 `8080`（可用 `PORT` 改，APK 登录时填 `http://<NAS-IP>:8080`）。
+- **Docker Hub 拉不动**（国内网络）时的离线方案：在能访问 Docker Hub 的机器上 `docker pull gybeyond/veyra-backend:latest` → `docker save -o veyra-backend.tar gybeyond/veyra-backend:latest` → 把 tar 拷到 NAS → `docker load -i veyra-backend.tar` → `docker compose up -d`。
+- 健康检查：`curl http://<NAS-IP>:8080/api/health` → `{"status":"ok"}`。
+- 升级：`docker compose pull && docker compose up -d`（自建则 `docker compose up -d --build`）。
 
 ## APK 使用
 
-1. 安装 `app-release.apk`（或自行构建）。
-2. 首次打开进入登录 / 注册页，**填写你自己的后端地址**（如 `https://your-domain:1314` 或 `http://192.168.x.x:8888`）。
-3. 公开模式直接看红果；设置 → 进入私密模式需输入后端下发的动态码（管理员免输）。
-4. 设置 → 黄果网络代理：填 `host:port`（如 `127.0.0.1:7890`），仅黄果走代理，代理不通自动后端绕行。
+1. 安装 `app-release.apk`（GitHub Releases 或自行构建）。
+2. 首次打开进入登录 / 注册页，**填写你自己的后端地址**（如 `http://192.168.x.x:8080`）。
+3. 公开模式直接看红果；设置 → 进入私密模式需输入后端动态码（管理员免输）。
+4. 设置 → 黄果网络代理：填 `host:port`（仅黄果走代理，代理不通自动后端绕行）。
 5. 详情页 → 下载：选择集数 → 下载到手机（本地，合并优先）或下载到 NAS（管理员）。
 
 ## 构建 APK
@@ -80,12 +111,14 @@ cd app && ./gradlew :app:assembleRelease
 
 产物：`app/build/outputs/apk/release/app-release.apk`
 
+> 手机合并引擎是 NDK C 源码（`app/src/main/cpp/ffconcat_jni.c`），仓库已带预编译 `libffconcat.so`（arm64-v8a），无需本地 ffmpeg 工具链即可构建。
+
 ## WebUI 管理台
 
-后端启动后访问 `http://<服务器>:8888/`，输入环境变量 `ADMIN_PASSWORD` 设置的管理员密码进入。
+后端启动后访问 `http://<服务器>:8080/`，输入环境变量 `ADMIN_PASSWORD` 设置的管理员密码进入。
 
-- 用户管理：查看注册用户（用户名 / 密码明文 / 手机型号等）、切换角色（普通 / 管理员）、删除用户。
-- 注册开关：可随时开 / 关开放注册（关闭后新用户注册返回"注册已关闭"）。
+- 用户管理：查看注册用户、切换角色（普通 / 管理员）、删除用户。
+- 注册开关：随时开 / 关开放注册。
 
 ## 开源协议
 

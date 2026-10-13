@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 橙子短剧（接手版）轻量后端
+ * Veyra 轻量后端
  *
  * 零原生依赖（仅 express），数据落在 /data 目录（JSON 文件 + 头像文件），
  * 通过 Docker volume 持久化。Node 单线程 + 同步 fs，低流量自用场景足够安全。
@@ -202,7 +202,7 @@ app.get('/', (_req, res) => {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>橙子短剧后端 · 管理台</title>
+<title>Veyra 后端 · 管理台</title>
 <style>
 :root{--bg:#0f1115;--card:#1a1e26;--line:#2a3040;--fg:#e8ecf3;--mut:#8a93a5;--ok:#37d67a;--err:#ff5c5c;--acc:#f5d782}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -234,7 +234,7 @@ a{color:var(--acc)}
 </head>
 <body>
 <div class="wrap">
-<h1>橙子短剧后端 · 管理台</h1>
+<h1>Veyra 后端 · 管理台</h1>
 <div id="login-card" class="card" hidden>
 <h2>管理员登录</h2>
 <p style="color:var(--mut);font-size:12px;margin:0 0 12px">WebUI 需管理员密码进入（服务端环境变量 ADMIN_PASSWORD）。</p>
@@ -307,13 +307,13 @@ a{color:var(--acc)}
 <tr><td class="mono">GET /api/otp</td><td>当前动态码（需管理员）</td></tr>
 </table></div>
 <div class="card" style="color:var(--mut);font-size:12px">
-<p>数据目录：<span class="mono" id="s-datadir">-</span>（Docker 卷 <span class="mono">./chengzi-data:/data</span>，备份拷该目录）</p>
+<p>数据目录：<span class="mono" id="s-datadir">-</span>（Docker 卷 <span class="mono">./veyra-data:/data</span>，备份拷该目录）</p>
 <p style="margin-top:6px">部署文档见 <a href="https://github.com/gybeyond1/HuangguoAPP-for-Andriod/tree/master/server">仓库 server/</a></p>
 </div>
 </div>
 <script>
 const out=document.getElementById('out');
-let adminToken=localStorage.getItem('chengziAdmin')||'';
+let adminToken=localStorage.getItem('veyraAdmin')||'';
 const AUTH=()=>({Authorization:'Bearer '+adminToken});
 async function init(){
   if(!adminToken){ showLogin(); return; }
@@ -321,7 +321,7 @@ async function init(){
     const r=await fetch('/api/admin/session',{headers:AUTH()});
     if(!r.ok) throw new Error();
     showAdmin();
-  }catch(e){ adminToken=''; localStorage.removeItem('chengziAdmin'); showLogin(); }
+  }catch(e){ adminToken=''; localStorage.removeItem('veyraAdmin'); showLogin(); }
 }
 function showLogin(){ document.getElementById('login-card').hidden=false; document.getElementById('admin-area').hidden=true; }
 function showAdmin(){ document.getElementById('login-card').hidden=true; document.getElementById('admin-area').hidden=false; loadAll(); }
@@ -332,7 +332,7 @@ async function login(){
     const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p})});
     const d=await r.json().catch(()=>({}));
     if(!r.ok){ el.textContent=d.error||'登录失败'; el.hidden=false; return; }
-    adminToken=d.token; localStorage.setItem('chengziAdmin',adminToken); document.getElementById('admin-pass').value=''; showAdmin();
+    adminToken=d.token; localStorage.setItem('veyraAdmin',adminToken); document.getElementById('admin-pass').value=''; showAdmin();
   }catch(e){ el.textContent='网络错误'; el.hidden=false; }
 }
 async function saveRegisterOpen(){
@@ -346,7 +346,7 @@ async function saveRegisterOpen(){
     loadAll();
   }catch(e){ document.getElementById('reg-saved').textContent='网络错误'; }
 }
-async function logout(){ try{ await fetch('/api/admin/logout',{method:'POST',headers:AUTH()}); }catch(e){} adminToken=''; localStorage.removeItem('chengziAdmin'); showLogin(); }
+async function logout(){ try{ await fetch('/api/admin/logout',{method:'POST',headers:AUTH()}); }catch(e){} adminToken=''; localStorage.removeItem('veyraAdmin'); showLogin(); }
 let otpTimer=null;
 async function loadAll(){
   try{
@@ -510,7 +510,7 @@ app.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
 
 // 状态统计（状态页用，需管理员）
 app.get('/api/stats', requireAdmin, (_req, res) => {
-  res.json({ service: 'chengzi-backend', status: 'ok', users: Object.keys(users).length, dataDir: DATA_DIR, registerOpen });
+  res.json({ service: 'veyra-backend', status: 'ok', users: Object.keys(users).length, dataDir: DATA_DIR, registerOpen });
 });
 
 // 管理台设置：开放注册开关（实时生效，持久化到 settings.json，无需重启）
@@ -625,7 +625,7 @@ app.delete('/api/download/tasks/:id', auth, (req, res) => {
 });
 
 app.get('/api/health', (_req, res) => {
-  res.json({ code: 200, service: 'chengzi-backend', status: 'ok', time: Date.now(), download: downloader.status() });
+  res.json({ code: 200, service: 'veyra-backend', status: 'ok', time: Date.now(), download: downloader.status() });
 });
 
 // 注册（密码不限长度：1 位即可；开关在 WebUI 管理台实时控制，持久化到 settings.json）
@@ -753,5 +753,5 @@ app.put('/api/library', auth, (req, res) => {
 })();
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`chengzi-backend listening on 0.0.0.0:${PORT}, data dir: ${DATA_DIR}`);
+  console.log(`veyra-backend listening on 0.0.0.0:${PORT}, data dir: ${DATA_DIR}`);
 });
