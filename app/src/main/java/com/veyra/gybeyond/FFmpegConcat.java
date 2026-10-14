@@ -61,7 +61,55 @@ final class FFmpegConcat {
         if (!output.exists() || output.length() == 0) {
             throw new java.io.IOException("合并产物为空");
         }
+        verifyAudio(inputs, output, debug);
         debug.append("concat 合并完成\n");
+    }
+
+    /**
+     * 产物级音频校验：合并完成后回读产物，检查音频轨存在、音频时长与视频/分集总和匹配。
+     * 只读容器元数据不遍历帧（快），能捕获「某段无声/丢声」这类规范化诊断看不出的产物缺陷。
+     * 校验失败抛异常（分集保留，可重下重试）。
+     */
+    private static void verifyAudio(List<File> inputs, File output, StringBuilder debug) throws Exception {
+        long expectAudioUs = 0;
+        for (File f : inputs) {
+            android.media.MediaExtractor ex = null;
+            try {
+                ex = new android.media.MediaExtractor();
+                ex.setDataSource(f.getAbsolutePath());
+                for (int i = 0; i < ex.getTrackCount(); i++) {
+                    android.media.MediaFormat fmt = ex.getTrackFormat(i);
+                    String mime = fmt.getString(android.media.MediaFormat.KEY_MIME);
+                    if (mime != null && mime.startsWith("audio/") && fmt.containsKey(android.media.MediaFormat.KEY_DURATION))
+                        expectAudioUs += fmt.getLong(android.media.MediaFormat.KEY_DURATION);
+                }
+            } catch (Exception ignored) { } finally { if (ex != null) ex.release(); }
+        }
+        long outAudioUs = 0, outVideoUs = 0;
+        boolean hasAudio = false, hasVideo = false;
+        android.media.MediaExtractor out = null;
+        try {
+            out = new android.media.MediaExtractor();
+            out.setDataSource(output.getAbsolutePath());
+            for (int i = 0; i < out.getTrackCount(); i++) {
+                android.media.MediaFormat fmt = out.getTrackFormat(i);
+                String mime = fmt.getString(android.media.MediaFormat.KEY_MIME);
+                long d = fmt.containsKey(android.media.MediaFormat.KEY_DURATION) ? fmt.getLong(android.media.MediaFormat.KEY_DURATION) : 0;
+                if (mime != null && mime.startsWith("audio/")) { hasAudio = true; outAudioUs = Math.max(outAudioUs, d); }
+                else if (mime != null && mime.startsWith("video/")) { hasVideo = true; outVideoUs = Math.max(outVideoUs, d); }
+            }
+        } catch (Exception e) {
+            throw new java.io.IOException("产物音频校验失败: " + e.getMessage(), e);
+        } finally { if (out != null) out.release(); }
+        debug.append("[校验] 产物音频=").append(outAudioUs / 1000).append("ms 视频=").append(outVideoUs / 1000)
+                .append("ms 期望音频(分集和)=").append(expectAudioUs / 1000).append("ms\n");
+        if (!hasVideo) throw new java.io.IOException("产物没有视频轨，合并结果异常");
+        if (!hasAudio) throw new java.io.IOException("产物没有音频轨（合并结果无声）：请重新下载分集后重试");
+        if (outVideoUs > 0 && outAudioUs > 0 && outAudioUs < outVideoUs * 95 / 100)
+            throw new java.io.IOException("产物音频不完整（音频 " + (outAudioUs / 1000) + "ms < 视频 " + (outVideoUs / 1000)
+                    + "ms 的 95%）：部分段落无声，请重下异常分集后重试");
+        if (expectAudioUs > 0 && outAudioUs > 0 && outAudioUs < expectAudioUs * 92 / 100)
+            debug.append("[校验] 警告：产物音频明显短于分集总和（可能部分段丢声）\n");
     }
 
     /**

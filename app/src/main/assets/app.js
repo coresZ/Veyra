@@ -942,8 +942,8 @@ function renderDownloadSheet() {
   if (downloadMode === 'target') {
     const isAdmin = state.account.role === 'admin';
     sheet.innerHTML = `<div class="download-pick">
-      <button type="button" class="download-pick-option" data-dl-pick="phone"><strong>下载到手机</strong><small>选集下载，合并为一个 MP4 存到手机</small></button>
-      <button type="button" class="download-pick-option" data-dl-pick="nas" ${isAdmin ? '' : 'disabled'}><strong>下载到 NAS</strong><small>${isAdmin ? '选集或整剧，服务器下载并合并' : '仅管理员可用'}</small></button>
+      <button type="button" class="download-pick-option" data-dl-pick="phone"><strong>下载到手机</strong></button>
+      <button type="button" class="download-pick-option" data-dl-pick="nas" ${isAdmin ? '' : 'disabled'}><strong>下载到 NAS</strong>${isAdmin ? '' : '<small>仅管理员可用</small>'}</button>
       <p class="download-nas-note">${state.account.loggedIn ? '' : 'NAS 下载需要先登录账号。'}</p>
     </div>`;
     return;
