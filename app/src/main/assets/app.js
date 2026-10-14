@@ -877,8 +877,9 @@ function downloadTaskRow(task, kind) {
   const retryBtn = !running && kind === 'phone' && (task.status === 'failed' || task.status === 'canceled') && !(task.error || '').includes('合并失败')
     ? `<button type="button" class="dl-cancel dl-retry" data-dl-retry="phone" data-dl-id="${esc(task.id)}">重试</button>` : '';
   const failedList = task.failedEpisodes || [];
-  // NAS 任务部分失败：可只重下失败集（已下载分集保留不动），或先合并成功部分
-  const retryFailedBtn = !running && kind === 'nas' && task.status === 'ready' && failedList.length > 0
+  // NAS 任务部分失败：ready（下载完成）或 failed（重启中断/失败）都可只重下失败集，已下载分集保留不动
+  const canRetryFailed = task.status === 'ready' || (task.status === 'failed' && !(task.error || '').includes('合并失败'));
+  const retryFailedBtn = !running && kind === 'nas' && canRetryFailed && failedList.length > 0
     ? `<button type="button" class="dl-cancel dl-retry" data-dl-retry-failed="nas" data-dl-id="${esc(task.id)}">重试失败${failedList.length}集</button>` : '';
   // 手动合并：下载完成（ready，含部分失败）或合并失败（分集保留）时显示合并按钮，等用户点合并才合并
   const mergeBtn = !running && (task.status === 'ready' || ((task.status === 'failed' || task.status === 'done') && (task.error || '').includes('合并失败')))
@@ -905,7 +906,7 @@ function downloadStatusText(task, kind) {
     if ((task.detail || '').includes('已合并')) return '已下载 · 已合并';
     return '已下载';
   }
-  if (task.status === 'failed') return '失败';
+  if (task.status === 'failed') return failedCount > 0 ? `失败 · 可重试${failedCount}集` : '失败';
   if (task.status === 'canceled') return '已取消';
   const detail = task.detail || '';
   if (detail.includes('保存')) return '保存到手机';

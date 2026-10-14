@@ -49,11 +49,16 @@ function loadTasks() {
   // 重启后把未完成任务标记为中断，并按分集文件实际存在情况重建成功/失败清单：
   // 已下载的分集（work_<id>/epNNN.mp4）保留，重启/升级后重试失败集只补缺失的集，不会整季重下
   for (const t of Object.values(tasks)) {
-    if (t.status === 'downloading' || t.status === 'merging' || t.status === 'queued') {
-      t.status = 'failed';
+    const interrupted = t.status === 'downloading' || t.status === 'merging' || t.status === 'queued';
+    // 旧版本遗留的 failed 任务（无 failedEpisodes 字段）：同样按分集文件重建失败清单，使「重试失败集」可用
+    const legacyFailed = t.status === 'failed' && !Array.isArray(t.failedEpisodes) && !String(t.error || '').includes('合并失败');
+    if (interrupted || legacyFailed) {
+      if (interrupted) t.status = 'failed';
       rescanTaskFiles(t);
       const failedCount = (t.failedEpisodes || []).length;
-      t.error = failedCount > 0 ? `服务重启，任务中断（${failedCount} 集待补下，可重试失败集）` : '服务重启，任务中断';
+      if (interrupted) {
+        t.error = failedCount > 0 ? `服务重启，任务中断（${failedCount} 集待补下，可重试失败集）` : '服务重启，任务中断';
+      }
       t.updatedAt = Date.now();
     }
   }
@@ -583,7 +588,8 @@ function publicTask(t) {
     episodeCount: t.episodes.length, owner: t.owner,
     percent: p.percent || (t.status === 'done' ? 100 : 0),
     detail: p.detail || (t.status === 'done' ? '完成' : ''),
-    doneCount: t.status === 'done' ? t.episodes.length : done,
+    doneCount: t.status === 'done' ? t.episodes.length
+      : (failedEpisodes.length > 0 ? t.episodes.length - failedEpisodes.length : done),
     totalCount: total,
   };
 }
