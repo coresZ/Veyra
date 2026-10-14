@@ -28,6 +28,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
@@ -362,17 +363,77 @@ final class SiteRepository {
     private static final ExecutorService SEARCH_POOL = Executors.newFixedThreadPool(6);
     private static final String[] CN_NUM = {"一", "二", "三", "四", "五", "六", "七", "八", "九", "十"};
 
+    /** 红果联想接口：一次返回以关键词开头的完整短剧名（含"剧名+第N季"全集版），
+     *  源站镜像同样暴露该接口。返回 items 数组，失败抛异常由调用方兜底。 */
+    private JSONArray suggestionItems(String query, int count) throws Exception {
+        String url = profile.origin() + "/incent_resource/suggestion?app_id=8662&query="
+                + java.net.URLEncoder.encode(query, StandardCharsets.UTF_8) + "&count=" + count;
+        byte[] body = fetch(url);
+        JSONObject json = new JSONObject(new String(body, StandardCharsets.UTF_8));
+        JSONArray list = json.optJSONArray("suggest_list");
+        JSONArray items = new JSONArray();
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        for (int i = 0; list != null && i < list.length(); i++) {
+            JSONObject record = list.optJSONObject(i);
+            if (record == null) continue;
+            if (!"short_play_name".equals(record.optString("word_type"))) continue;
+            JSONObject video = record.optJSONObject("video_data");
+            String id = video == null ? "" : video.optString("series_id");
+            if (id.isEmpty() || !id.matches("[0-9]{1,30}") || !ids.add(id)) continue;
+            String title = record.optString("name");
+            if (title.isEmpty() && video != null) title = video.optString("series_title");
+            String genre = video == null ? "" : video.optString("genre");
+            String category = "203".equals(genre) ? "short" : "205".equals(genre) ? "comic" : "";
+            items.put(new JSONObject().put("id", id).put("title", title)
+                    .put("cover", video == null ? "" : video.optString("series_cover"))
+                    .put("description", video == null ? "" : video.optString("series_intro"))
+                    .put("episodeLabel", video == null ? "" : video.optString("episode_right_text"))
+                    .put("category", category).put("score", "").put("tags", new JSONArray()));
+        }
+        return items;
+    }
+
+    private static String normalizeTitle(String text) {
+        return text.replaceAll("\\s+", "").toLowerCase(Locale.ROOT);
+    }
+    private static int titleRank(String title, String query) {
+        String t = normalizeTitle(title), q = normalizeTitle(query);
+        if (t.equals(q)) return 0;
+        if (t.startsWith(q)) return 1;
+        if (t.contains(q)) return 2;
+        return 3;
+    }
+
     JSONObject search(String term, boolean suggest) throws Exception {
         String query = term.trim();
         if (query.length() > 80) query = query.substring(0, 80);
         if (query.isEmpty()) return new JSONObject().put("items", new JSONArray()).put("nextPage", JSONObject.NULL);
         JSONObject result = listing(page(profile.route("search", "query", java.net.URLEncoder.encode(query, StandardCharsets.UTF_8))), 1, "");
         if (suggest) return result;   // 联想请求走单查询，快速返回
-        // 搜索补全：源站对"剧名+第/季"类查询匹配不全（如搜"持械入宋"漏掉 341 集版第三季、219 集版第四季）时，
-        // 并行追加 去尾字 / +第 / +季 / +第N季(1..8) 变体查询，按 id 合并去重补全结果。
+        // 搜索补全：源站网页搜索对"剧名+第/季"匹配不全（如搜"持械入宋"漏掉 341 集版第三季、219 集版第四季）。
+        // 主补全走红果联想接口（一个请求拿完整短剧名列表，juku 同款方案）；联想接口不可用时
+        // 回退并行穷举 去尾字 / +第 / +季 / +第N季(1..8) 变体查询。按 id 合并去重后按标题匹配度排序。
         JSONArray items = result.optJSONArray("items");
         int count = items == null ? 0 : items.length();
-        if (count < 20 && query.length() > 2) {
+        java.util.LinkedHashMap<String, JSONObject> seen = new java.util.LinkedHashMap<>();
+        if (items != null) {
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject it = items.optJSONObject(i);
+                if (it != null) seen.putIfAbsent(it.optString("id"), it);
+            }
+        }
+        boolean suggestionOk = false;
+        try {
+            JSONArray suggestList = suggestionItems(query, 50);
+            if (suggestList.length() > 0) {
+                suggestionOk = true;
+                for (int i = 0; i < suggestList.length(); i++) {
+                    JSONObject it = suggestList.optJSONObject(i);
+                    if (it != null && it.optString("title").contains(query)) seen.putIfAbsent(it.optString("id"), it);
+                }
+            }
+        } catch (Exception ignored) { }
+        if (!suggestionOk && count < 20 && query.length() > 2) {
             java.util.LinkedHashSet<String> variants = new java.util.LinkedHashSet<>();
             final String baseQuery = query;
             String shorter = query.substring(0, query.length() - 1).trim();
@@ -381,13 +442,6 @@ final class SiteRepository {
             variants.add(query + "季");
             if (query.length() >= 3 && query.length() <= 6) {
                 for (String n : CN_NUM) variants.add(query + "第" + n + "季");
-            }
-            java.util.LinkedHashMap<String, JSONObject> seen = new java.util.LinkedHashMap<>();
-            if (items != null) {
-                for (int i = 0; i < items.length(); i++) {
-                    JSONObject it = items.optJSONObject(i);
-                    if (it != null) seen.putIfAbsent(it.optString("id"), it);
-                }
             }
             java.util.List<Future<Void>> futures = new java.util.ArrayList<>();
             for (final String variant : variants) {
@@ -411,11 +465,17 @@ final class SiteRepository {
                 }));
             }
             for (Future<Void> f : futures) { try { f.get(); } catch (Exception ignored) { } }
-            if (seen.size() > count) {
-                JSONArray merged = new JSONArray();
-                for (JSONObject it : seen.values()) merged.put(it);
-                result.put("items", merged);
-            }
+        }
+        if (seen.size() > count) {
+            java.util.List<JSONObject> ordered = new java.util.ArrayList<>(seen.values());
+            final String rankQuery = query;
+            ordered.sort((a, b) -> {
+                int r = Integer.compare(titleRank(a.optString("title"), rankQuery), titleRank(b.optString("title"), rankQuery));
+                return r != 0 ? r : Integer.compare(a.optString("title").length(), b.optString("title").length());
+            });
+            JSONArray merged = new JSONArray();
+            for (JSONObject it : ordered) merged.put(it);
+            result.put("items", merged);
         }
         return result;
     }
