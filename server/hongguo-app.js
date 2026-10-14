@@ -1,7 +1,7 @@
 // 红果 App 官方接口取流（视频直链 + CENC 解密密钥）。
 // 与 third_party/hongguo GuoSigner + MediaCrypto 1:1 移植：
 //   - 完整 query（aid/version_code/device_id/iid…）+ X-Gorgon/X-SS-STUB/X-Khronos 签名
-//   - 每次请求随机 device_id/iid（19 位），NAS 家宽出口 + 低频分散 = 低风控
+//   - device_id/iid 进程级持久（19 位，对齐 juku 客户端固定设备），家宽出口 + 低频 = 低风控
 //   - video_detail/v1 拿全集 vid 列表；video_model/v1 单集取流，多清晰度选 ≤1080 最高档
 //   - spade_a → deriveKey → CENC 密钥（ffmpeg -decryption_key 原生解密）
 'use strict';
@@ -38,15 +38,23 @@ function rev8(b) {
   return r;
 }
 
+// 与红果 App 一致：设备 ID 进程级持久复用（对齐 juku 后端同一客户端固定设备），
+// 避免家宽 IP + 高频随机设备触发风控导致取流失败
+let PERSISTENT_DEVICE = null;
+function deviceIds() {
+  if (!PERSISTENT_DEVICE) PERSISTENT_DEVICE = { deviceId: newDeviceId(), iid: newDeviceId() };
+  return PERSISTENT_DEVICE;
+}
+
 /** 构造与红果 App 一致的全参数签名请求。path 如 /novel/player/video_model/v1/ */
 function sign(path, body) {
-  const deviceId = newDeviceId();
+  const { deviceId, iid } = deviceIds();
   const params = {
     aid: '8662', app_name: 'novelread', version_code: '73532', version_name: '7.3.5.32',
     manifest_version_code: '73532', update_version_code: '73532', channel: 'update_64',
     device_platform: 'android', os: 'android', ssmix: 'a', device_type: '25053RT47C',
     device_brand: 'Redmi', language: 'zh', os_api: '36', os_version: '16',
-    resolution: '1280*2772', dpi: '520', ac: 'wifi', device_id: deviceId, iid: newDeviceId(),
+    resolution: '1280*2772', dpi: '520', ac: 'wifi', device_id: deviceId, iid,
   };
   // 与 Kotlin qenc 一致：`*` 不编码（Java URLEncoder 会编成 %2A，红果按未编码 query 签名校验）
   const qs = Object.keys(params).map(k => `${k}=${encodeURIComponent(params[k]).replace(/%2A/gi, '*').replace(/%7E/g, '~')}`).join('&');
