@@ -97,7 +97,8 @@ const icon = name => {
   const paths = {
     play: '<path d="m8 5 11 7-11 7z"/>',
     arrow: '<path d="m9 5 7 7-7 7"/>',
-    back: '<path d="m15 5-7 7 7 7"/>'
+    back: '<path d="m15 5-7 7 7 7"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'
   };
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name]}</svg>`;
 };
@@ -873,10 +874,11 @@ function downloadTaskRow(task, kind) {
     : '<span class="dl-source-badge phone">手机</span>';
   const output = task.output && task.output.startsWith('content://') ? '已保存到系统下载目录' : task.output || '';
   const cancelBtn = running ? `<button type="button" class="dl-cancel" data-dl-cancel="${kind}" data-dl-id="${esc(task.id)}">取消</button>` : '';
-  const retryBtn = !running && kind === 'phone' && (task.status === 'failed' || task.status === 'canceled')
+  const retryBtn = !running && kind === 'phone' && (task.status === 'failed' || task.status === 'canceled') && !(task.error || '').includes('合并失败')
     ? `<button type="button" class="dl-cancel dl-retry" data-dl-retry="phone" data-dl-id="${esc(task.id)}">重试</button>` : '';
-  const remergeBtn = !running && kind === 'phone' && task.status === 'done'
-    ? `<button type="button" class="dl-cancel dl-retry" data-dl-retry="phone" data-dl-id="${esc(task.id)}">重新合并</button>` : '';
+  // 手动合并：下载完成（ready）或合并失败（分集保留）时显示合并按钮，等用户点合并才合并
+  const mergeBtn = !running && (task.status === 'ready' || ((task.status === 'failed' || task.status === 'done') && (task.error || '').includes('合并失败')))
+    ? `<button type="button" class="dl-cancel dl-retry" data-dl-merge="${kind}" data-dl-id="${esc(task.id)}">合并</button>` : '';
   const deleteBtn = !running ? `<button type="button" class="dl-cancel" data-dl-delete="${kind}" data-dl-id="${esc(task.id)}">删除</button>` : '';
   const errLog = task.error || task.debug || '';
   const errBlock = errLog
@@ -885,11 +887,12 @@ function downloadTaskRow(task, kind) {
     <div class="download-task-head"><strong>${esc(task.title || '未知剧集')}</strong>${sourceBadge}<span class="dl-status ${running ? 'is-running' : ''}">${statusText}</span></div>
     <div class="download-task-meta">${task.doneCount}/${task.totalCount} 集 · ${task.doneCount === task.totalCount && task.status !== 'running' ? '已下载全部集' : ''}</div>
     <div class="download-track"><i style="width:${Math.max(0, Math.min(100, Number(task.percent) || 0))}%"></i></div>
-    <div class="download-task-foot">${output ? `<span class="dl-output">${esc(output)}</span>` : ''}${errBlock}${remergeBtn}${retryBtn}${cancelBtn}${deleteBtn}</div>
+    <div class="download-task-foot">${output ? `<span class="dl-output">${esc(output)}</span>` : ''}${errBlock}${mergeBtn}${retryBtn}${cancelBtn}${deleteBtn}</div>
   </div>`;
 }
 
 function downloadStatusText(task, kind) {
+  if (task.status === 'ready') return '已下载 · 待合并';
   if (task.status === 'done') {
     if (kind === 'nas') return '已下载 · 已合并';
     if ((task.detail || '').includes('已合并')) return '已下载 · 已合并';
@@ -1855,6 +1858,7 @@ document.getElementById('search-form').addEventListener('submit', event => {
   event.preventDefault();
   const query = searchInput.value.trim();
   searchInput.blur();
+  hideSearchSuggest();
   if (['library', 'settings', 'account-management'].includes(state.route)) {
     state.libraryQuery = query;
     if (state.route === 'library') renderLibrary();
@@ -1863,13 +1867,88 @@ document.getElementById('search-form').addEventListener('submit', event => {
     return;
   }
   if (/^[#＃]/.test(query)) goTagQuery(query);
-  else if (query) goSearch(query);
+  else if (query) { pushSearchHistory(query); goSearch(query); }
 });
 searchInput.addEventListener('input', () => {
-  if (state.route !== 'library') return;
-  state.libraryQuery = searchInput.value;
-  renderLibrary();
-  scroll.scrollTop = 0;
+  if (state.route === 'library') {
+    state.libraryQuery = searchInput.value;
+    renderLibrary();
+    scroll.scrollTop = 0;
+    return;
+  }
+  const v = searchInput.value.trim();
+  if (!v) { hideSearchSuggest(); return; }
+  clearTimeout(searchSuggestTimer);
+  searchSuggestTimer = setTimeout(() => suggestSearch(v), 300);
+});
+searchInput.addEventListener('focus', () => {
+  if (['library', 'settings', 'account-management'].includes(state.route)) return;
+  const v = searchInput.value.trim();
+  if (v) suggestSearch(v);
+  else renderSearchHistory();
+});
+searchInput.addEventListener('blur', () => setTimeout(hideSearchSuggest, 200));
+
+// ---- 搜索历史 + 实时联想（localStorage 持久化，词条可单独删除）----
+const searchHistoryKey = 'search-history';
+let searchSuggestTimer = null;
+let searchSuggestSeq = 0;
+function getSearchHistory() {
+  try { return JSON.parse(localStorage.getItem(searchHistoryKey) || '[]'); } catch { return []; }
+}
+function pushSearchHistory(q) {
+  q = String(q || '').trim();
+  if (!q) return;
+  let h = getSearchHistory().filter(x => x !== q);
+  h.unshift(q);
+  if (h.length > 20) h = h.slice(0, 20);
+  try { localStorage.setItem(searchHistoryKey, JSON.stringify(h)); } catch {}
+}
+function removeSearchHistory(q) {
+  try { localStorage.setItem(searchHistoryKey, JSON.stringify(getSearchHistory().filter(x => x !== q))); } catch {}
+}
+function searchSuggestEl() { return document.getElementById('search-suggest'); }
+function hideSearchSuggest() {
+  const el = searchSuggestEl();
+  if (el) el.hidden = true;
+  searchSuggestSeq++;
+}
+function renderSearchHistory() {
+  const el = searchSuggestEl();
+  if (!el) return;
+  const h = getSearchHistory();
+  if (!h.length) { el.hidden = true; return; }
+  el.innerHTML = `<div class="search-suggest-title">搜索历史<button type="button" class="ss-clear" data-ss-clear>清空</button></div>
+    <div class="search-suggest-list">${h.map(q => `<div class="search-suggest-item"><button type="button" class="ss-word" data-ss-word="${esc(q)}">${icon('clock')}<span>${esc(q)}</span></button><button type="button" class="ss-del" data-ss-del="${esc(q)}" aria-label="删除 ${esc(q)}">×</button></div>`).join('')}</div>`;
+  el.hidden = false;
+}
+async function suggestSearch(v) {
+  const seq = ++searchSuggestSeq;
+  const el = searchSuggestEl();
+  if (!el) return;
+  let items = null;
+  try {
+    const fresh = await Promise.race([api('search', { query: v }), new Promise((_, rej) => setTimeout(() => rej(new Error('联想超时')), 6000))]);
+    if (seq !== searchSuggestSeq || searchInput.value.trim() !== v) return;
+    items = asArray(fresh && (fresh.items || fresh.data && fresh.data.items));
+  } catch { return; }
+  if (seq !== searchSuggestSeq) return;
+  if (!items || !items.length) { el.hidden = true; return; }
+  el.innerHTML = `<div class="search-suggest-title">联想结果</div><div class="search-suggest-list">${items.slice(0, 8).map(it => `<button type="button" class="search-suggest-card" data-open-id="${esc(it.id)}" data-ss-close><span class="poster-letter">${esc(String(it.title || '剧').slice(0, 1))}</span><strong>${esc(it.title || '')}</strong>${it.episodeLabel ? `<em>${esc(it.episodeLabel)}</em>` : ''}</button>`).join('')}</div>`;
+  el.hidden = false;
+}
+// 输入框聚焦时临时放行原生长按（复制/粘贴菜单），失焦后恢复全局禁选，其余区域仍禁长按
+document.addEventListener('focusin', event => {
+  const t = event.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) {
+    api('input-edit', { active: true }).catch(() => {});
+  }
+});
+document.addEventListener('focusout', event => {
+  const t = event.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) {
+    api('input-edit', { active: false }).catch(() => {});
+  }
 });
 
 document.addEventListener('submit', async event => {
@@ -1918,6 +1997,29 @@ function tapDock(button) {
 }
 
 document.addEventListener('click', async event => {
+  // 搜索浮层：历史词条 / 单条删除 / 清空
+  const ssWord = event.target.closest('[data-ss-word]');
+  if (ssWord) {
+    const w = ssWord.dataset.ssWord;
+    hideSearchSuggest();
+    searchInput.value = w;
+    pushSearchHistory(w);
+    goSearch(w);
+    return;
+  }
+  const ssDel = event.target.closest('[data-ss-del]');
+  if (ssDel) {
+    removeSearchHistory(ssDel.dataset.ssDel);
+    renderSearchHistory();
+    return;
+  }
+  const ssClear = event.target.closest('[data-ss-clear]');
+  if (ssClear) {
+    try { localStorage.removeItem(searchHistoryKey); } catch {}
+    renderSearchHistory();
+    return;
+  }
+  if (event.target.closest('[data-ss-close]')) hideSearchSuggest();
   const campaignButton = event.target.closest('[data-open-campaign]');
   if (campaignButton) {
     if (campaignButton.closest('.hero') && performance.now() < heroSuppressClickUntil) return;
@@ -1936,7 +2038,7 @@ document.addEventListener('click', async event => {
     try {
       const result = await api('check-hot-update');
       window.hgHotUpdateStatus(result);
-      toast(result.pending ? '资源已下载，返回首页空闲时会自动启用' : '已是最新资源');
+      toast(result.pending ? '资源已下载，返回首页空闲时会自动启用' : (result.unavailable ? '暂无可用资源更新，当前使用内置资源' : '已是最新资源'));
     } catch (error) { toast(error.message, true); }
     finally { if (button.isConnected) button.disabled = false; }
     return;
@@ -1985,6 +2087,13 @@ document.addEventListener('click', async event => {
     const button = event.target.closest('[data-dl-retry]');
     const id = button.dataset.dlId;
     api('download-retry', { id }).then(() => { toast('已重新开始下载'); refreshCurrentDownloads(); }).catch(error => toast(error.message, true));
+    return;
+  }
+  if (event.target.closest('[data-dl-merge]')) {
+    const button = event.target.closest('[data-dl-merge]');
+    const kind = button.dataset.dlMerge, id = button.dataset.dlId;
+    const action = kind === 'nas' ? 'nas-download-merge' : 'download-merge';
+    api(action, { id }).then(() => { toast('已开始合并'); refreshCurrentDownloads(); }).catch(error => toast(error.message, true));
     return;
   }
   if (event.target.closest('[data-dl-delete]')) {

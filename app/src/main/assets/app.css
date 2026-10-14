@@ -161,3 +161,17 @@ html[data-theme=dark] .dl-source-badge.phone{background:#12325f;color:#8ec7ff}
 html[data-theme=dark] .dl-source-badge.nas{background:#4a3208;color:#ffc25e}
 .download-task-head{display:flex;align-items:center;gap:4px}
 .download-task-head strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.search-form{position:relative}
+.search-suggest{position:absolute;top:calc(100% + 8px);left:0;right:0;z-index:20;background:var(--bg);border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 28px #3d362618;overflow:hidden}
+html[data-theme=dark] .search-suggest{box-shadow:0 12px 28px #0008}
+.search-suggest-title{display:flex;align-items:center;justify-content:space-between;padding:10px 14px 6px;color:var(--muted);font-size:11px;font-weight:700}
+.ss-clear{border:0;background:none;color:var(--muted);font-size:11px;padding:2px 4px}
+.search-suggest-list{max-height:52vh;overflow:auto}
+.search-suggest-item{display:flex;align-items:center;min-height:44px}
+.ss-word{flex:1;min-width:0;display:flex;align-items:center;gap:8px;border:0;background:none;color:var(--text);font-size:13px;padding:10px 14px;text-align:left}
+.ss-word svg{width:14px;height:14px;color:var(--muted);flex:none}
+.ss-del{width:44px;height:44px;flex:none;border:0;background:none;color:var(--muted);font-size:17px}
+.search-suggest-card{width:100%;display:flex;align-items:center;gap:10px;border:0;border-top:1px solid var(--line);background:none;color:var(--text);padding:9px 14px;text-align:left}
+.search-suggest-card .poster-letter{width:34px;height:34px;flex:none;display:grid;place-items:center;border-radius:8px;background:var(--panel);color:var(--muted);font-size:15px;font-weight:700}
+.search-suggest-card strong{flex:1;min-width:0;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.search-suggest-card em{flex:none;font-size:10px;font-style:normal;color:var(--muted)}

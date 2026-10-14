@@ -357,7 +357,37 @@ final class SiteRepository {
         String query = term.trim();
         if (query.length() > 80) query = query.substring(0, 80);
         if (query.isEmpty()) return new JSONObject().put("items", new JSONArray()).put("nextPage", JSONObject.NULL);
-        return listing(page(profile.route("search", "query", java.net.URLEncoder.encode(query, StandardCharsets.UTF_8))), 1, "");
+        JSONObject result = listing(page(profile.route("search", "query", java.net.URLEncoder.encode(query, StandardCharsets.UTF_8))), 1, "");
+        // 搜索补全：源站分词对"剧名+第/季"等查询匹配不全（如搜"持械入宋第"只出部分季）时，
+        // 去掉尾字再搜一次，按 id 合并去重，补全结果。
+        JSONArray items = result.optJSONArray("items");
+        int count = items == null ? 0 : items.length();
+        if (count < 6 && query.length() > 2) {
+            String shorter = query.substring(0, query.length() - 1).trim();
+            if (shorter.length() >= 2) {
+                try {
+                    JSONObject extra = listing(page(profile.route("search", "query", java.net.URLEncoder.encode(shorter, StandardCharsets.UTF_8))), 1, "");
+                    JSONArray extraItems = extra.optJSONArray("items");
+                    if (extraItems != null && extraItems.length() > 0) {
+                        java.util.LinkedHashMap<String, JSONObject> seen = new java.util.LinkedHashMap<>();
+                        for (int i = 0; i < extraItems.length(); i++) {
+                            JSONObject it = extraItems.optJSONObject(i);
+                            if (it != null) seen.putIfAbsent(it.optString("id"), it);
+                        }
+                        if (items != null) {
+                            for (int i = 0; i < items.length(); i++) {
+                                JSONObject it = items.optJSONObject(i);
+                                if (it != null) seen.putIfAbsent(it.optString("id"), it);
+                            }
+                        }
+                        JSONArray merged = new JSONArray();
+                        for (JSONObject it : seen.values()) merged.put(it);
+                        result.put("items", merged);
+                    }
+                } catch (Exception ignored) { }
+            }
+        }
+        return result;
     }
 
     JSONObject detail(String id) throws Exception {

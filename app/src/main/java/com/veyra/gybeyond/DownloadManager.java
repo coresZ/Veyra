@@ -78,7 +78,7 @@ final class DownloadManager {
         final String source;   // hongguo | huangguo
         final String title;
         final JSONArray episodes;   // [{index,url,key?}]
-        volatile String status = "running";   // running | done | failed | canceled
+        volatile String status = "running";   // running | ready(已下载待合并) | done | failed | canceled
         volatile int doneCount = 0;
         volatile int totalCount = 0;
         volatile int percent = 0;
@@ -171,7 +171,6 @@ final class DownloadManager {
     JSONObject start(String source, String title, JSONArray episodes) throws Exception {
         if (!"hongguo".equals(source) && !"huangguo".equals(source)) throw new IllegalArgumentException("无效来源");
         if (episodes == null || episodes.length() == 0) throw new IllegalArgumentException("没有可下载的分集");
-        if (episodes.length() > 200) throw new IllegalArgumentException("单次最多下载 200 集");
         for (int i = 0; i < episodes.length(); i++) {
             JSONObject ep = episodes.optJSONObject(i);
             if (ep == null || !ep.optString("url").startsWith("http")) throw new IllegalArgumentException("分集播放地址无效");
@@ -323,8 +322,67 @@ final class DownloadManager {
             for (File f : plainArr) if (f != null) plain.add(f);
             if (plain.size() != n) throw new java.io.IOException("部分分集下载失败（" + plain.size() + "/" + n + "）");
             if (task.canceled) return;
-            // 优先合并成单个文件（v0.7.9 修复 ContainerFixer stco 后分集文件正确，MediaExtractor 可读到正确样本）；
-            // 若合并仍失败（个别设备 MediaMuxer 兼容问题），自动回退为分集逐个导出，下载不白费。
+            // 手动合并：下载完成只保存分集（app 私有目录），等待用户在下载管理里点「合并」再合并导出。
+            // 不再自动合并，避免"下完一批就自动合并，无法分批下载"的问题。
+            task.status = "ready";
+            task.percent = 100;
+            task.detail = "已下载 " + n + " 集，待合并";
+            task.output = "";
+            persist();
+            return;
+        } catch (Exception e) {
+            if (!task.canceled) { task.status = "failed"; task.error = e.getMessage() == null ? "下载失败" : e.getMessage(); task.detail = "失败"; }
+        } finally {
+            persist();
+            // 调试模式：保留已下载分集（ep*.mp4）与合并产物副本，供换版本后直接重新合并；
+            // 只清理合并失败残留的半成品（merged.mp4）与临时 concat 列表。
+            try {
+                File merged = new File(dir, "merged.mp4");
+                if (!mergedOk && merged.exists()) deleteRecursive(merged);
+                File[] kids = dir.listFiles();
+                if (kids != null) for (File f : kids) {
+                    if (f.isFile() && f.getName().startsWith("inputs_") && f.getName().endsWith(".ffconcat")) f.delete();
+                }
+            } catch (Exception ignored) {}
+        }
+    }
+
+    /** 手动合并：等待合并信号后执行（任务须处于 ready/failed 状态；合并失败保留分集可重试）。 */
+    JSONObject merge(String id) {
+        Task found = null;
+        synchronized (tasks) {
+            for (Task t : tasks) {
+                if (t.id.equals(id)) { found = t; break; }
+            }
+        }
+        if (found == null) throw new IllegalStateException("任务不存在");
+        final Task target = found;
+        synchronized (target) {
+            if (!"ready".equals(target.status) && !"failed".equals(target.status))
+                throw new IllegalStateException("当前状态不可合并（需先完成下载）");
+            target.status = "running";
+            target.error = "";
+            target.debug = "";
+            target.detail = "合并分集";
+            target.percent = 90;
+        }
+        persist();
+        pool.execute(() -> runMerge(target));
+        return target.snapshot();
+    }
+
+    private void runMerge(Task task) {
+        File dir = new File(context.getFilesDir(), "downloads/" + task.id);
+        boolean mergedOk = false;
+        try {
+            int n = task.episodes.length();
+            List<File> plain = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                File f = new File(dir, String.format(Locale.US, "ep%03d.mp4", i + 1));
+                if (f.exists() && f.length() > 0) plain.add(f);
+            }
+            if (plain.size() != n) throw new java.io.IOException("分集不完整（" + plain.size() + "/" + n + "），请重新下载");
+            // 优先合并成单个文件；若合并仍失败（个别设备 MediaMuxer 兼容问题），自动回退为分集逐个导出，下载不白费。
             String subDir = task.title.replaceAll("[\\\\/:*?\"<>|]", "_");
             String displayName = task.title.replaceAll("[\\\\/:*?\"<>|]", "_") + ".mp4";
             try {
@@ -383,11 +441,9 @@ final class DownloadManager {
                 task.detail = "合并失败（已保存 " + plain.size() + " 集分集，可直接重试合并）";
             }
         } catch (Exception e) {
-            if (!task.canceled) { task.status = "failed"; task.error = e.getMessage() == null ? "下载失败" : e.getMessage(); task.detail = "失败"; }
+            if (!task.canceled) { task.status = "failed"; task.error = e.getMessage() == null ? "合并失败" : e.getMessage(); task.detail = "失败"; }
         } finally {
             persist();
-            // 调试模式：保留已下载分集（ep*.mp4）与合并产物副本，供换版本后直接重新合并；
-            // 只清理合并失败残留的半成品（merged.mp4）与临时 concat 列表。
             try {
                 File merged = new File(dir, "merged.mp4");
                 if (!mergedOk && merged.exists()) deleteRecursive(merged);

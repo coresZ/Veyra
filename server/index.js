@@ -757,6 +757,14 @@ app.delete('/api/download/tasks/:id', auth, (req, res) => {
     return res.status(404).json({ error: '任务不存在' });
   res.json({ ok: true });
 });
+app.post('/api/download/merge', auth, (req, res) => {
+  if (!needUser(req, res)) return;
+  try {
+    const task = downloader.mergeTask(String(req.body.id || ''), req.user.id, isAdminRequest(req));
+    if (!task) return res.status(404).json({ error: '任务不存在' });
+    res.json(task);
+  } catch (e) { res.status(400).json({ error: e && e.message ? e.message : '合并失败' }); }
+});
 
 app.get('/api/health', (_req, res) => {
   res.json({ code: 200, service: 'veyra-backend', status: 'ok', time: Date.now(), download: downloader.status() });

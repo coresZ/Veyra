@@ -171,6 +171,10 @@ final class HotUpdateManager {
             byte[] archive = download(meta.getString("url"), 12 * 1024 * 1024);
             stage(envelope, archive);
             return status().put("checking", false);
+        } catch (java.io.IOException error) {
+            // 更新源暂时不可用（如 GitHub Releases 未发布资源 404）：静默降级，继续用内置资源，
+            // 不向用户弹"资源更新连接失败"红字；unavailable 标记供 UI 显示友好提示。
+            return status().put("checking", false).put("unavailable", true);
         } finally { checking.set(false); }
     }
 

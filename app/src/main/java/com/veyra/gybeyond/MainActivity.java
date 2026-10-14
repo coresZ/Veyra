@@ -182,9 +182,12 @@ public final class MainActivity extends Activity {
         webView.getSettings().setAllowFileAccessFromFileURLs(false);
         webView.getSettings().setAllowUniversalAccessFromFileURLs(false);
         webView.getSettings().setMediaPlaybackRequiresUserGesture(true);
-        // 全局禁用长按文本选择（复制/分享/全选/搜索/朗读等系统菜单）
+        // 全局禁用长按文本选择（复制/分享/全选/搜索/朗读等系统菜单）。
+        // 注意：输入框聚焦时通过 JS 的 input-edit 回调临时放行，恢复搜索框/代理地址框的长按复制粘贴，
+        // 非输入区域仍保持禁选，避免误触系统菜单。
         webView.setLongClickable(false);
         webView.setOnLongClickListener(v -> true);
+        webView.setClickable(true);
         WebViewAssetLoader loader = new WebViewAssetLoader.Builder()
                 .addPathHandler("/assets/", path -> hotUpdates.resource(hotSession, path)).build();
         webView.setWebViewClient(new WebViewClient() {
@@ -287,6 +290,20 @@ public final class MainActivity extends Activity {
 
     private boolean dark() {
         return (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    /** 输入框聚焦时临时放行长按（恢复复制/粘贴菜单），失焦后恢复全局禁选，避免误触系统菜单。 */
+    private void setInputEditing(boolean active) {
+        runOnUiThread(() -> {
+            if (webView == null || isDestroyed()) return;
+            if (active) {
+                webView.setLongClickable(true);
+                webView.setOnLongClickListener(null);
+            } else {
+                webView.setLongClickable(false);
+                webView.setOnLongClickListener(v -> true);
+            }
+        });
     }
 
     private float screenCornerRadius(int position) {
@@ -584,12 +601,15 @@ public final class MainActivity extends Activity {
             case "download-cancel": DownloadManager.get(this).cancel(args.optString("id")); return new JSONObject().put("ok", true);
             case "download-delete": DownloadManager.get(this).delete(args.optString("id")); return new JSONObject().put("ok", true);
             case "download-retry": DownloadManager.get(this).retry(args.optString("id")); return new JSONObject().put("ok", true);
+            case "download-merge": return DownloadManager.get(this).merge(args.optString("id"));
+            case "input-edit": setInputEditing(args.optBoolean("active")); return new JSONObject().put("ok", true);
             case "crash-log": return new JSONObject().put("log", crashLog());
             case "nas-download-start": return account.postJson("api/download/tasks", new JSONObject()
                     .put("source", args.optString("source")).put("title", args.optString("title"))
                     .put("seriesId", args.optString("seriesId")).put("episodes", args.optJSONArray("episodes")));
             case "nas-download-list": return account.getJson("api/download/tasks");
             case "nas-download-cancel": account.deleteJson("api/download/tasks/" + args.optString("id")); return new JSONObject().put("ok", true);
+            case "nas-download-merge": return account.postJson("api/download/merge", new JSONObject().put("id", args.optString("id")));
             case "choose-avatar": {
                 if (!account.isLoggedIn()) throw new IllegalStateException("请先登录");
                 runOnUiThread(() -> {

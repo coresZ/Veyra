@@ -390,13 +390,23 @@ async function runTask(task) {
   if (task.status === 'canceled') return;
   if (downloaded < queue.length) throw new Error(`仅成功下载 ${downloaded}/${queue.length} 集，任务中止`);
 
-  // 合并阶段
+  // 手动合并：下载完成后保留分集，等待用户在下载管理里点「合并」再合并（不再自动合并）
+  task.status = 'ready';
+  task.progress = { phase: 'ready', episode: queue.length, total: queue.length, percent: 100, detail: `已下载 ${queue.length} 集，待合并` };
+  touch(task);
+  flushStore(true);
+}
+
+/** 合并阶段（runTask 拆分）：合并分集 -> 单文件，成功后清理分集目录 */
+async function mergeStage(task, dir, workDir) {
+  const outName = `${sanitizeName(task.title)}_全${task.episodes.length}集.mp4`;
+  const outputPath = safeJoin(DOWNLOAD_DIR, outName);
   task.status = 'merging';
   task.progress.phase = 'merging';
   task.progress.percent = 98;
   task.progress.detail = '开始合并';
   touch(task);
-  const files = queue.map((_, i) => safeJoin(dir, `ep${String(i + 1).padStart(3, '0')}.mp4`));
+  const files = task.episodes.map((_, i) => safeJoin(dir, `ep${String(i + 1).padStart(3, '0')}.mp4`));
   await mergeEpisodes(files, outputPath, workDir, (percent, detail) => {
     task.progress.percent = percent;
     task.progress.detail = detail;
@@ -408,15 +418,41 @@ async function runTask(task) {
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
   task.status = 'done';
   task.output = outputPath;
-  task.progress = { phase: 'done', episode: queue.length, total: queue.length, percent: 100, detail: '完成' };
+  task.progress = { phase: 'done', episode: task.episodes.length, total: task.episodes.length, percent: 100, detail: '完成' };
   touch(task);
   flushStore(true);
+}
+
+/** 手动合并：等待合并信号后执行（任务须处于 ready/failed 状态，合并失败保留分集可重试） */
+function mergeTask(id, owner, isAdmin) {
+  const t = tasks[id];
+  if (!t) return null;
+  if (!isAdmin && t.owner && t.owner !== owner) return null;
+  if (t.status !== 'ready' && t.status !== 'failed') throw new Error('当前状态不可合并（需先完成下载）');
+  const dir = safeJoin(DOWNLOAD_DIR, 'work_' + id);
+  const workDir = safeJoin(dir, '.merge-work');
+  fs.mkdirSync(workDir, { recursive: true });
+  t.error = '';
+  t.status = 'merging';
+  t.progress.phase = 'merging';
+  t.progress.percent = 98;
+  t.progress.detail = '开始合并';
+  touch(t);
+  mergeStage(t, dir, workDir).catch(err => {
+    if (t.status === 'canceled') return;
+    t.status = 'failed';
+    t.error = err && err.message ? err.message : String(err);
+    t.progress.percent = 0;
+    t.progress.detail = '合并失败，可重试';
+    touch(t);
+    flushStore(true);
+  });
+  return publicTask(t);
 }
 
 // ---- 对外 API ----
 function createTask({ source, title, seriesId, episodes, owner }) {
   if (!Array.isArray(episodes) || episodes.length === 0) throw new Error('没有可下载的分集');
-  if (episodes.length > 200) throw new Error('单次下载最多 200 集');
   for (const ep of episodes) {
     if (!ep || !/^https?:\/\//.test(String(ep.url || ''))) throw new Error('分集播放地址无效');
     if (ep.key && !/^[0-9a-f]{32}$/i.test(String(ep.key))) throw new Error('分集内容密钥无效');
@@ -506,4 +542,4 @@ function status() {
 loadTasks();
 ensureDirs();
 
-module.exports = { createTask, listTasks, getTask, deleteTask, status, DOWNLOAD_DIR, mergeEpisodes };
+module.exports = { createTask, listTasks, getTask, deleteTask, mergeTask, status, DOWNLOAD_DIR, mergeEpisodes };
