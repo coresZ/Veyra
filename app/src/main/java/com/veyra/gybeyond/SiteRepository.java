@@ -26,8 +26,14 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
@@ -353,22 +359,29 @@ final class SiteRepository {
         return listing(page(profile.route(pageNumber == 1 ? name : name + "Page", "page", String.valueOf(pageNumber))), pageNumber, "");
     }
 
+    private static final ExecutorService SEARCH_POOL = Executors.newFixedThreadPool(6);
+    private static final String[] CN_NUM = {"一", "二", "三", "四", "五", "六", "七", "八", "九", "十"};
+
     JSONObject search(String term, boolean suggest) throws Exception {
         String query = term.trim();
         if (query.length() > 80) query = query.substring(0, 80);
         if (query.isEmpty()) return new JSONObject().put("items", new JSONArray()).put("nextPage", JSONObject.NULL);
         JSONObject result = listing(page(profile.route("search", "query", java.net.URLEncoder.encode(query, StandardCharsets.UTF_8))), 1, "");
         if (suggest) return result;   // 联想请求走单查询，快速返回
-        // 搜索补全：源站对"剧名+第/季"类查询匹配不全（如搜"持械入宋"漏掉部分季）时，
-        // 追加 去尾字 / +第 / +季 变体查询，按 id 合并去重补全结果。
+        // 搜索补全：源站对"剧名+第/季"类查询匹配不全（如搜"持械入宋"漏掉 341 集版第三季、219 集版第四季）时，
+        // 并行追加 去尾字 / +第 / +季 / +第N季(1..8) 变体查询，按 id 合并去重补全结果。
         JSONArray items = result.optJSONArray("items");
         int count = items == null ? 0 : items.length();
-        if (count < 15 && query.length() > 2) {
+        if (count < 20 && query.length() > 2) {
             java.util.LinkedHashSet<String> variants = new java.util.LinkedHashSet<>();
+            final String baseQuery = query;
             String shorter = query.substring(0, query.length() - 1).trim();
             if (shorter.length() >= 2) variants.add(shorter);
             if (query.length() <= 8) variants.add(query + "第");
             variants.add(query + "季");
+            if (query.length() >= 3 && query.length() <= 6) {
+                for (String n : CN_NUM) variants.add(query + "第" + n + "季");
+            }
             java.util.LinkedHashMap<String, JSONObject> seen = new java.util.LinkedHashMap<>();
             if (items != null) {
                 for (int i = 0; i < items.length(); i++) {
@@ -376,19 +389,28 @@ final class SiteRepository {
                     if (it != null) seen.putIfAbsent(it.optString("id"), it);
                 }
             }
-            for (String variant : variants) {
-                try {
-                    JSONObject extra = listing(page(profile.route("search", "query", java.net.URLEncoder.encode(variant, StandardCharsets.UTF_8))), 1, "");
-                    JSONArray extraItems = extra.optJSONArray("items");
-                    for (int i = 0; extraItems != null && i < extraItems.length(); i++) {
-                        JSONObject it = extraItems.optJSONObject(i);
-                        if (it == null) continue;
-                        // 只并入与查询词相关的条目，避免引入无关噪音
-                        String title = it.optString("title");
-                        if (title.contains(query) || title.contains(variant)) seen.putIfAbsent(it.optString("id"), it);
+            java.util.List<Future<Void>> futures = new java.util.ArrayList<>();
+            for (final String variant : variants) {
+                futures.add(SEARCH_POOL.submit(new Callable<Void>() {
+                    @Override public Void call() {
+                        try {
+                            JSONObject extra = listing(page(profile.route("search", "query", java.net.URLEncoder.encode(variant, StandardCharsets.UTF_8))), 1, "");
+                            JSONArray extraItems = extra.optJSONArray("items");
+                            synchronized (seen) {
+                                for (int i = 0; extraItems != null && i < extraItems.length(); i++) {
+                                    JSONObject it = extraItems.optJSONObject(i);
+                                    if (it == null) continue;
+                                    // 只并入标题包含查询词的条目（剧名带"·/："等符号也保留），避免引入无关噪音
+                                    String title = it.optString("title");
+                                    if (title.contains(baseQuery)) seen.putIfAbsent(it.optString("id"), it);
+                                }
+                            }
+                        } catch (Exception ignored) { }
+                        return null;
                     }
-                } catch (Exception ignored) { }
+                }));
             }
+            for (Future<Void> f : futures) { try { f.get(); } catch (Exception ignored) { } }
             if (seen.size() > count) {
                 JSONArray merged = new JSONArray();
                 for (JSONObject it : seen.values()) merged.put(it);
