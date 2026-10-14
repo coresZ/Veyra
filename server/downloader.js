@@ -247,7 +247,13 @@ async function mergeEpisodes(episodeFiles, outputPath, workDir, report) {
         filter += `scale=w='min(iw,${targetW})':h='min(ih,${targetH})':force_original_aspect_ratio=decrease,pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2,setsar=1,`;
       }
       args.push('-vf', filter.slice(0, -1));
-      args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-profile:v', h264Profile, '-pix_fmt', 'yuv420p');
+      // 视频转码方向：少数服从多数（多数派是 hevc 则少数转 libx265，多数派是 h264 则少数转 libx264）。
+      // x265 CRF 21 ≈ x264 CRF 18 的视觉质量（x265 同画质码率省 30~50%）。
+      if (majority.videoCodec === 'hevc') {
+        args.push('-c:v', 'libx265', '-preset', 'veryfast', '-crf', '21', '-pix_fmt', 'yuv420p', '-tag:v', 'hev1');
+      } else {
+        args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-profile:v', h264Profile, '-pix_fmt', 'yuv420p');
+      }
     }
     if (info.audioCodec) {
       args.push('-map', '0:a:0');
@@ -500,4 +506,4 @@ function status() {
 loadTasks();
 ensureDirs();
 
-module.exports = { createTask, listTasks, getTask, deleteTask, status, DOWNLOAD_DIR };
+module.exports = { createTask, listTasks, getTask, deleteTask, status, DOWNLOAD_DIR, mergeEpisodes };
