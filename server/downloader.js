@@ -17,6 +17,7 @@ const os = require('os');
 const http = require('http');
 const https = require('https');
 const { spawnSync, spawn } = require('child_process');
+const hgApp = require('./hongguo-app');
 
 // 数据/下载目录：环境变量指定，默认 /data、/video（docker-compose 挂载）。
 // 裸跑/本地运行时根目录不可写 → 自动回退到可写目录，避免服务因 EACCES 直接崩溃。
@@ -313,6 +314,23 @@ async function runTask(task) {
   const outName = `${sanitizeName(task.title)}_全${task.episodes.length}集.mp4`;
   const outputPath = safeJoin(DOWNLOAD_DIR, outName);
 
+  // 红果 App 取流升级（v0.13.45）：官方接口多清晰度选最高档（随机设备+签名，NAS 家宽出口）。
+  // 详情一次拿全集 vid；下载 worker 逐集调 video_model/v1 取流。失败自动降级网页源，下载不中断。
+  if (task.source === 'hongguo' && task.seriesId && !task._appVids) {
+    try {
+      const { vids } = await hgApp.videoDetail(task.seriesId);
+      if (vids && vids.length >= task.episodes.length) {
+        task.episodes.forEach((ep, i) => { ep.vid = vids[i]; });
+        task._appVids = true;
+        console.log(`[hongguo-app] ${task.title} 注入 ${vids.length} 个 vid，走 App 最高清晰度取流`);
+      }
+    } catch (e) {
+      console.log(`[hongguo-app] 详情取 vid 失败，降级网页源: ${e.message}`);
+    }
+    touch(task);
+    flushStore(true);
+  }
+
   // 下载阶段（并发 N 集）
   const queue = task.episodes.map((ep, idx) => ({ ep, idx }));
   const headersFor = ep => ep.key
@@ -339,6 +357,20 @@ async function runTask(task) {
         while (attempt <= RETRIES && !signal.aborted) {
           try {
             const started = Date.now();
+            // 红果 App 取流：video_model/v1 拿最高档直链 + CENC 密钥（失败降级网页源）
+            if (ep.vid && !ep._appStream) {
+              try {
+                const s = await hgApp.videoModel(ep.vid);
+                if (s && s.url) {
+                  ep.url = s.url;
+                  ep.key = s.key || '';
+                  ep._appStream = true;
+                  task.progress.detail = `第 ${idx + 1} 集取流 ${s.quality || ''}`;
+                }
+              } catch (e) {
+                console.log(`[hongguo-app] 第 ${idx + 1} 集取流失败，降级网页源: ${e.message}`);
+              }
+            }
             if (ep.key) {
               // 红果 CENC-AES-CTR：完整下载密文后由 ffmpeg -decryption_key 本地解密（与 juku-backend 一致，
               // ffmpeg mov demuxer 原生支持 CENC，产物为标准明文 MP4；避免对不支持 Range 的服务器直连拉流）
