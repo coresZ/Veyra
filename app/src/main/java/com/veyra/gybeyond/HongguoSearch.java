@@ -16,19 +16,39 @@ import java.util.Set;
 final class HongguoSearch {
     private final OkHttpClient http;
     HongguoSearch(OkHttpClient http) { this.http = http; }
+    private static final java.util.regex.Pattern SEASON_SUFFIX = java.util.regex.Pattern
+            .compile("第\\s*([0-9零〇一二两兩三四五六七八九十百]+)\\s*([季部])[\\p{P}\\s]*$");
+
+    /** 剥离"第N季/部"后缀得到剧名主体："持械入宋第二季"→"持械入宋"。无后缀原样返回。 */
+    private static String seasonBase(String query) {
+        java.util.regex.Matcher match = SEASON_SUFFIX.matcher(query);
+        if (!match.find()) return query;
+        String base = query.substring(0, match.start()).trim();
+        while (!base.isEmpty()) {
+            char c = base.charAt(base.length() - 1);
+            if (!Character.isWhitespace(c) && Character.getType(c) != Character.START_PUNCTUATION
+                    && Character.getType(c) != Character.END_PUNCTUATION
+                    && Character.getType(c) != Character.OTHER_PUNCTUATION
+                    && Character.getType(c) != Character.CONNECTOR_PUNCTUATION) break;
+            base = base.substring(0, base.length() - 1).trim();
+        }
+        return base.isEmpty() ? query : base;
+    }
+
     JSONObject search(String keyword) throws Exception { return search(keyword, false); }
     JSONObject search(String keyword, boolean sequelLookup) throws Exception {
         keyword = keyword.trim();
         if (keyword.isEmpty()) return new JSONObject().put("items", new JSONArray()).put("nextPage", JSONObject.NULL);
         if (keyword.length() > 80) throw new IllegalArgumentException("搜索词过长");
-        // 红果联想接口：一次返回以关键词开头的完整短剧名（含"剧名+第N季"全集版），
-        // 网页搜索漏掉的全集版（如 341 集版持械入宋第三季）靠它补全（juku 同款方案）。
+        // 红果联想接口补全：剥离季后缀后双查询（主体 + 主体第）合并，覆盖单次返回不稳定的情况，
+        // 把网页搜索漏掉的全集版（341 集版持械入宋第三季、100 集版第二季）都带出来（juku 同款方案）。
+        final String baseQuery = seasonBase(keyword);
         java.util.LinkedHashMap<String, JSONObject> seen = new java.util.LinkedHashMap<>();
         try {
-            JSONArray suggest = suggestionItems(keyword, 50);
+            JSONArray suggest = suggestionItems(baseQuery);
             for (int i = 0; i < suggest.length(); i++) {
                 JSONObject it = suggest.optJSONObject(i);
-                if (it != null && normalize(it.optString("title")).contains(normalize(keyword)))
+                if (it != null && normalize(it.optString("title")).contains(normalize(baseQuery)))
                     seen.putIfAbsent(it.optString("id"), it);
             }
         } catch (Exception ignored) { }
@@ -58,44 +78,51 @@ final class HongguoSearch {
             throw new IOException("搜索页面数据结构已变化");
         }
     }
-    /** 红果联想接口（hongguoduanju.com，juku 验证可用）：suggest_list 过滤短剧名类型。 */
-    private JSONArray suggestionItems(String query, int count) throws Exception {
-        Request request = new Request.Builder()
-                .url("https://hongguoduanju.com/incent_resource/suggestion?app_id=8662&query="
-                        + Signer.Companion.encode(query) + "&count=" + count)
-                .header("User-Agent", "Mozilla/5.0")
-                .header("Referer", "https://hongguoduanju.com/")
-                .header("Accept", "application/json").build();
-        try (Response response = http.newCall(request).execute()) {
-            if (!response.isSuccessful() || response.body() == null) throw new IOException("联想接口不可用");
-            JSONObject json = new JSONObject(response.body().string());
-            JSONArray list = json.optJSONArray("suggest_list");
-            JSONArray items = new JSONArray();
-            Set<String> ids = new HashSet<>();
-            for (int i = 0; list != null && i < list.length(); i++) {
-                JSONObject record = list.optJSONObject(i);
-                if (record == null || !"short_play_name".equals(record.optString("word_type"))) continue;
-                JSONObject video = record.optJSONObject("video_data");
-                String id = video == null ? "" : video.optString("series_id");
-                if (id.isEmpty() || !id.matches("[0-9]{1,30}") || !ids.add(id)) continue;
-                String title = record.optString("name");
-                if (title.isEmpty() && video != null) title = video.optString("series_title");
-                JSONArray tags = new JSONArray();
-                if (video != null) {
-                    JSONArray cats = video.optJSONArray("category_list");
-                    for (int j = 0; cats != null && j < cats.length() && tags.length() < 5; j++) {
-                        String n = cats.optJSONObject(j).optString("name");
-                        if (!n.isEmpty()) tags.put(n);
+    /** 红果联想接口（hongguoduanju.com，juku 验证可用）：主体 + 主体"第"双查询合并，
+     *  suggest_list 过滤短剧名类型。实测单次返回不稳定（同一关键词两次子集不同），双查询互补。 */
+    private JSONArray suggestionItems(String base) throws Exception {
+        java.util.LinkedHashSet<String> queries = new java.util.LinkedHashSet<>();
+        queries.add(base);
+        if (base.length() <= 8) queries.add(base + "第");
+        java.util.LinkedHashMap<String, JSONObject> seen = new java.util.LinkedHashMap<>();
+        for (String q : queries) {
+            Request request = new Request.Builder()
+                    .url("https://hongguoduanju.com/incent_resource/suggestion?app_id=8662&query="
+                            + Signer.Companion.encode(q) + "&count=50")
+                    .header("User-Agent", "Mozilla/5.0")
+                    .header("Referer", "https://hongguoduanju.com/")
+                    .header("Accept", "application/json").build();
+            try (Response response = http.newCall(request).execute()) {
+                if (!response.isSuccessful() || response.body() == null) continue;
+                JSONObject json = new JSONObject(response.body().string());
+                JSONArray list = json.optJSONArray("suggest_list");
+                for (int i = 0; list != null && i < list.length(); i++) {
+                    JSONObject record = list.optJSONObject(i);
+                    if (record == null || !"short_play_name".equals(record.optString("word_type"))) continue;
+                    JSONObject video = record.optJSONObject("video_data");
+                    String id = video == null ? "" : video.optString("series_id");
+                    if (id.isEmpty() || !id.matches("[0-9]{1,30}")) continue;
+                    String title = record.optString("name");
+                    if (title.isEmpty() && video != null) title = video.optString("series_title");
+                    JSONArray tags = new JSONArray();
+                    if (video != null) {
+                        JSONArray cats = video.optJSONArray("category_list");
+                        for (int j = 0; cats != null && j < cats.length() && tags.length() < 5; j++) {
+                            String n = cats.optJSONObject(j).optString("name");
+                            if (!n.isEmpty()) tags.put(n);
+                        }
                     }
+                    seen.putIfAbsent(id, new JSONObject().put("id", id).put("title", title)
+                            .put("cover", video == null ? "" : video.optString("series_cover"))
+                            .put("description", video == null ? "" : video.optString("series_intro"))
+                            .put("episodeLabel", video == null ? "" : video.optString("episode_right_text"))
+                            .put("category", "").put("score", "").put("tags", tags));
                 }
-                items.put(new JSONObject().put("id", id).put("title", title)
-                        .put("cover", video == null ? "" : video.optString("series_cover"))
-                        .put("description", video == null ? "" : video.optString("series_intro"))
-                        .put("episodeLabel", video == null ? "" : video.optString("episode_right_text"))
-                        .put("category", "").put("score", "").put("tags", tags));
-            }
-            return items;
+            } catch (Exception ignored) { }
         }
+        JSONArray items = new JSONArray();
+        for (JSONObject it : seen.values()) items.put(it);
+        return items;
     }
     private static String normalize(String text) { return text.replaceAll("\\s+", "").toLowerCase(Locale.ROOT); }
     static JSONObject parse(JSONObject section, String keyword) throws Exception { return parse(section, keyword, false); }

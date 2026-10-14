@@ -363,40 +363,76 @@ final class SiteRepository {
     private static final ExecutorService SEARCH_POOL = Executors.newFixedThreadPool(6);
     private static final String[] CN_NUM = {"一", "二", "三", "四", "五", "六", "七", "八", "九", "十"};
 
-    /** 红果联想接口（hongguoduanju.com 官方站，juku 同款）：一次返回以关键词开头的完整短剧名
-     *  （含"剧名+第N季"全集版，如 341 集版持械入宋第三季）。黄果源是红果镜像，数据同源；
-     *  无论当前黄果通道（直连/代理/后端）都直接调此接口，失败由调用方兜底。 */
-    private JSONArray suggestionItems(String query, int count) throws Exception {
-        String url = "https://hongguoduanju.com/incent_resource/suggestion?app_id=8662&query="
-                + java.net.URLEncoder.encode(query, StandardCharsets.UTF_8) + "&count=" + count;
-        byte[] body = fetch(url);
-        JSONObject json = new JSONObject(new String(body, StandardCharsets.UTF_8));
-        JSONArray list = json.optJSONArray("suggest_list");
-        JSONArray items = new JSONArray();
-        java.util.Set<String> ids = new java.util.HashSet<>();
-        for (int i = 0; list != null && i < list.length(); i++) {
-            JSONObject record = list.optJSONObject(i);
-            if (record == null) continue;
-            if (!"short_play_name".equals(record.optString("word_type"))) continue;
-            JSONObject video = record.optJSONObject("video_data");
-            String id = video == null ? "" : video.optString("series_id");
-            if (id.isEmpty() || !id.matches("[0-9]{1,30}") || !ids.add(id)) continue;
-            String title = record.optString("name");
-            if (title.isEmpty() && video != null) title = video.optString("series_title");
-            JSONArray tags = new JSONArray();
-            if (video != null) {
-                JSONArray cats = video.optJSONArray("category_list");
-                for (int j = 0; cats != null && j < cats.length() && tags.length() < 5; j++) {
-                    String n = cats.optJSONObject(j).optString("name");
-                    if (!n.isEmpty()) tags.put(n);
-                }
-            }
-            items.put(new JSONObject().put("id", id).put("title", title)
-                    .put("cover", video == null ? "" : video.optString("series_cover"))
-                    .put("description", video == null ? "" : video.optString("series_intro"))
-                    .put("episodeLabel", video == null ? "" : video.optString("episode_right_text"))
-                    .put("category", "").put("score", "").put("tags", tags));
+    private static final java.util.regex.Pattern SEASON_SUFFIX = java.util.regex.Pattern
+            .compile("第\\s*([0-9零〇一二两兩三四五六七八九十百]+)\\s*([季部])[\\p{P}\\s]*$");
+
+    /** 剥离"第N季/部"后缀得到剧名主体："持械入宋第二季"→"持械入宋"。无后缀原样返回。 */
+    private static String seasonBase(String query) {
+        java.util.regex.Matcher match = SEASON_SUFFIX.matcher(query);
+        if (!match.find()) return query;
+        String base = query.substring(0, match.start()).trim();
+        while (!base.isEmpty()) {
+            char c = base.charAt(base.length() - 1);
+            if (!Character.isWhitespace(c) && Character.getType(c) != Character.START_PUNCTUATION
+                    && Character.getType(c) != Character.END_PUNCTUATION
+                    && Character.getType(c) != Character.OTHER_PUNCTUATION
+                    && Character.getType(c) != Character.CONNECTOR_PUNCTUATION) break;
+            base = base.substring(0, base.length() - 1).trim();
         }
+        return base.isEmpty() ? query : base;
+    }
+
+    /** 红果联想接口（hongguoduanju.com 官方站，juku 同款）：返回以关键词开头的完整短剧名。
+     *  剥离季后缀后双查询（主体 + 主体第）合并——实测单次返回不稳定（同一关键词两次结果不同子集），
+     *  双查询互补可覆盖 341 集版第三季、100 集版第二季等全部版本。失败由调用方兜底。 */
+    private JSONArray suggestionItems(String query) throws Exception {
+        String base = seasonBase(query);
+        java.util.LinkedHashSet<String> queries = new java.util.LinkedHashSet<>();
+        queries.add(base);
+        if (base.length() <= 8) queries.add(base + "第");
+        java.util.LinkedHashMap<String, JSONObject> seen = new java.util.LinkedHashMap<>();
+        java.util.List<Future<Void>> futures = new java.util.ArrayList<>();
+        for (final String q : queries) {
+            futures.add(SEARCH_POOL.submit(new Callable<Void>() {
+                @Override public Void call() {
+                    try {
+                        String url = "https://hongguoduanju.com/incent_resource/suggestion?app_id=8662&query="
+                                + java.net.URLEncoder.encode(q, StandardCharsets.UTF_8) + "&count=50";
+                        byte[] body = fetch(url);
+                        JSONObject json = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                        JSONArray list = json.optJSONArray("suggest_list");
+                        synchronized (seen) {
+                            for (int i = 0; list != null && i < list.length(); i++) {
+                                JSONObject record = list.optJSONObject(i);
+                                if (record == null || !"short_play_name".equals(record.optString("word_type"))) continue;
+                                JSONObject video = record.optJSONObject("video_data");
+                                String id = video == null ? "" : video.optString("series_id");
+                                if (id.isEmpty() || !id.matches("[0-9]{1,30}")) continue;
+                                String title = record.optString("name");
+                                if (title.isEmpty() && video != null) title = video.optString("series_title");
+                                JSONArray tags = new JSONArray();
+                                if (video != null) {
+                                    JSONArray cats = video.optJSONArray("category_list");
+                                    for (int j = 0; cats != null && j < cats.length() && tags.length() < 5; j++) {
+                                        String n = cats.optJSONObject(j).optString("name");
+                                        if (!n.isEmpty()) tags.put(n);
+                                    }
+                                }
+                                seen.putIfAbsent(id, new JSONObject().put("id", id).put("title", title)
+                                        .put("cover", video == null ? "" : video.optString("series_cover"))
+                                        .put("description", video == null ? "" : video.optString("series_intro"))
+                                        .put("episodeLabel", video == null ? "" : video.optString("episode_right_text"))
+                                        .put("category", "").put("score", "").put("tags", tags));
+                            }
+                        }
+                    } catch (Exception ignored) { }
+                    return null;
+                }
+            }));
+        }
+        for (Future<Void> f : futures) { try { f.get(); } catch (Exception ignored) { } }
+        JSONArray items = new JSONArray();
+        for (JSONObject it : seen.values()) items.put(it);
         return items;
     }
 
@@ -416,16 +452,28 @@ final class SiteRepository {
         if (query.length() > 80) query = query.substring(0, 80);
         if (query.isEmpty()) return new JSONObject().put("items", new JSONArray()).put("nextPage", JSONObject.NULL);
         JSONObject result = listing(page(profile.route("search", "query", java.net.URLEncoder.encode(query, StandardCharsets.UTF_8))), 1, "");
+        // 联想接口查询用剧名主体（剥离"第N季"后缀），过滤也用主体——
+        // 网页/联想返回的"持械入宋：第一季"等标题不含完整查询词"持械入宋第二季"，必须放宽到主体。
+        final String baseQuery = seasonBase(query);
         if (suggest) {
-            // 联想浮层：优先红果联想接口（返回真实短剧名建议，一个请求），失败回退网页查询
+            // 联想浮层：优先红果联想接口（真实短剧名建议），失败回退网页查询
             try {
-                JSONArray suggestList = suggestionItems(query, 10);
-                if (suggestList.length() > 0) return new JSONObject().put("items", suggestList).put("nextPage", JSONObject.NULL);
+                JSONArray suggestList = suggestionItems(query);
+                java.util.LinkedHashMap<String, JSONObject> filtered = new java.util.LinkedHashMap<>();
+                for (int i = 0; i < suggestList.length(); i++) {
+                    JSONObject it = suggestList.optJSONObject(i);
+                    if (it != null && it.optString("title").contains(baseQuery)) filtered.putIfAbsent(it.optString("id"), it);
+                }
+                if (filtered.size() > 0) {
+                    JSONArray items = new JSONArray();
+                    for (JSONObject it : filtered.values()) items.put(it);
+                    return new JSONObject().put("items", items).put("nextPage", JSONObject.NULL);
+                }
             } catch (Exception ignored) { }
             return result;
         }
-        // 搜索补全：源站网页搜索对"剧名+第/季"匹配不全（如搜"持械入宋"漏掉 341 集版第三季、219 集版第四季）。
-        // 主补全走红果联想接口（一个请求拿完整短剧名列表，juku 同款方案）；联想接口不可用时
+        // 搜索补全：源站网页搜索对"剧名+第/季"匹配不全（如搜"持械入宋"漏掉 341 集版第三季、100 集版第二季）。
+        // 主补全走红果联想接口（双查询合并完整短剧名列表，juku 同款方案）；联想接口不可用时
         // 回退并行穷举 去尾字 / +第 / +季 / +第N季(1..8) 变体查询。按 id 合并去重后按标题匹配度排序。
         JSONArray items = result.optJSONArray("items");
         int count = items == null ? 0 : items.length();
@@ -438,18 +486,18 @@ final class SiteRepository {
         }
         boolean suggestionOk = false;
         try {
-            JSONArray suggestList = suggestionItems(query, 50);
+            JSONArray suggestList = suggestionItems(query);
             if (suggestList.length() > 0) {
                 suggestionOk = true;
                 for (int i = 0; i < suggestList.length(); i++) {
                     JSONObject it = suggestList.optJSONObject(i);
-                    if (it != null && it.optString("title").contains(query)) seen.putIfAbsent(it.optString("id"), it);
+                    if (it != null && it.optString("title").contains(baseQuery)) seen.putIfAbsent(it.optString("id"), it);
                 }
             }
         } catch (Exception ignored) { }
         if (!suggestionOk && count < 20 && query.length() > 2) {
             java.util.LinkedHashSet<String> variants = new java.util.LinkedHashSet<>();
-            final String baseQuery = query;
+            final String fallbackQuery = query;
             String shorter = query.substring(0, query.length() - 1).trim();
             if (shorter.length() >= 2) variants.add(shorter);
             if (query.length() <= 8) variants.add(query + "第");
