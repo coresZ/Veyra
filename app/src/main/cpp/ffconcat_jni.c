@@ -29,6 +29,7 @@ extern char** backtrace_symbols(void* const* buffer, int size);
 #include <libavutil/channel_layout.h>
 #include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
+#include <libswscale/swscale.h>
 
 /* ---- native SIGSEGV/SIGABRT 捕获：崩溃时把 C 层 backtrace 写进阶段日志，再按默认行为终止 ----
  * Java 的 UncaughtExceptionHandler 抓不到 native 崩溃，这里在 nativeConcat 入口注册 handler，
@@ -220,16 +221,46 @@ static void majority_audio(AudioInfo* infos, int n, AudioInfo* out) {
     out->count = bestCnt;
 }
 
+/* 视频统一转码目标（等价后端 buildPlan 的"少数服从多数"）：
+ * active=0 → 视频 -c copy（现状）；active=1 → 少数派集视频转码为 targetCodec（多数派方向）。 */
+typedef struct {
+    int active;       /* 0/1：h264+hevc 混装且需要统一时才置 1 */
+    int targetCodec;  /* AV_CODEC_ID_H264 / AV_CODEC_ID_HEVC */
+    int crf;          /* x264:18 / x265:21（视觉质量对齐） */
+    int width;        /* 多数派代表集的宽（缩放到该尺寸 + 黑边 pad） */
+    int height;
+} VideoTarget;
+
+/* 探测单个分集的视频编码与尺寸（多数派判定用）；失败时 codec=0 */
+static void probe_video_codec(const char* path, const char* key, int* codec, int* w, int* h) {
+    *codec = 0; *w = 0; *h = 0;
+    AVFormatContext* in = NULL;
+    AVDictionary* opts = NULL;
+    if (key && *key) av_dict_set(&opts, "decryption_key", key, 0);
+    if (avformat_open_input(&in, path, NULL, &opts) < 0) { av_dict_free(&opts); return; }
+    av_dict_free(&opts);
+    if (avformat_find_stream_info(in, NULL) >= 0) {
+        int v = -1, a = -1;
+        pick_streams(in, &v, &a);
+        if (v >= 0 && in->streams[v]->codecpar) {
+            AVCodecParameters* cp = in->streams[v]->codecpar;
+            *codec = cp->codec_id;
+            *w = cp->width; *h = cp->height;
+        }
+    }
+    avformat_close_input(&in);
+}
+
 /* 阶段一：单集规范化（-c copy 重封装，时间轴归零 + dts 单调，等价后端"解密重封装"后的干净分集）。
  * key 非空时按 CENC-AES-CTR 解密（等价后端 ffmpeg -decryption_key，mov demuxer 原生支持），
  * 保持源帧率结构（CFR），避免 MediaMuxer 重封装引入 VFR 畸变（MPV 卡顿根因）。
  * 顺带校验：视频/音频轨道是否存在、音频包是否为空。返回 0 成功；<0 失败（错误已写日志）。 */
 static int transcode_segment(const char* inPath, const char* outPath, int idx, const char* key,
-                             const AudioInfo* tgt, char* logBuf,
+                             const AudioInfo* tgt, const VideoTarget* vt, char* logBuf,
                              char* mimeV, size_t mimeVcap, char* mimeA, size_t mimeAcap,
                              int64_t* nVPkts, int64_t* nAPkts);
 static int normalize_segment(const char* inPath, const char* outPath, int idx, const char* key,
-                             const AudioInfo* tgt, char* logBuf, char* mimeV, size_t mimeVcap,
+                             const AudioInfo* tgt, const VideoTarget* vt, char* logBuf, char* mimeV, size_t mimeVcap,
                              char* mimeA, size_t mimeAcap,
                              int64_t* nVPkts, int64_t* nAPkts)
 {
@@ -278,7 +309,7 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
                      idx, (int)cp->codec_id, (int)cp->profile, cp->sample_rate, ch,
                      tgt->codec, tgt->profile, tgt->sample_rate, tgt->channels);
             stageLog(logBuf, wl);
-            int trc = transcode_segment(inPath, outPath, idx, key, tgt, logBuf,
+            int trc = transcode_segment(inPath, outPath, idx, key, tgt, vt, logBuf,
                                         mimeV, mimeVcap, mimeA, mimeAcap, nVPkts, nAPkts);
             if (trc == 0) return 0;
             /* 统一音轨转码失败 → 降级：原样 copy 重封装（保证合并成功）。该集音频为特殊 AAC 变体
@@ -291,6 +322,23 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
         }
     }
     AVStream* vin = in->streams[vIdx];
+    /* 视频编码与多数派不一致（h264/hevc 混装，少数服从多数）→ 视频统一转码。
+     * 与音频判定共同走 transcode_segment（其内部同时处理视频+音频双通道）。
+     * 视频混装不能降级：concat 把异编码包写进同一轨会花屏/seek 失败。 */
+    if (vt && vt->active && vin->codecpar && vin->codecpar->codec_id != vt->targetCodec) {
+        char wl[224];
+        snprintf(wl, sizeof(wl), "[norm] 第%d集 视频编码与多数派不一致(本集 codec=%d / 目标 codec=%d) → 统一视频转码",
+                 idx, (int)vin->codecpar->codec_id, vt->targetCodec);
+        stageLog(logBuf, wl);
+        int trc = transcode_segment(inPath, outPath, idx, key, tgt, vt, logBuf,
+                                    mimeV, mimeVcap, mimeA, mimeAcap, nVPkts, nAPkts);
+        if (trc == 0) return 0;
+        char w2[256];
+        snprintf(w2, sizeof(w2), "[norm] 第%d集 视频统一转码失败 rc=%d → 中止合并（视频编码混装硬合并会花屏）",
+                 idx, trc);
+        stageLog(logBuf, w2);
+        return trc;
+    }
     {
         const AVCodecDescriptor* cd = vin->codecpar ? avcodec_descriptor_get(vin->codecpar->codec_id) : NULL;
         if (cd && cd->name) snprintf(mimeV, mimeVcap, "%s", cd->name);
@@ -439,13 +487,15 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
  * 本集音频参数（codec/采样率/声道）与多数派不一致时调用：音频 解码→swr→aac 编码，视频 -c copy。
  * 用于修复产物中音轨声道/采样率混用 → 播放器解码切换错乱（乱码/seek 丢声）的根源。 */
 static int transcode_segment(const char* inPath, const char* outPath, int idx, const char* key,
-                             const AudioInfo* tgt, char* logBuf,
+                             const AudioInfo* tgt, const VideoTarget* vt, char* logBuf,
                              char* mimeV, size_t mimeVcap, char* mimeA, size_t mimeAcap,
                              int64_t* nVPkts, int64_t* nAPkts)
 {
     *nVPkts = 0; *nAPkts = 0;
     if (mimeVcap > 0) mimeV[0] = 0;
     if (mimeAcap > 0) { snprintf(mimeA, mimeAcap, "aac"); }
+
+    int doVideo = (vt && vt->active) ? 1 : 0;   /* 视频也统一转码（少数派 → 多数派编码） */
 
     AVFormatContext* in = NULL;
     AVDictionary* openOpts = NULL;
@@ -462,15 +512,34 @@ static int transcode_segment(const char* inPath, const char* outPath, int idx, c
     {
         const AVCodecDescriptor* cd = vin->codecpar ? avcodec_descriptor_get(vin->codecpar->codec_id) : NULL;
         if (cd && cd->name && mimeVcap > 0) snprintf(mimeV, mimeVcap, "%s", cd->name);
+        /* 视频转码时 mimeV 按目标编码上报（供主流程 tag 统计多数派方向） */
+        if (doVideo && mimeVcap > 0)
+            snprintf(mimeV, mimeVcap, "%s", vt->targetCodec == AV_CODEC_ID_HEVC ? "hevc" : "h264");
     }
 
-    /* 解码器 */
+    /* 解码器（音频） */
     const AVCodec* dec = avcodec_find_decoder(ain->codecpar->codec_id);
     if (!dec) { logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 找不到音频解码器 codec=%d\n", idx, ain->codecpar->codec_id); avformat_close_input(&in); return AVERROR(ENOSYS); }
     AVCodecContext* decCtx = avcodec_alloc_context3(dec);
     if (!decCtx || avcodec_parameters_to_context(decCtx, ain->codecpar) < 0 || avcodec_open2(decCtx, dec, NULL) < 0) {
         logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 音频解码器打开失败\n", idx);
         if (decCtx) avcodec_free_context(&decCtx); avformat_close_input(&in); return AVERROR(EINVAL);
+    }
+
+    /* 视频解码器（仅视频转码时） */
+    AVCodecContext* vdecCtx = NULL;
+    if (doVideo) {
+        const AVCodec* vdec = avcodec_find_decoder(vin->codecpar->codec_id);
+        if (!vdec) {
+            logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 找不到视频解码器 codec=%d\n", idx, vin->codecpar->codec_id);
+            avcodec_free_context(&decCtx); avformat_close_input(&in); return AVERROR(ENOSYS);
+        }
+        vdecCtx = avcodec_alloc_context3(vdec);
+        if (!vdecCtx || avcodec_parameters_to_context(vdecCtx, vin->codecpar) < 0 || avcodec_open2(vdecCtx, vdec, NULL) < 0) {
+            logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 视频解码器打开失败\n", idx);
+            if (vdecCtx) avcodec_free_context(&vdecCtx);
+            avcodec_free_context(&decCtx); avformat_close_input(&in); return AVERROR(EINVAL);
+        }
     }
 
     /* 输出上下文 */
@@ -481,9 +550,82 @@ static int transcode_segment(const char* inPath, const char* outPath, int idx, c
     if (rc < 0) { logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 avio_open 失败 rc=%d\n", idx, rc); cleanup_output(oc); avcodec_free_context(&decCtx); avformat_close_input(&in); return rc; }
 
     AVStream* vout = avformat_new_stream(oc, NULL);
-    if (!vout) { logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 输出视频流创建失败\n", idx); cleanup_output(oc); avcodec_free_context(&decCtx); avformat_close_input(&in); return AVERROR(ENOMEM); }
-    avcodec_parameters_copy(vout->codecpar, vin->codecpar);
-    vout->time_base = vin->time_base;
+    if (!vout) { logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 输出视频流创建失败\n", idx); cleanup_output(oc); avcodec_free_context(&decCtx); if (vdecCtx) avcodec_free_context(&vdecCtx); avformat_close_input(&in); return AVERROR(ENOMEM); }
+
+    /* 视频编码器 + 缩放/pad（仅视频统一转码时） */
+    AVCodecContext* vencCtx = NULL;
+    struct SwsContext* sws = NULL;
+    AVFrame* fit = NULL;
+    AVFrame* pv = NULL;
+    int fitW = 0, fitH = 0;
+    if (doVideo) {
+        const char* encName = (vt->targetCodec == AV_CODEC_ID_HEVC) ? "libx265" : "libx264";
+        const AVCodec* venc = avcodec_find_encoder_by_name(encName);
+        if (!venc) {
+            logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 找不到视频编码器 %s（工具链未编译）\n", idx, encName);
+            cleanup_output(oc); avcodec_free_context(&decCtx); if (vdecCtx) avcodec_free_context(&vdecCtx); avformat_close_input(&in); return AVERROR(ENOSYS);
+        }
+        vencCtx = avcodec_alloc_context3(venc);
+        if (!vencCtx) {
+            logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 视频编码器上下文分配失败\n", idx);
+            cleanup_output(oc); avcodec_free_context(&decCtx); if (vdecCtx) avcodec_free_context(&vdecCtx); avformat_close_input(&in); return AVERROR(ENOMEM);
+        }
+        vencCtx->width = vt->width; vencCtx->height = vt->height;
+        vencCtx->pix_fmt = AV_PIX_FMT_YUV420P;
+        vencCtx->gop_size = 250;
+        vencCtx->max_b_frames = 4;
+        vencCtx->thread_count = 4;
+        {
+            AVRational fr = vin->avg_frame_rate;
+            AVRational tb = {1, 25};
+            if (fr.num > 0 && fr.den > 0 && fr.num >= fr.den)
+                av_reduce(&tb.num, &tb.den, fr.den, fr.num, 1000000);
+            vencCtx->time_base = tb;
+        }
+        char crf[8]; snprintf(crf, sizeof(crf), "%d", vt->crf);
+        av_opt_set(vencCtx->priv_data, "preset", "veryfast", 0);
+        av_opt_set(vencCtx->priv_data, "crf", crf, 0);
+        if (vt->targetCodec == AV_CODEC_ID_H264) av_opt_set(vencCtx->priv_data, "profile", "high", 0);
+        if (avcodec_open2(vencCtx, venc, NULL) < 0) {
+            logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 视频编码器 %s 打开失败\n", idx, encName);
+            avcodec_free_context(&vencCtx); cleanup_output(oc); avcodec_free_context(&decCtx); if (vdecCtx) avcodec_free_context(&vdecCtx); avformat_close_input(&in); return AVERROR(EINVAL);
+        }
+        {
+            int sw = vdecCtx->width, sh = vdecCtx->height;
+            if (sw > 0 && sh > 0 && vt->width > 0 && vt->height > 0) {
+                if ((int64_t)sw * vt->height > (int64_t)sh * vt->width) {
+                    fitH = ((int)((int64_t)sh * vt->width / sw)) & ~1;
+                    fitW = vt->width;
+                } else {
+                    fitW = ((int)((int64_t)sw * vt->height / sh)) & ~1;
+                    fitH = vt->height;
+                }
+                if (fitW < 2) fitW = 2; if (fitH < 2) fitH = 2;
+                sws = sws_getContext(sw, sh, vdecCtx->pix_fmt, fitW, fitH, AV_PIX_FMT_YUV420P, SWS_BILINEAR, NULL, NULL, NULL);
+                fit = av_frame_alloc();
+                if (sws && fit) {
+                    fit->format = AV_PIX_FMT_YUV420P; fit->width = fitW; fit->height = fitH;
+                    if (av_frame_get_buffer(fit, 32) < 0) { av_frame_free(&fit); fit = NULL; }
+                }
+                pv = av_frame_alloc();
+                if (pv) {
+                    pv->format = AV_PIX_FMT_YUV420P; pv->width = vt->width; pv->height = vt->height;
+                    if (av_frame_get_buffer(pv, 32) < 0) { av_frame_free(&pv); pv = NULL; }
+                }
+                if (!sws || !fit || !pv) {
+                    logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 视频 sws/pad 初始化失败\n", idx);
+                    if (sws) sws_freeContext(&sws); if (fit) av_frame_free(&fit); if (pv) av_frame_free(&pv);
+                    avcodec_free_context(&vencCtx); cleanup_output(oc); avcodec_free_context(&decCtx); if (vdecCtx) avcodec_free_context(&vdecCtx); avformat_close_input(&in); return AVERROR(ENOMEM);
+                }
+            }
+        }
+        avcodec_parameters_from_context(vout->codecpar, vencCtx);
+        vout->codecpar->codec_tag = make_tag(vt->targetCodec == AV_CODEC_ID_HEVC ? "hev1" : "avc3");
+        vout->time_base = vencCtx->time_base;
+    } else {
+        avcodec_parameters_copy(vout->codecpar, vin->codecpar);
+        vout->time_base = vin->time_base;
+    }
 
     AVStream* aout = avformat_new_stream(oc, NULL);
     if (!aout) { logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 输出音频流创建失败\n", idx); cleanup_output(oc); avcodec_free_context(&decCtx); avformat_close_input(&in); return AVERROR(ENOMEM); }
@@ -513,32 +655,99 @@ static int transcode_segment(const char* inPath, const char* outPath, int idx, c
         if (swr_alloc_set_opts2(&swr, &outCh, AV_SAMPLE_FMT_FLTP, encCtx->sample_rate,
                                 &inCh, decCtx->sample_fmt, decCtx->sample_rate, 0, NULL) < 0 || !swr || swr_init(swr) < 0) {
             logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 swr 初始化失败\n", idx);
-            if (swr) swr_free(&swr); avcodec_free_context(&encCtx); cleanup_output(oc); avcodec_free_context(&decCtx); avformat_close_input(&in); return AVERROR(EINVAL);
+            if (swr) swr_free(&swr); avcodec_free_context(&encCtx); if (vencCtx) avcodec_free_context(&vencCtx);
+            if (sws) sws_freeContext(&sws); if (fit) av_frame_free(&fit); if (pv) av_frame_free(&pv);
+            cleanup_output(oc); avcodec_free_context(&decCtx); if (vdecCtx) avcodec_free_context(&vdecCtx); avformat_close_input(&in); return AVERROR(EINVAL);
         }
     }
 
     rc = avformat_write_header(oc, NULL);
-    if (rc < 0) { logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 write_header 失败 rc=%d\n", idx, rc); swr_free(&swr); avcodec_free_context(&encCtx); cleanup_output(oc); avcodec_free_context(&decCtx); avformat_close_input(&in); return rc; }
+    if (rc < 0) { logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 write_header 失败 rc=%d\n", idx, rc); swr_free(&swr); avcodec_free_context(&encCtx); if (vencCtx) avcodec_free_context(&vencCtx); if (sws) sws_freeContext(&sws); if (fit) av_frame_free(&fit); if (pv) av_frame_free(&pv); cleanup_output(oc); avcodec_free_context(&decCtx); if (vdecCtx) avcodec_free_context(&vdecCtx); avformat_close_input(&in); return rc; }
 
     AVPacket* pkt = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
     AVFrame* ofr = av_frame_alloc();
     int64_t lastDtsV = AV_NOPTS_VALUE;
     int64_t audioPts = 0;
+    int64_t vFrames = 0;
     int loopRc = 0;
     while ((loopRc = av_read_frame(in, pkt)) >= 0) {
         int si = pkt->stream_index;
         if (si == vIdx) {
-            av_packet_rescale_ts(pkt, vin->time_base, vout->time_base);
-            pkt->pos = -1;
-            if (pkt->dts == AV_NOPTS_VALUE) pkt->dts = (lastDtsV == AV_NOPTS_VALUE) ? 0 : lastDtsV + 1;
-            if (pkt->pts == AV_NOPTS_VALUE) pkt->pts = pkt->dts;
-            if (lastDtsV != AV_NOPTS_VALUE && pkt->dts <= lastDtsV) { pkt->dts = lastDtsV + 1; if (pkt->pts < pkt->dts) pkt->pts = pkt->dts; }
-            lastDtsV = pkt->dts;
-            int wr = av_interleaved_write_frame(oc, pkt);
-            av_packet_unref(pkt);
-            if (wr < 0) { loopRc = wr; break; }
-            (*nVPkts)++;
+            if (doVideo && vdecCtx && vencCtx && sws && fit && pv) {
+                /* 视频统一转码：解码 → 缩放+黑边 pad(yuv420p) → libx264/libx265 编码 → 写 */
+                int ser = avcodec_send_packet(vdecCtx, pkt);
+                av_packet_unref(pkt);
+                if (ser < 0 && ser != AVERROR_EOF) {
+                    char e[128] = {0}; av_strerror(ser, e, sizeof(e));
+                    logStageB(logBuf, "规范化分集");
+                    logErrBoth(logBuf, "异常: 第%d集 视频 avcodec_send_packet 失败 rc=%d (%s)，已写 视频包=%lld 音频包=%lld\n",
+                           idx, ser, e, (long long)*nVPkts, (long long)*nAPkts);
+                    loopRc = ser; break;
+                }
+                while (avcodec_receive_frame(vdecCtx, frame) >= 0) {
+                    sws_scale(sws, frame->data, frame->linesize, 0, vdecCtx->height, fit->data, fit->linesize);
+                    av_frame_make_writable(pv);
+                    memset(pv->data[0], 16, (size_t)pv->linesize[0] * pv->height);
+                    memset(pv->data[1], 128, (size_t)pv->linesize[1] * (pv->height / 2));
+                    memset(pv->data[2], 128, (size_t)pv->linesize[2] * (pv->height / 2));
+                    int px = (vt->width - fitW) / 2, py = (vt->height - fitH) / 2;
+                    for (int y = 0; y < fitH; y++)
+                        memcpy(pv->data[0] + (size_t)(py + y) * pv->linesize[0] + px,
+                               fit->data[0] + (size_t)y * fit->linesize[0], (size_t)fitW);
+                    for (int y = 0; y < fitH / 2; y++)
+                        memcpy(pv->data[1] + (size_t)(py / 2 + y) * pv->linesize[1] + px / 2,
+                               fit->data[1] + (size_t)y * fit->linesize[1], (size_t)fitW / 2);
+                    for (int y = 0; y < fitH / 2; y++)
+                        memcpy(pv->data[2] + (size_t)(py / 2 + y) * pv->linesize[2] + px / 2,
+                               fit->data[2] + (size_t)y * fit->linesize[2], (size_t)fitW / 2);
+                    if (frame->pts != AV_NOPTS_VALUE)
+                        pv->pts = av_rescale_q(frame->pts, vdecCtx->time_base, vencCtx->time_base);
+                    else
+                        pv->pts = vFrames;
+                    int es = avcodec_send_frame(vencCtx, pv);
+                    if (es < 0) {
+                        char e[128] = {0}; av_strerror(es, e, sizeof(e));
+                        logStageB(logBuf, "规范化分集");
+                        logErrBoth(logBuf, "异常: 第%d集 视频 avcodec_send_frame 失败 rc=%d (%s)，帧 pts=%lld\n",
+                                   idx, es, e, (long long)pv->pts);
+                        loopRc = es; break;
+                    }
+                    AVPacket* vp = av_packet_alloc();
+                    while (avcodec_receive_packet(vencCtx, vp) >= 0) {
+                        vp->stream_index = vout->index;
+                        vp->pos = -1;
+                        int wr = av_interleaved_write_frame(oc, vp);
+                        if (wr < 0) {
+                            char e[128] = {0}; av_strerror(wr, e, sizeof(e));
+                            long long wp = (long long)vp->pts;
+                            av_packet_unref(vp);
+                            logStageB(logBuf, "规范化分集");
+                            logErrBoth(logBuf, "异常: 第%d集 视频 写包失败 rc=%d (%s)，pts=%lld 已写 视频包=%lld\n",
+                                       idx, wr, e, wp, (long long)*nVPkts);
+                            loopRc = wr; break;
+                        }
+                        av_packet_unref(vp);
+                        (*nVPkts)++;
+                    }
+                    av_packet_free(&vp);
+                    if (loopRc < 0) break;
+                    vFrames++;
+                }
+                av_frame_unref(frame);
+                if (loopRc < 0) break;
+            } else {
+                av_packet_rescale_ts(pkt, vin->time_base, vout->time_base);
+                pkt->pos = -1;
+                if (pkt->dts == AV_NOPTS_VALUE) pkt->dts = (lastDtsV == AV_NOPTS_VALUE) ? 0 : lastDtsV + 1;
+                if (pkt->pts == AV_NOPTS_VALUE) pkt->pts = pkt->dts;
+                if (lastDtsV != AV_NOPTS_VALUE && pkt->dts <= lastDtsV) { pkt->dts = lastDtsV + 1; if (pkt->pts < pkt->dts) pkt->pts = pkt->dts; }
+                lastDtsV = pkt->dts;
+                int wr = av_interleaved_write_frame(oc, pkt);
+                av_packet_unref(pkt);
+                if (wr < 0) { loopRc = wr; break; }
+                (*nVPkts)++;
+            }
         } else if (si == aIdx) {
             int ser = avcodec_send_packet(decCtx, pkt);
             av_packet_unref(pkt);
@@ -659,6 +868,51 @@ static int transcode_segment(const char* inPath, const char* outPath, int idx, c
             (*nAPkts)++;
         }
         av_packet_free(&ep);
+        /* 视频 flush：先 drain 解码器剩余帧（送入编码），再 flush 编码器 */
+        if (doVideo && vdecCtx && vencCtx && sws && fit && pv) {
+            avcodec_send_packet(vdecCtx, NULL);
+            while (avcodec_receive_frame(vdecCtx, frame) >= 0) {
+                sws_scale(sws, frame->data, frame->linesize, 0, vdecCtx->height, fit->data, fit->linesize);
+                av_frame_make_writable(pv);
+                memset(pv->data[0], 16, (size_t)pv->linesize[0] * pv->height);
+                memset(pv->data[1], 128, (size_t)pv->linesize[1] * (pv->height / 2));
+                memset(pv->data[2], 128, (size_t)pv->linesize[2] * (pv->height / 2));
+                int px = (vt->width - fitW) / 2, py = (vt->height - fitH) / 2;
+                for (int y = 0; y < fitH; y++)
+                    memcpy(pv->data[0] + (size_t)(py + y) * pv->linesize[0] + px,
+                           fit->data[0] + (size_t)y * fit->linesize[0], (size_t)fitW);
+                for (int y = 0; y < fitH / 2; y++)
+                    memcpy(pv->data[1] + (size_t)(py / 2 + y) * pv->linesize[1] + px / 2,
+                           fit->data[1] + (size_t)y * fit->linesize[1], (size_t)fitW / 2);
+                for (int y = 0; y < fitH / 2; y++)
+                    memcpy(pv->data[2] + (size_t)(py / 2 + y) * pv->linesize[2] + px / 2,
+                           fit->data[2] + (size_t)y * fit->linesize[2], (size_t)fitW / 2);
+                if (frame->pts != AV_NOPTS_VALUE)
+                    pv->pts = av_rescale_q(frame->pts, vdecCtx->time_base, vencCtx->time_base);
+                else
+                    pv->pts = vFrames;
+                avcodec_send_frame(vencCtx, pv);
+                vFrames++;
+            }
+            avcodec_send_frame(vencCtx, NULL);
+            AVPacket* vp = av_packet_alloc();
+            while (avcodec_receive_packet(vencCtx, vp) >= 0) {
+                vp->stream_index = vout->index;
+                vp->pos = -1;
+                int wr = av_interleaved_write_frame(oc, vp);
+                if (wr < 0) {
+                    char e[128] = {0}; av_strerror(wr, e, sizeof(e));
+                    long long wp = (long long)vp->pts;
+                    av_packet_unref(vp);
+                    logStageB(logBuf, "规范化分集");
+                    logErrBoth(logBuf, "异常: 第%d集 视频 flush 写包失败 rc=%d (%s)，pts=%lld\n", idx, wr, e, wp);
+                    loopRc = wr; break;
+                }
+                av_packet_unref(vp);
+                (*nVPkts)++;
+            }
+            av_packet_free(&vp);
+        }
     }
     av_packet_free(&pkt);
     av_frame_free(&frame);
@@ -666,6 +920,11 @@ static int transcode_segment(const char* inPath, const char* outPath, int idx, c
     rc = av_write_trailer(oc);
     swr_free(&swr);
     avcodec_free_context(&encCtx);
+    if (vencCtx) avcodec_free_context(&vencCtx);
+    if (vdecCtx) avcodec_free_context(&vdecCtx);
+    if (sws) sws_freeContext(&sws);
+    if (fit) av_frame_free(&fit);
+    if (pv) av_frame_free(&pv);
     avcodec_free_context(&decCtx);
     cleanup_output(oc);
     avformat_close_input(&in);
@@ -757,6 +1016,47 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
         stageLog(logBuf, wl);
     }
 
+    /* ---- 0.46 视频编码探测：h264/hevc 混装时少数服从多数（等价后端 buildPlan 的 step.video：
+     * 多数派 hevc → 少数派转 libx265；多数派 h264 → 少数派转 libx264。尺寸取多数派代表集） ---- */
+    VideoTarget vt;
+    memset(&vt, 0, sizeof(vt));
+    {
+        int vCodes[256], vWs[256], vHs[256];
+        int hevcAll = 0, h264All = 0;
+        for (int i = 0; i < n; i++) {
+            char k[64] = {0};
+            if (keys) {
+                jstring ks = (jstring)(*env)->GetObjectArrayElement(env, keys, i);
+                if (ks) { jstring_to_utf8(env, ks, k, sizeof(k)); (*env)->DeleteLocalRef(env, ks); }
+            }
+            probe_video_codec(origPaths[i], k, &vCodes[i], &vWs[i], &vHs[i]);
+            if (vCodes[i] == AV_CODEC_ID_HEVC) hevcAll++;
+            else if (vCodes[i] == AV_CODEC_ID_H264) h264All++;
+        }
+        if (hevcAll > 0 && h264All > 0) {   /* 仅混装需要统一；全同编码时维持现状 -c copy */
+            vt.active = 1;
+            vt.targetCodec = (hevcAll >= h264All) ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264;
+            vt.crf = (vt.targetCodec == AV_CODEC_ID_HEVC) ? 21 : 18;
+            /* 多数派编码代表集的尺寸（转码目标） */
+            for (int i = 0; i < n; i++) {
+                if (vCodes[i] == vt.targetCodec && vWs[i] > 0 && vHs[i] > 0) {
+                    vt.width = vWs[i]; vt.height = vHs[i];
+                    break;
+                }
+            }
+            if (vt.width <= 0 || vt.height <= 0) { vt.width = 0; vt.height = 0; vt.active = 0; }
+        }
+        char wl[192];
+        if (vt.active)
+            snprintf(wl, sizeof(wl), "[nativeConcat] 视频多数派目标: codec=%s crf=%d %dx%d（混装 %d×hevc + %d×h264）",
+                     (vt.targetCodec == AV_CODEC_ID_HEVC) ? "hevc" : "h264", vt.crf, vt.width, vt.height,
+                     hevcAll, h264All);
+        else
+            snprintf(wl, sizeof(wl), "[nativeConcat] 视频编码一致（hevc=%d h264=%d）无需视频转码",
+                     hevcAll, h264All);
+        stageLog(logBuf, wl);
+    }
+
     /* ---- 0.5 阶段一：逐集规范化（-c copy 重封装，音频参数一致时纯 copy，不一致时统一音轨转码；
      * 等价后端：先逐集解密重封装/转码成干净分集，再 concat） ---- */
     char outDir[1024];
@@ -768,7 +1068,7 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
     char segPaths[256][1100];
     int hevcN = 0, h264N = 0;   /* majority 编码统计（等价后端 majorityKey → tag 判定） */
     for (int i = 0; i < n; i++) {
-        snprintf(segPaths[i], sizeof(segPaths[i]), "%s/seg_v6_%d.mp4", outDir, i + 1);
+        snprintf(segPaths[i], sizeof(segPaths[i]), "%s/seg_v7_%d.mp4", outDir, i + 1);
         char okPath[1150];
         snprintf(okPath, sizeof(okPath), "%s.ok", segPaths[i]);
         struct stat st;
@@ -787,7 +1087,7 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
         }
         char mimeV[32] = {0}, mimeA[32] = {0};
         int64_t nVP = 0, nAP = 0;
-        int r = normalize_segment(origPaths[i], segPaths[i], i + 1, keyBuf, &aTarget, logBuf,
+        int r = normalize_segment(origPaths[i], segPaths[i], i + 1, keyBuf, &aTarget, &vt, logBuf,
                                   mimeV, sizeof(mimeV), mimeA, sizeof(mimeA), &nVP, &nAP);
         if (r < 0) {
             char wl[256]; snprintf(wl, sizeof(wl), "[nativeConcat] 失败: 第%d集规范化失败 rc=%d", i + 1, r);
