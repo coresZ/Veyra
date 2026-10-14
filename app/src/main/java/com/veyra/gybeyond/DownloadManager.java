@@ -1,5 +1,6 @@
 package com.veyra.gybeyond;
 
+import android.content.ContentUris;
 import android.content.ContentValues;
 import android.content.Context;
 import android.media.MediaCodec;
@@ -247,6 +248,9 @@ final class DownloadManager {
                             } catch (Exception ignored) { }
                         }
                     }
+                    // 兜底：删除公共 Downloads/Veyra/<剧名>/ 下该剧全部产物与残留
+                    //（含 MediaStore 同名冲突时系统自动加 "_时间戳" 后缀的孤儿文件、空文件夹）
+                    purgePublicExports(t);
                     // 删除整个分集/缓存目录（含正在合并的 merged.mp4、seg_v6 缓存、native.log）
                     File dir = new File(context.getFilesDir(), "downloads/" + t.id);
                     if (dir.exists()) deleteRecursive(dir);
@@ -927,11 +931,29 @@ final class DownloadManager {
     // ---- 导出到公共 Download（MediaStore，API 29+；旧版回退 app 专属目录）----
     private Uri exportToDownloads(File file, String subDir, String displayName) throws Exception {
         if (Build.VERSION.SDK_INT >= 29) {
+            // 先清理同名旧条目：MediaStore insert 遇同名（残留/删除未及时完成）会自动追加 "_时间戳"
+            // 后缀生成新文件，导致产物名漂移 + 旧文件残留；先删同名再插入，保证永远用原名覆盖。
+            String rel = Environment.DIRECTORY_DOWNLOADS + "/Veyra";
+            if (subDir != null && !subDir.isEmpty()) rel += "/" + subDir;
+            try (android.database.Cursor c = context.getContentResolver().query(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    new String[]{MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME},
+                    MediaStore.Downloads.RELATIVE_PATH + "=?", new String[]{rel}, null)) {
+                if (c != null) {
+                    while (c.moveToNext()) {
+                        if (displayName.equals(c.getString(1))) {
+                            try {
+                                context.getContentResolver().delete(
+                                        ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)),
+                                        null, null);
+                            } catch (Exception ignored) { }
+                        }
+                    }
+                }
+            } catch (Exception ignored) { }
             ContentValues values = new ContentValues();
             values.put(MediaStore.Downloads.DISPLAY_NAME, displayName);
             values.put(MediaStore.Downloads.MIME_TYPE, "video/mp4");
-            String rel = Environment.DIRECTORY_DOWNLOADS + "/Veyra";
-            if (subDir != null && !subDir.isEmpty()) rel += "/" + subDir;
             values.put(MediaStore.Downloads.RELATIVE_PATH, rel);
             values.put(MediaStore.Downloads.IS_PENDING, 1);
             Uri uri = context.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
@@ -966,6 +988,57 @@ final class DownloadManager {
             int n;
             while ((n = in.read(buffer)) > 0) out.write(buffer, 0, n);
         }
+    }
+
+    /** 删除公共 Downloads/Veyra/<剧名>/ 下该剧全部 mp4 产物与残留：
+     *  原名（<剧名>.mp4）+ MediaStore 同名冲突自动加后缀的孤儿（<剧名>_<时间戳>.mp4）+ 空文件夹。
+     *  与 task.output 指向的 uri/文件互补，确保「APP 删除 = 手机存储彻底删干净」。 */
+    private void purgePublicExports(Task t) {
+        try {
+            String base = t.title == null ? "" : t.title.replaceAll("[\\\\/:*?\"<>|]", "_");
+            String displayBase = base + ".mp4";
+            if (Build.VERSION.SDK_INT >= 29) {
+                String rel = Environment.DIRECTORY_DOWNLOADS + "/Veyra" + (base.isEmpty() ? "" : "/" + base);
+                try (android.database.Cursor c = context.getContentResolver().query(
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        new String[]{MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME},
+                        MediaStore.Downloads.RELATIVE_PATH + "=?", new String[]{rel}, null)) {
+                    if (c != null) {
+                        while (c.moveToNext()) {
+                            String name = c.getString(1);
+                            if (name == null) continue;
+                            boolean hit = name.equals(displayBase)
+                                    || (!base.isEmpty() && name.length() > displayBase.length()
+                                    && name.startsWith(displayBase) && name.charAt(displayBase.length()) == '_'
+                                    && name.endsWith(".mp4"));
+                            if (hit) {
+                                try {
+                                    context.getContentResolver().delete(
+                                            ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)),
+                                            null, null);
+                                } catch (Exception ignored) { }
+                            }
+                        }
+                    }
+                } catch (Exception ignored) { }
+                // MediaStore 删除后尝试删物理空目录（部分 ROM 删除异步，删不掉就留给系统回收）
+                try {
+                    File pub = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Veyra/" + base);
+                    String[] left = pub.list();
+                    if (left != null && left.length == 0) pub.delete();
+                } catch (Exception ignored) { }
+            } else {
+                File dir = new File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "Veyra/" + base);
+                if (dir.exists() && dir.isDirectory()) {
+                    File[] kids = dir.listFiles();
+                    if (kids != null) for (File f : kids) {
+                        if (f.isFile() && f.getName().endsWith(".mp4")) f.delete();
+                    }
+                    String[] left = dir.list();
+                    if (left == null || left.length == 0) dir.delete();
+                }
+            }
+        } catch (Exception ignored) { }
     }
 
     private static void deleteRecursive(File file) {
