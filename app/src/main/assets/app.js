@@ -1003,12 +1003,13 @@ async function submitDownloadTo(target) {
   downloadMode = 'parsing';
   renderDownloadSheet();
   try {
-    const resolved = await resolveEpisodesForDownload(episodes);
-    if (!resolved.length) throw new Error('没有可下载的分集');
     if (target === 'nas') {
-      await api('nas-download-start', { source: contentSource, title: state.detail.title, seriesId: String(state.detail.seriesId || state.detail.id), episodes: resolved });
-      toast('已提交 NAS 下载任务');
+      // NAS 自主解析：只推 seriesId/title/集数，由后端调红果 App 接口取流（最高画质档）
+      await api('nas-download-start', { source: contentSource, title: state.detail.title, seriesId: String(state.detail.seriesId || state.detail.id), episodes });
+      toast('已提交 NAS 下载任务（后端自行解析取流）');
     } else {
+      const resolved = await resolveEpisodesForDownload(episodes);
+      if (!resolved.length) throw new Error('没有可下载的分集');
       await api('download-start', { source: contentSource, title: state.detail.title, episodes: resolved });
       toast('已开始下载到手机');
     }

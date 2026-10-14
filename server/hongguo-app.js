@@ -180,4 +180,94 @@ function popcount(n) {
   return c;
 }
 
-module.exports = { videoDetail, videoModel, deriveKey, sign, newDeviceId };
+// ===== NAS 自主系列解析（手机端只推 seriesId/title/集数，不再解析 URL）=====
+
+const MIRROR_ORIGINS = [
+  'https://thu.pqhybuxo.cc',
+  'https://www.pqhybuxo.cc',
+  'https://m.pqhybuxo.cc',
+];
+
+function httpGet(url, headers) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const mod = u.protocol === 'https:' ? require('https') : require('http');
+    const req = mod.get(u, { headers: Object.assign({ 'User-Agent': 'Mozilla/5.0' }, headers || {}) }, res => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        return resolve(httpGet(res.headers.location, headers));
+      }
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('error', reject);
+    req.setTimeout(15000, () => req.destroy(new Error('请求超时')));
+  });
+}
+
+/** 从 hongguoduanju.com 搜索结果匹配红果 series_id（无需红果签名；标题一致或包含且集数满足）。 */
+async function searchSeries(title, expectEpisodes) {
+  const q = encodeURIComponent(String(title || '').trim());
+  if (!q) throw new Error('剧名缺失');
+  const { body } = await httpGet('https://hongguoduanju.com/search/' + q);
+  const start = body.indexOf('_ROUTER_DATA = ');
+  if (start < 0) throw new Error('搜索页结构异常');
+  const jsonStart = body.indexOf('{', start);
+  if (jsonStart < 0) throw new Error('搜索页数据缺失');
+  // JSON 内文本可能含 "</script>"，不能用第一个 </script> 截断；做括号平衡解析
+  let depth = 0, inStr = false, esc = false, jsonEnd = -1;
+  for (let i = jsonStart; i < body.length; i++) {
+    const ch = body[i];
+    if (esc) { esc = false; continue; }
+    if (inStr) {
+      if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) { jsonEnd = i + 1; break; } }
+  }
+  if (jsonEnd < 0) throw new Error('搜索页数据不完整');
+  const data = JSON.parse(body.slice(jsonStart, jsonEnd));
+  const ld = data.loaderData || {};
+  const norm = s => String(s || '').replace(/\s+/g, '').toLowerCase();
+  const titleNorm = norm(title);
+  const want = Number(expectEpisodes) || 0;
+  let best = null;
+  for (const key of Object.keys(ld)) {
+    const section = ld[key];
+    if (!section || !Array.isArray(section.searchList)) continue;
+    for (const row of section.searchList) {
+      const vd = (row && row.video_data) || {};
+      const sid = String(vd.series_id || '');
+      if (!/^[0-9]{1,30}$/.test(sid)) continue;
+      const st = norm(vd.series_title || '');
+      const eps = parseInt(String(vd.episode_right_text || '').replace(/[^0-9]/g, ''), 10) || 0;
+      if (st === titleNorm) return sid; // 标题完全一致最优
+      if (!best && st && (st.includes(titleNorm) || titleNorm.includes(st)) && (!want || eps >= want)) best = sid;
+    }
+  }
+  if (best) return best;
+  throw new Error('未匹配到对应红果剧集');
+}
+
+/** 网页源保底：镜像站播放页 #videoInitialData → videoSrc（网页源直链）。 */
+async function fetchWebUrl(id, episode) {
+  for (const origin of MIRROR_ORIGINS) {
+    try {
+      const path = episode === 1 ? `/video/${id}/` : `/video/${id}/ep-${episode}/`;
+      const { status, body } = await httpGet(origin + path);
+      if (status !== 200) continue;
+      const m = body.match(/<script[^>]*id="videoInitialData"[^>]*>([\s\S]*?)<\/script>/);
+      if (!m) continue;
+      const data = JSON.parse(m[1]);
+      const src = data.videoSrc;
+      if (typeof src === 'string' && /^https?:\/\//.test(src)) return src;
+    } catch { /* 换下一个 origin */ }
+  }
+  throw new Error('网页源播放地址获取失败');
+}
+
+module.exports = { videoDetail, videoModel, deriveKey, sign, newDeviceId, searchSeries, fetchWebUrl };

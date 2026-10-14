@@ -339,19 +339,41 @@ async function runTask(task) {
   const outputPath = safeJoin(DOWNLOAD_DIR, outName);
 
   // 红果 App 取流升级（v0.13.45）：官方接口多清晰度选最高档（随机设备+签名，NAS 家宽出口）。
-  // 详情一次拿全集 vid；下载 worker 逐集调 video_model/v1 取流。失败自动降级网页源，下载不中断。
-  if (task.source === 'hongguo' && task.seriesId && !task._appVids) {
-    try {
-      const { vids } = await hgApp.videoDetail(task.seriesId);
-      if (vids && vids.length >= task.episodes.length) {
-        task.episodes.forEach((ep, i) => { ep.vid = vids[i]; });
-        task._appVids = true;
-        console.log(`[hongguo-app] ${task.title} 注入 ${vids.length} 个 vid，走 App 最高清晰度取流`);
-      } else {
-        console.log(`[hongguo-app] ${task.title} 详情集数不足（seriesId=${task.seriesId}，需 ${task.episodes.length} 集，实际 ${vids ? vids.length : 0}），降级网页源`);
+  // 解析链路（NAS 自主，手机端只推 seriesId/title/集数）：
+  //   A. seriesId 直接 videoDetail 拿 vid
+  //   B. A 失败 → 标题搜索 hongguoduanju.com 匹配真 series_id → videoDetail
+  //   C. 仍失败 → 下载 worker 惰性抓镜像站网页源保底（低码率，仅兜底）
+  if (task.source === 'hongguo' && !task._appVids) {
+    if (!task._webId) task._webId = task.seriesId; // 保留手机推来的原始 ID（网页源保底用）
+    let vids = null;
+    if (task.seriesId) {
+      try {
+        const det = await hgApp.videoDetail(task.seriesId);
+        if (det.vids && det.vids.length >= task.episodes.length) vids = det.vids;
+        else console.log(`[hongguo-app] ${task.title} seriesId=${task.seriesId} 集数不足(${det.vids ? det.vids.length : 0}/${task.episodes.length})`);
+      } catch (e) {
+        console.log(`[hongguo-app] ${task.title} videoDetail(${task.seriesId}) 失败: ${e.message}`);
       }
-    } catch (e) {
-      console.log(`[hongguo-app] ${task.title} 详情取 vid 失败（seriesId=${task.seriesId}）: ${e.message}`);
+    }
+    if (!vids) {
+      try {
+        const sid = await hgApp.searchSeries(task.title, task.episodes.length);
+        if (sid) {
+          console.log(`[hongguo-app] ${task.title} 标题搜索命中 series_id=${sid}`);
+          task.seriesId = sid;
+          const det = await hgApp.videoDetail(sid);
+          if (det.vids && det.vids.length >= task.episodes.length) vids = det.vids;
+        }
+      } catch (e) {
+        console.log(`[hongguo-app] ${task.title} 标题搜索匹配失败: ${e.message}`);
+      }
+    }
+    if (vids) {
+      task.episodes.forEach((ep, i) => { ep.vid = vids[i]; });
+      task._appVids = true;
+      console.log(`[hongguo-app] ${task.title} 注入 ${vids.length} 个 vid，走 App 最高清晰度取流`);
+    } else {
+      console.log(`[hongguo-app] ${task.title} App 源不可用，将走网页源保底`);
     }
     touch(task);
     flushStore(true);
@@ -402,6 +424,16 @@ async function runTask(task) {
                   }
                 } catch (e) {
                   console.log(`[hongguo-app] 第 ${idx + 1} 集取流失败，降级网页源: ${e.message}`);
+                }
+              }
+              // 仍无播放地址（手机端未推 URL 且 App 源不可用）：NAS 自抓镜像站网页源保底
+              if (!ep.url && attempt === 0) {
+                try {
+                  ep.url = await hgApp.fetchWebUrl(task._webId || task.seriesId, idx + 1);
+                  ep.key = '';
+                  console.log(`[hongguo-app] 第 ${idx + 1} 集网页源保底获取成功`);
+                } catch (e) {
+                  throw new Error(`第 ${idx + 1} 集网页源解析失败: ${e.message}`);
                 }
               }
               if (ep.key) {
@@ -560,17 +592,24 @@ function retryFailedEpisodes(id, owner, isAdmin) {
 // ---- 对外 API ----
 function createTask({ source, title, seriesId, episodes, owner }) {
   if (!Array.isArray(episodes) || episodes.length === 0) throw new Error('没有可下载的分集');
-  for (const ep of episodes) {
-    if (!ep || !/^https?:\/\//.test(String(ep.url || ''))) throw new Error('分集播放地址无效');
-    if (ep.key && !/^[0-9a-f]{32}$/i.test(String(ep.key))) throw new Error('分集内容密钥无效');
+  const norm = [];
+  for (let i = 0; i < episodes.length; i++) {
+    const raw = episodes[i];
+    if (typeof raw === 'number') { norm.push({ index: i + 1, url: '', key: '' }); continue; }
+    if (typeof raw === 'object' && raw !== null && raw.index != null) { norm.push({ index: Number(raw.index), url: String(raw.url || ''), key: raw.key ? String(raw.key) : '' }); continue; }
+    throw new Error('分集参数无效');
+  }
+  for (const ep of norm) {
+    if (ep.url && !/^https?:\/\//.test(ep.url)) throw new Error('分集播放地址无效');
+    if (ep.key && !/^[0-9a-f]{32}$/i.test(ep.key)) throw new Error('分集内容密钥无效');
   }
   const id = crypto.randomBytes(8).toString('hex');
   const task = {
     id, source: source === 'huangguo' ? 'huangguo' : 'hongguo',
     title: sanitizeName(title), seriesId: String(seriesId || ''),
-    episodes: episodes.map((ep, i) => ({ index: i + 1, url: String(ep.url), key: ep.key ? String(ep.key) : '' })),
+    episodes: norm,
     status: 'queued', owner: String(owner || ''), output: '', failedEpisodes: [],
-    progress: { phase: 'queued', episode: 0, total: episodes.length, percent: 0, detail: '排队中' },
+    progress: { phase: 'queued', episode: 0, total: norm.length, percent: 0, detail: '排队中' },
     createdAt: Date.now(), updatedAt: Date.now(), error: '',
   };
   tasks[id] = task;
