@@ -1006,7 +1006,7 @@ async function submitDownloadTo(target) {
     const resolved = await resolveEpisodesForDownload(episodes);
     if (!resolved.length) throw new Error('没有可下载的分集');
     if (target === 'nas') {
-      await api('nas-download-start', { source: contentSource, title: state.detail.title, seriesId: String(state.detail.id), episodes: resolved });
+      await api('nas-download-start', { source: contentSource, title: state.detail.title, seriesId: String(state.detail.seriesId || state.detail.id), episodes: resolved });
       toast('已提交 NAS 下载任务');
     } else {
       await api('download-start', { source: contentSource, title: state.detail.title, episodes: resolved });

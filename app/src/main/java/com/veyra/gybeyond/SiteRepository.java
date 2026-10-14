@@ -646,7 +646,20 @@ final class SiteRepository {
         if (episodes.length() == 0) throw new IllegalStateException("未找到选集列表");
         result.put("episodeLabel", "共 " + episodes.length() + " 集");
         result.put("episodes", episodes);
+        // 提取红果官方系列键（网页版 JSON 里可能带 App series_id/album_id 等），供 NAS 任务走红果 App 取流
+        // （不落地会退化为网页源低码率；宁可多候选键，取第一个合法数字）
+        String appSeries = firstNonEmpty(
+                data.optString("series_id"), data.optString("seriesId"),
+                data.optString("album_id"), data.optString("albumId"),
+                data.optString("related_album_id"), data.optString("red_key"),
+                data.optString("redKey"), data.optString("video_album_id"));
+        if (!appSeries.isEmpty() && appSeries.matches("[0-9]{1,30}")) result.put("seriesId", appSeries);
         return result;
+    }
+
+    private static String firstNonEmpty(String... values) {
+        for (String v : values) if (v != null && !v.trim().isEmpty()) return v.trim();
+        return "";
     }
 
     JSONObject episode(String id, int number) throws Exception {

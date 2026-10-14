@@ -347,9 +347,11 @@ async function runTask(task) {
         task.episodes.forEach((ep, i) => { ep.vid = vids[i]; });
         task._appVids = true;
         console.log(`[hongguo-app] ${task.title} 注入 ${vids.length} 个 vid，走 App 最高清晰度取流`);
+      } else {
+        console.log(`[hongguo-app] ${task.title} 详情集数不足（seriesId=${task.seriesId}，需 ${task.episodes.length} 集，实际 ${vids ? vids.length : 0}），降级网页源`);
       }
     } catch (e) {
-      console.log(`[hongguo-app] 详情取 vid 失败，降级网页源: ${e.message}`);
+      console.log(`[hongguo-app] ${task.title} 详情取 vid 失败（seriesId=${task.seriesId}）: ${e.message}`);
     }
     touch(task);
     flushStore(true);
@@ -395,6 +397,7 @@ async function runTask(task) {
                   if (s && s.url) {
                     ep.url = s.url;
                     ep.key = s.key || '';
+                    ep._appSource = true;
                     task.progress.detail = `第 ${idx + 1} 集取流 ${s.quality || ''}`;
                   }
                 } catch (e) {
@@ -466,11 +469,13 @@ async function runTask(task) {
 
   // 手动合并：下载完成后保留分集，等待用户在下载管理里点「合并」再合并（不再自动合并）
   task.status = 'ready';
+  const appCount = task.episodes.filter(ep => ep._appSource).length;
   const failedCount = (task.failedEpisodes || []).length;
+  const sourceNote = task._appVids ? `（红果 App 源 ${appCount}/${task.episodes.length} 集）` : '（网页源，未注入 App vid）';
   if (failedCount > 0) {
-    task.progress = { phase: 'ready', episode: downloaded, total: task.episodes.length, percent: 100, detail: `已下载 ${downloaded}/${task.episodes.length} 集，失败 ${failedCount} 集（可重试失败集，也可先合并成功部分）` };
+    task.progress = { phase: 'ready', episode: downloaded, total: task.episodes.length, percent: 100, detail: `已下载 ${downloaded}/${task.episodes.length} 集，失败 ${failedCount} 集${sourceNote}，可重试失败集或先合并成功部分` };
   } else {
-    task.progress = { phase: 'ready', episode: task.episodes.length, total: task.episodes.length, percent: 100, detail: `已下载 ${task.episodes.length} 集，待合并` };
+    task.progress = { phase: 'ready', episode: task.episodes.length, total: task.episodes.length, percent: 100, detail: `已下载 ${task.episodes.length} 集${sourceNote}，待合并` };
   }
   touch(task);
   flushStore(true);
