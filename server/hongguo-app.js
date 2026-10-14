@@ -123,7 +123,7 @@ async function videoDetail(seriesId) {
   return { vids, title: vd.series_title || '' };
 }
 
-/** 单集取流：多清晰度选 ≤1080 最高档（与 Kotlin stream(maxQuality=1080) 一致），返回 { url, key }。 */
+/** 单集取流：多清晰度选 ≤1080 最高档（与 Kotlin stream(maxQuality=1080) 一致），返回 { url, altUrls, key }。 */
 async function videoModel(vid) {
   const body = Buffer.from(JSON.stringify({
     video_id: String(vid), content_type: 1,
@@ -138,22 +138,40 @@ async function videoModel(vid) {
   }
   const rawList = model.video_list;
   const variants = Array.isArray(rawList) ? rawList : Object.values(rawList || {});
-  // ByteVC2 资源在 Android extractor 只有音频没视频轨，绝不选；只选有直链的清晰度
+  // 收集变体全部播放地址（main_url + backup_url 系列，兼容 base64 编码）——与 guoapp/juku 一致，
+  // main CDN 域被拒/不可达时用备用 CDN 域，避免整集降级网页源
+  const collectUrls = o => {
+    const out = [], seen = new Set();
+    const add = value => {
+      if (typeof value !== 'string') return;
+      let a = String(value).trim();
+      if (!/^https?:\/\//i.test(a)) {
+        try { const d = Buffer.from(a, 'base64').toString('utf8').trim(); if (/^https?:\/\//i.test(d)) a = d; } catch { /* 非 base64 */ }
+      }
+      if (/^https?:\/\//i.test(a) && !seen.has(a)) { seen.add(a); out.push(a); }
+    };
+    for (const k of ['main_url', 'backup_url', 'backup_url_1', 'backup_url_2', 'backup_urls', 'url_list']) {
+      const val = o[k];
+      if (Array.isArray(val)) val.forEach(add); else add(val);
+    }
+    return out;
+  };
+  // ByteVC2 资源在 Android extractor 只有音频没视频轨，绝不选
   const rows = variants
-    .filter(o => o && String(o.main_url || '').length > 0 && !/bytevc2|bvc2/i.test(((o.video_meta || {}).codec_type) || ''))
     .map(o => {
+      const urls = collectUrls(o);
       const meta = o.video_meta || {};
       const label = meta.definition || meta.vheight || '';
-      return { q: qualityNumber(label), url: cleanUrl(o.main_url), meta, o };
+      return { q: qualityNumber(label), urls, meta, o };
     })
-    .filter(r => r.url.startsWith('https://') || r.url.startsWith('http://'))
+    .filter(r => r.urls.length > 0 && !/bytevc2|bvc2/i.test(((r.meta || {}).codec_type) || ''))
     .sort((a, b) => b.q - a.q);
   if (rows.length === 0) throw new Error('没有可用清晰度');
   const selected = rows.find(r => r.q <= 1080) || rows[rows.length - 1];
   let key = '';
   const spade = selected.o.encrypt_info && selected.o.encrypt_info.spade_a;
   if (spade && String(spade).length > 0) key = deriveKey(String(spade));
-  return { url: selected.url, key, quality: selected.q > 0 ? `${selected.q}P` : '自动' };
+  return { url: selected.urls[0], altUrls: selected.urls.slice(1), key, quality: selected.q > 0 ? `${selected.q}P` : '自动' };
 }
 
 function cleanUrl(raw) {

@@ -160,6 +160,22 @@ function downloadFile(url, destPath, headers, progressCb, signal) {
   });
 }
 
+// App 源多 CDN 域下载：main_url 失败自动切 backup_url（红果每变体 main/backup 属不同 CDN 域）
+async function downloadWithFallback(urls, destPath, headers, progressCb, signal) {
+  let lastErr = null;
+  for (const u of urls) {
+    if (signal.aborted) throw new Error('任务已取消');
+    try {
+      await downloadFile(u, destPath, headers, progressCb, signal);
+      return;
+    } catch (e) {
+      lastErr = e;
+      console.log(`[hongguo-app] 地址下载失败 ${String(u).slice(0, 70)}...: ${e.message}`);
+    }
+  }
+  throw lastErr || new Error('所有播放地址均下载失败');
+}
+
 // ---- 合并（对照 juku-backend media_merge.go / media_merge_plan.go 完整移植）----
 function probeFile(file) {
   const out = spawnSync('ffprobe', ['-v', 'error', '-show_entries',
@@ -419,6 +435,7 @@ async function runTask(task) {
                   if (s && s.url) {
                     ep.url = s.url;
                     ep.key = s.key || '';
+                    ep.altUrls = (s.altUrls || []).slice(0, 4);
                     ep._appSource = true;
                     task.progress.detail = `第 ${idx + 1} 集取流 ${s.quality || ''}`;
                   }
@@ -442,7 +459,7 @@ async function runTask(task) {
                 const rawFile = safeJoin(dir, `ep${String(idx + 1).padStart(3, '0')}.enc`);
                 task.progress.detail = `下载第 ${idx + 1} 集`;
                 touch(task);
-                await downloadFile(ep.url, rawFile, headersFor(ep), received => {
+                await downloadWithFallback([ep.url, ...(ep.altUrls || [])], rawFile, headersFor(ep), received => {
                   if (signal.aborted) return;
                   task.progress.percent = Math.min(98, Math.round((downloaded + Math.min(1, received / 1e8)) / task.episodes.length * 100));
                   touch(task);
@@ -456,7 +473,7 @@ async function runTask(task) {
                 }
               } else {
                 const rawFile = safeJoin(dir, `ep${String(idx + 1).padStart(3, '0')}.enc`);
-                await downloadFile(ep.url, rawFile, headersFor(ep), received => {
+                await downloadWithFallback([ep.url, ...(ep.altUrls || [])], rawFile, headersFor(ep), received => {
                   if (signal.aborted) return;
                   task.progress.percent = Math.min(98, Math.round((downloaded + Math.min(1, received / 1e8)) / task.episodes.length * 100));
                   touch(task);
