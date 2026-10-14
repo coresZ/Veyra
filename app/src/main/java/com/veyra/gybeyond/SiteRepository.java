@@ -363,10 +363,11 @@ final class SiteRepository {
     private static final ExecutorService SEARCH_POOL = Executors.newFixedThreadPool(6);
     private static final String[] CN_NUM = {"一", "二", "三", "四", "五", "六", "七", "八", "九", "十"};
 
-    /** 红果联想接口：一次返回以关键词开头的完整短剧名（含"剧名+第N季"全集版），
-     *  源站镜像同样暴露该接口。返回 items 数组，失败抛异常由调用方兜底。 */
+    /** 红果联想接口（hongguoduanju.com 官方站，juku 同款）：一次返回以关键词开头的完整短剧名
+     *  （含"剧名+第N季"全集版，如 341 集版持械入宋第三季）。黄果源是红果镜像，数据同源；
+     *  无论当前黄果通道（直连/代理/后端）都直接调此接口，失败由调用方兜底。 */
     private JSONArray suggestionItems(String query, int count) throws Exception {
-        String url = profile.origin() + "/incent_resource/suggestion?app_id=8662&query="
+        String url = "https://hongguoduanju.com/incent_resource/suggestion?app_id=8662&query="
                 + java.net.URLEncoder.encode(query, StandardCharsets.UTF_8) + "&count=" + count;
         byte[] body = fetch(url);
         JSONObject json = new JSONObject(new String(body, StandardCharsets.UTF_8));
@@ -382,13 +383,19 @@ final class SiteRepository {
             if (id.isEmpty() || !id.matches("[0-9]{1,30}") || !ids.add(id)) continue;
             String title = record.optString("name");
             if (title.isEmpty() && video != null) title = video.optString("series_title");
-            String genre = video == null ? "" : video.optString("genre");
-            String category = "203".equals(genre) ? "short" : "205".equals(genre) ? "comic" : "";
+            JSONArray tags = new JSONArray();
+            if (video != null) {
+                JSONArray cats = video.optJSONArray("category_list");
+                for (int j = 0; cats != null && j < cats.length() && tags.length() < 5; j++) {
+                    String n = cats.optJSONObject(j).optString("name");
+                    if (!n.isEmpty()) tags.put(n);
+                }
+            }
             items.put(new JSONObject().put("id", id).put("title", title)
                     .put("cover", video == null ? "" : video.optString("series_cover"))
                     .put("description", video == null ? "" : video.optString("series_intro"))
                     .put("episodeLabel", video == null ? "" : video.optString("episode_right_text"))
-                    .put("category", category).put("score", "").put("tags", new JSONArray()));
+                    .put("category", "").put("score", "").put("tags", tags));
         }
         return items;
     }
@@ -409,7 +416,14 @@ final class SiteRepository {
         if (query.length() > 80) query = query.substring(0, 80);
         if (query.isEmpty()) return new JSONObject().put("items", new JSONArray()).put("nextPage", JSONObject.NULL);
         JSONObject result = listing(page(profile.route("search", "query", java.net.URLEncoder.encode(query, StandardCharsets.UTF_8))), 1, "");
-        if (suggest) return result;   // 联想请求走单查询，快速返回
+        if (suggest) {
+            // 联想浮层：优先红果联想接口（返回真实短剧名建议，一个请求），失败回退网页查询
+            try {
+                JSONArray suggestList = suggestionItems(query, 10);
+                if (suggestList.length() > 0) return new JSONObject().put("items", suggestList).put("nextPage", JSONObject.NULL);
+            } catch (Exception ignored) { }
+            return result;
+        }
         // 搜索补全：源站网页搜索对"剧名+第/季"匹配不全（如搜"持械入宋"漏掉 341 集版第三季、219 集版第四季）。
         // 主补全走红果联想接口（一个请求拿完整短剧名列表，juku 同款方案）；联想接口不可用时
         // 回退并行穷举 去尾字 / +第 / +季 / +第N季(1..8) 变体查询。按 id 合并去重后按标题匹配度排序。
