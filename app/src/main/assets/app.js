@@ -1017,9 +1017,14 @@ function renderSettings() {
       <button type="button" data-clear="history" ${asArray(state.library?.progress).length ? '' : 'disabled'}>清空观看历史</button>
       <button type="button" data-clear="bookmarks" ${asArray(state.library?.bookmarks).length ? '' : 'disabled'}>清空我的收藏</button></section>
     <section class="settings-library"><h2>下载管理</h2><p>手机下载到本地，NAS 下载由后端处理并合并。</p><button type="button" data-downloads="1">打开下载管理</button></section>
-    <section class="update-settings"><div><h2>黄果网络代理</h2><p>仅黄果内容生效：代理可用时走代理，代理不通自动经后端转发加载；红果不受影响。</p>
-      <input id="proxy-address" class="settings-input" type="text" placeholder="host:port，如 127.0.0.1:7890" value="${esc(state.proxy || '')}" autocomplete="off" aria-label="黄果网络代理地址">
-      <label class="settings-toggle"><input type="checkbox" id="backend-fallback" ${state.backendFallback ? 'checked' : ''}><span><strong>私密模式走后端转发</strong><small>手动强制黄果内容全部经后端转发（含视频），不再自动判定直连/代理；切换网络时若直连异常可开此项。</small></span></label></div></section>
+    <section class="update-settings"><div><h2>黄果网络通道</h2><p>仅黄果/私密模式生效，红果永远直连不受影响；选择后立即生效，无需重启。</p>
+      <input id="proxy-address" class="settings-input" type="text" placeholder="代理地址 host:port，如 192.168.31.108:7893" value="${esc(state.proxy || '')}" autocomplete="off" aria-label="黄果代理地址">
+      <select id="proxy-mode" class="settings-input" aria-label="黄果网络通道模式">
+        <option value="0" ${state.proxyMode === 0 ? 'selected' : ''}>自动（直连→代理→后端转发）</option>
+        <option value="1" ${state.proxyMode === 1 ? 'selected' : ''}>仅直连（不走代理/后端）</option>
+        <option value="2" ${state.proxyMode === 2 ? 'selected' : ''}>仅代理（走上面配置的代理）</option>
+        <option value="3" ${state.proxyMode === 3 ? 'selected' : ''}>走后端转发（含视频，后端可配代理）</option>
+      </select></div></section>
     <section class="update-settings"><div><h2>界面与站点资源</h2><p data-resource-status>后台自动检查，已下载的更新在合适时机启用。</p><button type="button" data-apply-resources hidden>启用已下载资源</button></div><button type="button" data-check-resources>检查资源</button></section>
     <section class="update-settings"><div><h2>应用更新</h2><button type="button" class="app-version ${updateAvailable ? 'has-update' : ''}" aria-label="当前版本 ${esc(appVersion)}"><span class="app-version-text">版本 ${appVersion ? `v${esc(appVersion)}` : '读取中…'}</span></button><p>启动后自动检查，也可以在这里手动检查。</p></div><button type="button" data-check-update>检查更新</button></section>
     <section class="settings-storage"><h2>内容模式</h2><p>${state.privateUnlocked ? '该账号已解锁私密模式，切换无需动态码。' : '首次进入私密模式需输入后端动态码（鉴权一次，跟账号走）。'}</p>${privateMode() ? '<button type="button" data-return-public>返回红果（公开模式）</button>' : '<button type="button" data-enter-private>进入私密模式</button>'}</section><section class="settings-storage"><h2>本地存储</h2><button type="button" data-clear="cache">清理内容缓存</button></section>
@@ -1030,28 +1035,29 @@ function renderSettings() {
     const input = document.getElementById('proxy-address');
     if (input) input.value = state.proxy;
   }).catch(() => {});
-  api('get-backend-fallback').then(value => {
-    state.backendFallback = Boolean(value);
-    const toggle = document.getElementById('backend-fallback');
-    if (toggle) toggle.checked = state.backendFallback;
+  api('get-proxy-mode').then(value => {
+    state.proxyMode = Number(value) || 0;
+    const select = document.getElementById('proxy-mode');
+    if (select) select.value = String(state.proxyMode);
   }).catch(() => {});
   const proxyInput = document.getElementById('proxy-address');
   if (proxyInput) {
     proxyInput.addEventListener('change', () => {
       const value = proxyInput.value.trim();
       state.proxy = value;
-      api('set-proxy', { value }).then(() => toast('代理设置已保存')).catch(error => toast(error.message, true));
+      api('set-proxy', { value }).then(() => toast('代理地址已保存')).catch(error => toast(error.message, true));
     });
   }
-  const fallbackToggle = document.getElementById('backend-fallback');
-  if (fallbackToggle) {
-    fallbackToggle.addEventListener('change', () => {
-      const value = fallbackToggle.checked;
-      state.backendFallback = value;
-      api('set-backend-fallback', { value }).then(() => {
-        toast(value ? '已开启：黄果内容走后端转发' : '已关闭：按自动判定直连/代理/后端', false);
+  const modeSelect = document.getElementById('proxy-mode');
+  if (modeSelect) {
+    modeSelect.addEventListener('change', () => {
+      const value = Number(modeSelect.value) || 0;
+      state.proxyMode = value;
+      api('set-proxy-mode', { value }).then(() => {
+        const names = { 0: '自动（直连→代理→后端转发）', 1: '仅直连', 2: '仅代理', 3: '走后端转发' };
+        toast(`黄果通道已切换：${names[value] || value}，立即生效`, false);
       }).catch(error => {
-        state.backendFallback = !value; fallbackToggle.checked = !value;
+        state.proxyMode = 0; modeSelect.value = '0';
         toast(error.message, true);
       });
     });

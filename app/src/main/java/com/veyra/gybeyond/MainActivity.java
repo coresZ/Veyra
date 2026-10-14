@@ -540,8 +540,8 @@ public final class MainActivity extends Activity {
         if ("leave-private".equals(action)) { mode.startPublic(); rebindContent(); return mode.status(); }
         if ("get-proxy".equals(action)) return ProxySettings.address(this);
         if ("set-proxy".equals(action)) { ProxySettings.set(this, args.optString("value")); return true; }
-        if ("get-backend-fallback".equals(action)) return ProxySettings.backendFallback(this);
-        if ("set-backend-fallback".equals(action)) { ProxySettings.setBackendFallback(this, args.optBoolean("value")); return true; }
+        if ("get-proxy-mode".equals(action)) return ProxySettings.mode(this);
+        if ("set-proxy-mode".equals(action)) { ProxySettings.setMode(this, args.optInt("value", ProxySettings.MODE_AUTO)); return true; }
         // A request keeps its repository and storage together while another request switches modes.
         final DualContentRepository repository;
         final AppStore store;

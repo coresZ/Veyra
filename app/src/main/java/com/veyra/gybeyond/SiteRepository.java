@@ -38,8 +38,8 @@ final class SiteRepository {
     private final File coverDir;
     private final Context appContext;
     private final String proxyAddress;   // 黄果代理 "host:port"，未设置为空串
-    private final boolean backendFallback; // 手动开关：强制私密模式走后端转发（覆盖自动判定）
-    // 通道状态：直连（系统网络栈，VPN/全局代理自然生效）→ 配置代理 → 后端转发
+    // 通道模式每次请求实时读取 ProxySettings.mode()（切换下拉立即生效，无需重建）：
+    // 自动=直连→代理→后端；仅直连/仅代理=失败即报错；走后端=全部经后端转发。红果不走本类。
     private volatile long lastDirectFailAt = 0;   // 直连/代理通道最近失败时间
     private static final long DIRECT_FAIL_TTL_MS = 60_000; // 直连失败缓存 60s：期间直接走后端，不再重复等判定
     private static final int CHANNEL_TIMEOUT_MS = 4_000;   // 直连/代理通道判定超时（3~5s 窗口）
@@ -54,7 +54,6 @@ final class SiteRepository {
         coverDir = new File(context.getCacheDir(), "covers");
         if (!coverDir.exists()) coverDir.mkdirs();
         proxyAddress = ProxySettings.address(appContext);
-        backendFallback = ProxySettings.backendFallback(appContext);
         backendClient = new okhttp3.OkHttpClient.Builder()
                 .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(BACKEND_READ_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -77,12 +76,19 @@ final class SiteRepository {
     }
 
     /**
-     * 通道抓取（仅黄果源；红果不走此通道）：
-     * 手动开关强制走后端转发；否则 直连（系统网络栈，VPN/全局代理自然生效）→ 配置代理 → 后端转发。
+     * 通道抓取（仅黄果源；红果不走此通道）。模式每次实时读取，切换立即生效：
+     *   走后端 → 全部经后端转发；仅直连/仅代理 → 只用该通道，失败即报错；
+     *   自动 → 直连（系统网络栈，VPN/全局代理自然生效）→ 配置代理 → 后端转发。
      * 直连失败缓存 60s，期间直接走后端（不再每次等 4s 判定）。
      */
     private byte[] fetch(String url) throws Exception {
-        if (backendFallback) return fetchViaBackend(url);
+        int mode = ProxySettings.mode(appContext);
+        if (mode == ProxySettings.MODE_BACKEND) return fetchViaBackend(url);
+        if (mode == ProxySettings.MODE_DIRECT) return fetchDirect(url);
+        if (mode == ProxySettings.MODE_PROXY) {
+            if (proxyAddress.isEmpty()) throw new IOException("未配置代理地址");
+            return fetchViaProxy(url);
+        }
         if (directBlocked()) {
             if (!proxyAddress.isEmpty()) {
                 try { return fetchViaProxy(url); } catch (Exception ignored) { }
@@ -161,9 +167,13 @@ final class SiteRepository {
         }
     }
 
-    /** 播放/选集 URL 通道化：手动开关或直连不通时改写为后端代理地址（m3u8 及其分片由后端重写兜底）。 */
+    /**
+     * 播放/选集 URL 通道化：走后端模式或自动模式下直连不通时，改写为后端代理地址
+     * （m3u8 及其分片由后端重写兜底）。仅直连/仅代理模式保持原 URL（播放器走系统网络栈/代理软件）。
+     */
     private String channelizedUrl(String raw) throws Exception {
-        if (backendFallback || directBlocked()) {
+        int mode = ProxySettings.mode(appContext);
+        if (mode == ProxySettings.MODE_BACKEND || (mode == ProxySettings.MODE_AUTO && directBlocked())) {
             String base = ServerConfig.get(appContext);
             if (!base.isEmpty()) return base + "api/huangguo-proxy?url=" + java.net.URLEncoder.encode(raw, "UTF-8");
         }
@@ -171,17 +181,26 @@ final class SiteRepository {
     }
 
     /**
-     * 抓取页面；手动开关强制走后端；否则 直连（4s 判定）→ 配置代理 → 后端通道+备用源循环（互相兜底）。
-     * 红果不走此方法。
+     * 抓取页面（仅黄果；红果不走此方法）。模式每次实时读取：
+     *   仅直连/自动 → 先走系统网络栈；仅直连失败即报错，自动失败后按 代理→后端 兜底；
+     *   仅代理 → 只用配置代理，失败即报错；走后端 → 直接后端多源循环（互相兜底）。
      */
     private Document page(String path) throws Exception {
         if (!path.startsWith("/") || path.startsWith("//")) throw new IllegalArgumentException("无效路径");
-        if (!backendFallback && !directBlocked()) {
+        int mode = ProxySettings.mode(appContext);
+        if (mode == ProxySettings.MODE_PROXY) {
+            if (proxyAddress.isEmpty()) throw new IOException("未配置代理地址");
+            byte[] body = fetchViaProxy(profile.origin() + path);
+            if (body.length < 1000) throw new IllegalStateException("站点暂时返回空页面");
+            return Jsoup.parse(new String(body, StandardCharsets.UTF_8), profile.origin());
+        }
+        if (mode == ProxySettings.MODE_DIRECT || (mode == ProxySettings.MODE_AUTO && !directBlocked())) {
             try {
                 byte[] body = fetchDirect(profile.origin() + path);
                 if (body.length < 1000) throw new IllegalStateException("站点暂时返回空页面");
                 return Jsoup.parse(new String(body, StandardCharsets.UTF_8), profile.origin());
             } catch (Exception directError) {
+                if (mode == ProxySettings.MODE_DIRECT) throw directError; // 仅直连模式：失败即报错
                 markDirectFailed();
                 if (!proxyAddress.isEmpty()) {
                     try {
