@@ -59,8 +59,20 @@ final class AccountService {
 
     boolean isLoggedIn() { return !prefs.getString("token", "").isEmpty(); }
     String userId() { return prefs.getString("userId", ""); }
+    /** 当前角色（admin/user，本地缓存；进私密模式前请先 refreshProfileNow 拉最新）。 */
+    String role() { return prefs.getString("role", "user"); }
     /** 私密模式是否已解锁（跟账号走，服务端记录，本地缓存）。 */
     boolean isPrivateUnlocked() { return prefs.getBoolean("huangguoUnlocked", false); }
+
+    /** 强制从服务端刷新账号资料（角色/解锁状态），绕过 5 分钟节流；失败时回退本地缓存。 */
+    JSONObject refreshProfileNow() {
+        lastProfileRefresh = 0;
+        try { return profile(true); }
+        catch (Exception ignored) {
+            try { return profile(false); }
+            catch (Exception alsoIgnored) { return new JSONObject(); }
+        }
+    }
 
     JSONObject profile() throws Exception { return profile(false); }
 

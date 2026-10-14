@@ -363,7 +363,7 @@ async function login(){
 async function saveRegisterOpen(){
   const v=document.getElementById('reg-open').checked;
   try{
-    const r=await fetch('/api/admin/settings',{method:'PUT',headers:AUTH(),body:JSON.stringify({registerOpen:v})}).then(x=>x.json());
+    const r=await fetch('/api/admin/settings',{method:'PUT',headers:Object.assign({'Content-Type':'application/json'},AUTH()),body:JSON.stringify({registerOpen:v})}).then(x=>x.json());
     const el=document.getElementById('reg-saved');
     el.textContent=r.ok?('已保存：'+(r.registerOpen?'开放':'关闭')):(r.error||'保存失败');
     el.style.color=r.ok?'var(--ok)':'var(--bad,#d33)';

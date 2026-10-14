@@ -38,6 +38,7 @@ final class SiteRepository {
     private final File coverDir;
     private final Context appContext;
     private final String proxyAddress;   // 黄果代理 "host:port"，未设置为空串
+    private final boolean backendFallback; // 手动开关：强制私密模式走后端转发（覆盖自动判定）
     // 通道状态：直连（系统网络栈，VPN/全局代理自然生效）→ 配置代理 → 后端转发
     private volatile long lastDirectFailAt = 0;   // 直连/代理通道最近失败时间
     private static final long DIRECT_FAIL_TTL_MS = 60_000; // 直连失败缓存 60s：期间直接走后端，不再重复等判定
@@ -53,6 +54,7 @@ final class SiteRepository {
         coverDir = new File(context.getCacheDir(), "covers");
         if (!coverDir.exists()) coverDir.mkdirs();
         proxyAddress = ProxySettings.address(appContext);
+        backendFallback = ProxySettings.backendFallback(appContext);
         backendClient = new okhttp3.OkHttpClient.Builder()
                 .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(BACKEND_READ_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -76,10 +78,11 @@ final class SiteRepository {
 
     /**
      * 通道抓取（仅黄果源；红果不走此通道）：
-     * 直连（系统网络栈，VPN/全局代理自然生效）→ 配置代理 → 后端转发。
+     * 手动开关强制走后端转发；否则 直连（系统网络栈，VPN/全局代理自然生效）→ 配置代理 → 后端转发。
      * 直连失败缓存 60s，期间直接走后端（不再每次等 4s 判定）。
      */
     private byte[] fetch(String url) throws Exception {
+        if (backendFallback) return fetchViaBackend(url);
         if (directBlocked()) {
             if (!proxyAddress.isEmpty()) {
                 try { return fetchViaProxy(url); } catch (Exception ignored) { }
@@ -158,9 +161,9 @@ final class SiteRepository {
         }
     }
 
-    /** 播放/选集 URL 通道化：直连不通时改写为后端代理地址（m3u8 及其分片由后端重写兜底）。 */
+    /** 播放/选集 URL 通道化：手动开关或直连不通时改写为后端代理地址（m3u8 及其分片由后端重写兜底）。 */
     private String channelizedUrl(String raw) throws Exception {
-        if (directBlocked()) {
+        if (backendFallback || directBlocked()) {
             String base = ServerConfig.get(appContext);
             if (!base.isEmpty()) return base + "api/huangguo-proxy?url=" + java.net.URLEncoder.encode(raw, "UTF-8");
         }
@@ -168,12 +171,12 @@ final class SiteRepository {
     }
 
     /**
-     * 抓取页面；直连（4s 判定）→ 配置代理 → 后端通道+备用源循环（互相兜底）。
+     * 抓取页面；手动开关强制走后端；否则 直连（4s 判定）→ 配置代理 → 后端通道+备用源循环（互相兜底）。
      * 红果不走此方法。
      */
     private Document page(String path) throws Exception {
         if (!path.startsWith("/") || path.startsWith("//")) throw new IllegalArgumentException("无效路径");
-        if (!directBlocked()) {
+        if (!backendFallback && !directBlocked()) {
             try {
                 byte[] body = fetchDirect(profile.origin() + path);
                 if (body.length < 1000) throw new IllegalStateException("站点暂时返回空页面");

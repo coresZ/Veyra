@@ -10,6 +10,7 @@ import android.content.SharedPreferences;
 final class ProxySettings {
     private static final String PREFS = "chengzi-settings";
     private static final String KEY = "huangguoProxy";
+    private static final String KEY_BACKEND = "backendFallback";
 
     private ProxySettings() { }
 
@@ -21,5 +22,15 @@ final class ProxySettings {
     static void set(Context context, String address) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit().putString(KEY, String.valueOf(address).trim()).apply();
+    }
+
+    /** 私密模式是否强制走后端转发（手动开关，覆盖自动判定）。 */
+    static boolean backendFallback(Context context) {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_BACKEND, false);
+    }
+
+    static void setBackendFallback(Context context, boolean value) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putBoolean(KEY_BACKEND, value).apply();
     }
 }
