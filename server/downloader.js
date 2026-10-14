@@ -36,8 +36,7 @@ const RETRIES = 2;
 const TASKS_FILE = path.join(DATA_DIR, 'downloads.json');
 const REDOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000; // 播放地址默认时效：超时后任务判失败（APK 重新提交）
 
-const HONGGUO_VIDEO_UA = 'com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
-const HONGGUO_REFERER = 'https://novel.snssdk.com/';
+const HONGGUO_VIDEO_UA = 'com.phoenix.read/73532 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
 // ---- 任务存储 ----
@@ -359,8 +358,9 @@ async function runTask(task) {
   // 下载阶段（并发 N 集，多轮自动重试）：
   //  - 每轮只下载未成功的分集；失败集自动进入下一轮，下一轮重新取流换新 URL（解决 403/地址过期）
   //  - 全部成功或达到自动重试轮数后结束；仍失败的集保留在 failedEpisodes，可手动重试失败集
+  // 红果 CDN 校验 Referer：带 Referer 反而 403，必须不带（实测 5 种域无 Referer 均 200）
   const headersFor = ep => ep.key
-    ? { 'User-Agent': HONGGUO_VIDEO_UA, Referer: HONGGUO_REFERER, 'Accept-Encoding': 'identity' }
+    ? { 'User-Agent': HONGGUO_VIDEO_UA, 'Accept-Encoding': 'identity' }
     : { 'User-Agent': BROWSER_UA, 'Accept-Encoding': 'identity' };
   const signal = { aborted: false };
   const AUTO_RETRY_ROUNDS = 2; // 初始 1 轮 + 自动补 2 轮（每轮重新取流）
