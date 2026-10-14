@@ -40,6 +40,11 @@ import org.json.JSONTokener;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.File;
+import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
+import java.net.URL;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -542,6 +547,7 @@ public final class MainActivity extends Activity {
         if ("set-proxy".equals(action)) { ProxySettings.set(this, args.optString("value")); return true; }
         if ("get-proxy-mode".equals(action)) return ProxySettings.mode(this);
         if ("set-proxy-mode".equals(action)) { ProxySettings.setMode(this, args.optInt("value", ProxySettings.MODE_BACKEND)); return true; }
+        if ("test-proxy".equals(action)) return testProxy();
         // A request keeps its repository and storage together while another request switches modes.
         final DualContentRepository repository;
         final AppStore store;
@@ -755,5 +761,31 @@ public final class MainActivity extends Activity {
                 });
             } catch (Exception error) { Log.w(TAG, "账号后台刷新稍后重试", error); }
         });
+    }
+
+    /** 检测配置的代理是否可用：经代理请求黄果主源首页，返回连通延时毫秒。 */
+    private JSONObject testProxy() throws Exception {
+        String address = ProxySettings.address(this);
+        if (address.isEmpty()) throw new IOException("未配置代理地址");
+        String[] parts = address.split(":");
+        String host = parts.length > 0 && !parts[0].isEmpty() ? parts[0] : "127.0.0.1";
+        int port = 80;
+        if (parts.length > 1) try { port = Integer.parseInt(parts[1]); } catch (NumberFormatException ignored) { }
+        long start = System.currentTimeMillis();
+        HttpURLConnection connection = (HttpURLConnection) new URL("https://thu.pqhybuxo.cc/")
+                .openConnection(new Proxy(Proxy.Type.HTTP, new InetSocketAddress(host, port)));
+        connection.setConnectTimeout(4000);
+        connection.setReadTimeout(4000);
+        connection.setUseCaches(false);
+        try {
+            int status = connection.getResponseCode();
+            long ms = System.currentTimeMillis() - start;
+            if (status < 200 || status >= 300) throw new IOException("代理已连通，但目标站点返回 " + status);
+            return new JSONObject().put("ok", true).put("ms", ms);
+        } catch (IOException error) {
+            throw new IOException("代理连接失败", error);
+        } finally {
+            connection.disconnect();
+        }
     }
 }
