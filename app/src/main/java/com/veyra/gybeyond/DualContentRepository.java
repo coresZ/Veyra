@@ -21,7 +21,7 @@ final class DualContentRepository {
     JSONObject home() throws Exception { return privateMode() ? huangguo.home() : hongguo.home(); }
     JSONObject category(String id, int page) throws Exception { return privateMode() ? huangguo.category(id, page) : hongguo.category(id, page); }
     JSONObject recommend(int page, boolean newest) throws Exception { return privateMode() ? huangguo.recommend(page, newest) : hongguo.recommend(page, newest); }
-    JSONObject search(String term) throws Exception { return privateMode() ? huangguo.search(term) : hongguo.search(term); }
+    JSONObject search(String term, boolean suggest) throws Exception { return privateMode() ? huangguo.search(term, suggest) : hongguo.search(term); }
     JSONObject detail(String id) throws Exception { return privateMode() ? huangguo.detail(id) : hongguo.detail(id); }
     JSONObject episode(String id, int number) throws Exception { return privateMode() ? huangguo.episode(id, number) : hongguo.episode(id, number); }
     String coverData(String url) throws Exception { return privateMode() ? huangguo.coverData(url) : hongguo.coverData(url); }

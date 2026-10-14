@@ -1928,13 +1928,13 @@ async function suggestSearch(v) {
   if (!el) return;
   let items = null;
   try {
-    const fresh = await Promise.race([api('search', { query: v }), new Promise((_, rej) => setTimeout(() => rej(new Error('联想超时')), 6000))]);
+    const fresh = await Promise.race([api('search', { query: v, suggest: true }), new Promise((_, rej) => setTimeout(() => rej(new Error('联想超时')), 6000))]);
     if (seq !== searchSuggestSeq || searchInput.value.trim() !== v) return;
     items = asArray(fresh && (fresh.items || fresh.data && fresh.data.items));
   } catch { return; }
   if (seq !== searchSuggestSeq) return;
   if (!items || !items.length) { el.hidden = true; return; }
-  el.innerHTML = `<div class="search-suggest-title">联想结果</div><div class="search-suggest-list">${items.slice(0, 8).map(it => `<button type="button" class="search-suggest-card" data-open-id="${esc(it.id)}" data-ss-close><span class="poster-letter">${esc(String(it.title || '剧').slice(0, 1))}</span><strong>${esc(it.title || '')}</strong>${it.episodeLabel ? `<em>${esc(it.episodeLabel)}</em>` : ''}</button>`).join('')}</div>`;
+  el.innerHTML = `<div class="search-suggest-title">联想结果</div><div class="search-suggest-list">${items.slice(0, 8).map(it => `<button type="button" class="search-suggest-card" data-open-id="${esc(it.id)}" data-ss-close>${it.cover ? `<span class="search-suggest-thumb"><img src="${esc(it.cover)}" alt="" loading="lazy" onerror="this.closest('.search-suggest-thumb').style.display='none'"></span>` : ''}<strong>${esc(it.title || '')}</strong>${it.episodeLabel ? `<em>${esc(it.episodeLabel)}</em>` : ''}</button>`).join('')}</div>`;
   el.hidden = false;
 }
 // 输入框聚焦时临时放行原生长按（复制/粘贴菜单），失焦后恢复全局禁选，其余区域仍禁长按

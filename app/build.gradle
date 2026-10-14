@@ -10,8 +10,8 @@ android {
         applicationId 'com.veyra.gybeyond'
         minSdk 26
         targetSdk 36
-        versionCode 129
-        versionName '0.13.35'
+        versionCode 130
+        versionName '0.13.36'
         testInstrumentationRunner 'com.veyra.gybeyond.PlaybackTestRunner'
     }
 

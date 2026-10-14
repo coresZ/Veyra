@@ -663,7 +663,7 @@ public final class MainActivity extends Activity {
             }
             case "search": {
                 String term = args.optString("query").trim();
-                JSONObject result = repository.search(term);
+                JSONObject result = repository.search(term, args.optBoolean("suggest"));
                 store.saveCache("search:" + term, result);
                 return result;
             }

@@ -353,38 +353,46 @@ final class SiteRepository {
         return listing(page(profile.route(pageNumber == 1 ? name : name + "Page", "page", String.valueOf(pageNumber))), pageNumber, "");
     }
 
-    JSONObject search(String term) throws Exception {
+    JSONObject search(String term, boolean suggest) throws Exception {
         String query = term.trim();
         if (query.length() > 80) query = query.substring(0, 80);
         if (query.isEmpty()) return new JSONObject().put("items", new JSONArray()).put("nextPage", JSONObject.NULL);
         JSONObject result = listing(page(profile.route("search", "query", java.net.URLEncoder.encode(query, StandardCharsets.UTF_8))), 1, "");
-        // 搜索补全：源站分词对"剧名+第/季"等查询匹配不全（如搜"持械入宋第"只出部分季）时，
-        // 去掉尾字再搜一次，按 id 合并去重，补全结果。
+        if (suggest) return result;   // 联想请求走单查询，快速返回
+        // 搜索补全：源站对"剧名+第/季"类查询匹配不全（如搜"持械入宋"漏掉部分季）时，
+        // 追加 去尾字 / +第 / +季 变体查询，按 id 合并去重补全结果。
         JSONArray items = result.optJSONArray("items");
         int count = items == null ? 0 : items.length();
-        if (count < 6 && query.length() > 2) {
+        if (count < 15 && query.length() > 2) {
+            java.util.LinkedHashSet<String> variants = new java.util.LinkedHashSet<>();
             String shorter = query.substring(0, query.length() - 1).trim();
-            if (shorter.length() >= 2) {
+            if (shorter.length() >= 2) variants.add(shorter);
+            if (query.length() <= 8) variants.add(query + "第");
+            variants.add(query + "季");
+            java.util.LinkedHashMap<String, JSONObject> seen = new java.util.LinkedHashMap<>();
+            if (items != null) {
+                for (int i = 0; i < items.length(); i++) {
+                    JSONObject it = items.optJSONObject(i);
+                    if (it != null) seen.putIfAbsent(it.optString("id"), it);
+                }
+            }
+            for (String variant : variants) {
                 try {
-                    JSONObject extra = listing(page(profile.route("search", "query", java.net.URLEncoder.encode(shorter, StandardCharsets.UTF_8))), 1, "");
+                    JSONObject extra = listing(page(profile.route("search", "query", java.net.URLEncoder.encode(variant, StandardCharsets.UTF_8))), 1, "");
                     JSONArray extraItems = extra.optJSONArray("items");
-                    if (extraItems != null && extraItems.length() > 0) {
-                        java.util.LinkedHashMap<String, JSONObject> seen = new java.util.LinkedHashMap<>();
-                        for (int i = 0; i < extraItems.length(); i++) {
-                            JSONObject it = extraItems.optJSONObject(i);
-                            if (it != null) seen.putIfAbsent(it.optString("id"), it);
-                        }
-                        if (items != null) {
-                            for (int i = 0; i < items.length(); i++) {
-                                JSONObject it = items.optJSONObject(i);
-                                if (it != null) seen.putIfAbsent(it.optString("id"), it);
-                            }
-                        }
-                        JSONArray merged = new JSONArray();
-                        for (JSONObject it : seen.values()) merged.put(it);
-                        result.put("items", merged);
+                    for (int i = 0; extraItems != null && i < extraItems.length(); i++) {
+                        JSONObject it = extraItems.optJSONObject(i);
+                        if (it == null) continue;
+                        // 只并入与查询词相关的条目，避免引入无关噪音
+                        String title = it.optString("title");
+                        if (title.contains(query) || title.contains(variant)) seen.putIfAbsent(it.optString("id"), it);
                     }
                 } catch (Exception ignored) { }
+            }
+            if (seen.size() > count) {
+                JSONArray merged = new JSONArray();
+                for (JSONObject it : seen.values()) merged.put(it);
+                result.put("items", merged);
             }
         }
         return result;
