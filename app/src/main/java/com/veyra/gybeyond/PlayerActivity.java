@@ -157,7 +157,14 @@ public final class PlayerActivity extends Activity {
         previewBucket = bucket;
         lastPreviewRequest = SystemClock.uptimeMillis();
         if (previewPlayer == null) ensurePreviewPlayer();
-        else previewPlayer.seekTo(bucket);
+        else {
+            // 切过通道模式后按当前模式重建数据源与预览项，保证预览走当前通道
+            MediaItem previewItem = new MediaItem.Builder().setUri(currentSource).setMimeType(currentMime).build();
+            previewPlayer.setMediaSource(VideoPlaybackCache.sources(this).createMediaSource(previewItem));
+            previewPlayer.pause();
+            previewPlayer.seekTo(bucket);
+            previewPlayer.prepare();
+        }
     };
     private static final int GESTURE_PENDING = 0;
     private static final int GESTURE_VERTICAL = 1;
@@ -1157,8 +1164,11 @@ public final class PlayerActivity extends Activity {
                     if (token != loadToken || destroyed || isFinishing()) return;
                     currentSource = ready.optString("source");
                     currentMime = ready.optString("mimeType", MimeTypes.APPLICATION_M3U8);
-                    player.setMediaItem(new MediaItem.Builder().setUri(currentSource).setMediaId(key)
-                            .setMimeType(currentMime).build(), resumePosition(id, episode));
+                    // 每次开播按当前通道模式重建数据源（直连/代理/后端转发切换立即生效）
+                    MediaItem mediaItem = new MediaItem.Builder().setUri(currentSource).setMediaId(key)
+                            .setMimeType(currentMime).build();
+                    player.setMediaSource(VideoPlaybackCache.sources(this).createMediaSource(mediaItem),
+                            resumePosition(id, episode));
                     applyPlaybackSpeed(speedLocked ? 2f : manualSpeed);
                     player.prepare();
                     player.setPlayWhenReady(foreground);

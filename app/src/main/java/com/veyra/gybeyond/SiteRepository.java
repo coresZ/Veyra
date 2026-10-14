@@ -40,7 +40,7 @@ final class SiteRepository {
     private final String proxyAddress;   // 黄果代理 "host:port"，未设置为空串
     // 通道模式每次请求实时读取 ProxySettings.mode()（切换下拉立即生效，无需重建）：
     // 仅直连/仅代理 = 只用该通道，失败即报错；走后端 = 全部经后端转发。红果不走本类。
-    private static final int CHANNEL_TIMEOUT_MS = 4_000;   // 直连/代理通道超时
+    private static final int CHANNEL_TIMEOUT_MS = 5_000;   // 直连/代理通道超时
     private static final int BACKEND_READ_TIMEOUT_MS = 12_000;
     private final okhttp3.OkHttpClient backendClient;
 

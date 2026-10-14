@@ -3,8 +3,6 @@ package com.veyra.gybeyond;
 import android.content.Context;
 import androidx.media3.common.C;
 import androidx.media3.database.StandaloneDatabaseProvider;
-import androidx.media3.datasource.DefaultDataSource;
-import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.cache.CacheDataSource;
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor;
@@ -34,9 +32,10 @@ final class VideoPlaybackCache {
     }
 
     static MediaSource.Factory sources(Context context) {
-        DataSource.Factory upstream = new DefaultDataSource.Factory(context,
-                new DefaultHttpDataSource.Factory().setConnectTimeoutMs(20_000)
-                        .setReadTimeoutMs(25_000).setUserAgent("Mozilla/5.0 (Linux; Android) HuangGuo/0.1"));
+        // 黄果 HLS 播放按通道模式实时选择：仅代理 → 经配置代理；直连/走后端 → 系统栈直连。
+        // 后端转发时 source 本身就是后端代理 URL（直连后端即可）；红果 MP4 走 HongguoPlayback，不受影响。
+        String proxy = ProxySettings.mode(context) == ProxySettings.MODE_PROXY ? ProxySettings.address(context) : null;
+        DataSource.Factory upstream = new ChannelHttpDataSource.Factory(proxy);
         CacheDataSource.Factory cached = new CacheDataSource.Factory().setCache(get(context))
                 .setUpstreamDataSourceFactory(upstream).setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR);
         HlsMediaSource.Factory hls = new HlsMediaSource.Factory(type -> type == C.DATA_TYPE_MANIFEST

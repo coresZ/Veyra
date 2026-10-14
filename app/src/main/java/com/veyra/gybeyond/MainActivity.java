@@ -763,7 +763,7 @@ public final class MainActivity extends Activity {
         });
     }
 
-    /** 检测配置的代理是否可用：经代理请求黄果主源首页，返回连通延时毫秒。 */
+    /** 检测配置的代理是否可用：经代理请求当前黄果主源首页，返回连通延时毫秒。 */
     private JSONObject testProxy() throws Exception {
         String address = ProxySettings.address(this);
         if (address.isEmpty()) throw new IOException("未配置代理地址");
@@ -771,12 +771,14 @@ public final class MainActivity extends Activity {
         String host = parts.length > 0 && !parts[0].isEmpty() ? parts[0] : "127.0.0.1";
         int port = 80;
         if (parts.length > 1) try { port = Integer.parseInt(parts[1]); } catch (NumberFormatException ignored) { }
+        String origin = HotUpdateManager.get(this).currentSite().origin();
         long start = System.currentTimeMillis();
-        HttpURLConnection connection = (HttpURLConnection) new URL("https://thu.pqhybuxo.cc/")
+        HttpURLConnection connection = (HttpURLConnection) new URL(origin)
                 .openConnection(new Proxy(Proxy.Type.HTTP, new InetSocketAddress(host, port)));
-        connection.setConnectTimeout(4000);
-        connection.setReadTimeout(4000);
+        connection.setConnectTimeout(5000);
+        connection.setReadTimeout(5000);
         connection.setUseCaches(false);
+        connection.setInstanceFollowRedirects(true);
         try {
             int status = connection.getResponseCode();
             long ms = System.currentTimeMillis() - start;
