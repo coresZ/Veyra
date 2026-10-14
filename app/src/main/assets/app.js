@@ -1020,10 +1020,9 @@ function renderSettings() {
     <section class="update-settings"><div><h2>黄果网络通道</h2><p>仅黄果/私密模式生效，红果永远直连不受影响；选择后立即生效，无需重启。</p>
       <input id="proxy-address" class="settings-input" type="text" placeholder="代理地址 host:port，如 192.168.31.108:7893" value="${esc(state.proxy || '')}" autocomplete="off" aria-label="黄果代理地址">
       <select id="proxy-mode" class="settings-input" aria-label="黄果网络通道模式">
-        <option value="0" ${state.proxyMode === 0 ? 'selected' : ''}>自动（直连→代理→后端转发）</option>
         <option value="1" ${state.proxyMode === 1 ? 'selected' : ''}>仅直连（不走代理/后端）</option>
         <option value="2" ${state.proxyMode === 2 ? 'selected' : ''}>仅代理（走上面配置的代理）</option>
-        <option value="3" ${state.proxyMode === 3 ? 'selected' : ''}>走后端转发（含视频，后端可配代理）</option>
+        <option value="3" selected>走后端转发（含视频，后端可配代理）</option>
       </select></div></section>
     <section class="update-settings"><div><h2>界面与站点资源</h2><p data-resource-status>后台自动检查，已下载的更新在合适时机启用。</p><button type="button" data-apply-resources hidden>启用已下载资源</button></div><button type="button" data-check-resources>检查资源</button></section>
     <section class="update-settings"><div><h2>应用更新</h2><button type="button" class="app-version ${updateAvailable ? 'has-update' : ''}" aria-label="当前版本 ${esc(appVersion)}"><span class="app-version-text">版本 ${appVersion ? `v${esc(appVersion)}` : '读取中…'}</span></button><p>启动后自动检查，也可以在这里手动检查。</p></div><button type="button" data-check-update>检查更新</button></section>
@@ -1036,7 +1035,7 @@ function renderSettings() {
     if (input) input.value = state.proxy;
   }).catch(() => {});
   api('get-proxy-mode').then(value => {
-    state.proxyMode = Number(value) || 0;
+    state.proxyMode = Number(value) || 3;
     const select = document.getElementById('proxy-mode');
     if (select) select.value = String(state.proxyMode);
   }).catch(() => {});
@@ -1051,13 +1050,13 @@ function renderSettings() {
   const modeSelect = document.getElementById('proxy-mode');
   if (modeSelect) {
     modeSelect.addEventListener('change', () => {
-      const value = Number(modeSelect.value) || 0;
+      const value = Number(modeSelect.value) || 3;
       state.proxyMode = value;
       api('set-proxy-mode', { value }).then(() => {
-        const names = { 0: '自动（直连→代理→后端转发）', 1: '仅直连', 2: '仅代理', 3: '走后端转发' };
+        const names = { 1: '仅直连', 2: '仅代理', 3: '走后端转发' };
         toast(`黄果通道已切换：${names[value] || value}，立即生效`, false);
       }).catch(error => {
-        state.proxyMode = 0; modeSelect.value = '0';
+        state.proxyMode = 3; modeSelect.value = '3';
         toast(error.message, true);
       });
     });
