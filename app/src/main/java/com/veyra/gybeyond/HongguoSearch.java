@@ -16,7 +16,8 @@ import java.util.Set;
 final class HongguoSearch {
     private static final java.util.concurrent.ExecutorService POOL = java.util.concurrent.Executors.newFixedThreadPool(6);
     private final OkHttpClient http;
-    HongguoSearch(OkHttpClient http) { this.http = http; }
+    private final HongguoAppApi appApi;
+    HongguoSearch(OkHttpClient http) { this.http = http; this.appApi = new HongguoAppApi(http); }
     private static final java.util.regex.Pattern SEASON_SUFFIX = java.util.regex.Pattern
             .compile("第\\s*([0-9零〇一二两兩三四五六七八九十百]+)\\s*([季部])[\\p{P}\\s]*$");
 
@@ -103,9 +104,9 @@ final class HongguoSearch {
                     if (seen.size() > webCount) {
                         JSONArray merged = new JSONArray();
                         for (JSONObject it : seen.values()) merged.put(it);
-                        return new JSONObject().put("items", merged).put("nextPage", JSONObject.NULL);
+                        return decorate(new JSONObject().put("items", merged).put("nextPage", JSONObject.NULL));
                     }
-                    return web;
+                    return decorate(web);
                 }
             }
             throw new IOException("搜索页面数据结构已变化");
@@ -185,6 +186,31 @@ final class HongguoSearch {
         return items;
     }
     private static String normalize(String text) { return text.replaceAll("\\s+", "").toLowerCase(Locale.ROOT); }
+
+    /** 并行补齐红果官方系列键（albumId/seasonIndex）：同一 related_album_id 即官方同系列，
+     *  season_index 为官方季序号。App 接口失败时该项不带字段，前端按 albumId 存在才分组。 */
+    private JSONObject decorate(JSONObject result) {
+        JSONArray items = result.optJSONArray("items");
+        if (items == null || items.length() == 0) return result;
+        java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+        for (int i = 0; i < items.length(); i++) {
+            final int index = i;
+            futures.add(POOL.submit(new Runnable() {
+                @Override public void run() {
+                    try {
+                        JSONObject it = items.optJSONObject(index);
+                        if (it == null) return;
+                        JSONObject info = appApi.fetch(it.optString("id"));
+                        if (info == null) return;
+                        it.put("albumId", info.optString("album_id"));
+                        it.put("seasonIndex", info.optInt("season_index", 0));
+                    } catch (Exception ignored) { }
+                }
+            }));
+        }
+        for (java.util.concurrent.Future<?> f : futures) { try { f.get(); } catch (Exception ignored) { } }
+        return result;
+    }
     static JSONObject parse(JSONObject section, String keyword) throws Exception { return parse(section, keyword, false); }
     private static String normalized(String value, boolean sequelLookup) {
         return sequelLookup ? normalize(value).replaceAll("[\\p{P}\\p{Z}]", "") : normalize(value);

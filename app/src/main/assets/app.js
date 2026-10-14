@@ -1145,9 +1145,44 @@ function renderSearch() {
     if (state.filter === 'ai-manju') return /漫剧/.test(title);
     return !/AI\s*(换脸|魔改)|漫剧/.test(title);
   });
+  const { blocks, singles } = seriesGroups(items);
+  const cards = [...blocks.map(seriesBlock), ...singles.map(itemCard)].join('');
   content.innerHTML = `<div class="search-page"><h1>搜索结果</h1><p>${esc(state.query)} · ${items.length} 部作品</p>${searchFeedback()}<div class="filter-row">${filters.map(([id, label]) => `<button type="button" data-filter="${id}" class="${state.filter === id ? 'active' : ''}">${label}</button>`).join('')}</div>
-    ${items.length ? `<div class="search-grid">${items.map(itemCard).join('')}</div>` : '<div class="empty-state">没有找到匹配的影片</div>'}</div>`;
+    ${items.length ? `<div class="search-grid">${cards}</div>` : '<div class="empty-state">没有找到匹配的影片</div>'}</div>`;
   hydrateImages();
+}
+
+/** 按红果官方系列键（albumId=related_album_id）分组：同一 album 的剧合并为系列块，组内按官方季序号排序。 */
+function seriesGroups(items) {
+  const groups = new Map();
+  const singles = [];
+  for (const item of items) {
+    const aid = item.albumId;
+    if (aid && aid !== '0') {
+      if (!groups.has(aid)) groups.set(aid, []);
+      groups.get(aid).push(item);
+    } else singles.push(item);
+  }
+  const blocks = [];
+  for (const [aid, members] of groups) {
+    const seasons = members.slice().sort((a, b) => {
+      const sa = Number(a.seasonIndex) > 0 ? Number(a.seasonIndex) : 99;
+      const sb = Number(b.seasonIndex) > 0 ? Number(b.seasonIndex) : 99;
+      return sa - sb;
+    });
+    const lead = seasons.find(it => Number(it.seasonIndex) === 1) || seasons[0];
+    blocks.push({ aid, title: lead?.title || '系列', cover: lead?.cover || '', seasons });
+  }
+  blocks.sort((a, b) => String(a.title).localeCompare(String(b.title), 'zh'));
+  return { blocks, singles };
+}
+
+function seriesBlock(group) {
+  const head = esc(group.title || '系列');
+  return `<section class="series-block" data-album="${esc(group.aid)}">
+    <div class="series-head"><span class="poster loading small"><img data-cover="${esc(group.cover || '')}" alt=""></span>
+    <div class="series-meta"><h3>${head}</h3><span>官方系列 · ${group.seasons.length} 季</span></div></div>
+    <div class="series-row">${group.seasons.map(itemCard).join('')}</div></section>`;
 }
 
 function listingFooter() {
