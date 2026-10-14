@@ -46,15 +46,35 @@ let storeDirty = false;
 let storeTimer = null;
 function loadTasks() {
   try { tasks = JSON.parse(fs.readFileSync(TASKS_FILE, 'utf8')).tasks || {}; } catch { tasks = {}; }
-  // 重启后把未完成任务标记为中断（临时文件保留，便于排查；不自动恢复下载）
+  // 重启后把未完成任务标记为中断，并按分集文件实际存在情况重建成功/失败清单：
+  // 已下载的分集（work_<id>/epNNN.mp4）保留，重启/升级后重试失败集只补缺失的集，不会整季重下
   for (const t of Object.values(tasks)) {
     if (t.status === 'downloading' || t.status === 'merging' || t.status === 'queued') {
       t.status = 'failed';
-      t.error = '服务重启，任务中断';
+      rescanTaskFiles(t);
+      const failedCount = (t.failedEpisodes || []).length;
+      t.error = failedCount > 0 ? `服务重启，任务中断（${failedCount} 集待补下，可重试失败集）` : '服务重启，任务中断';
       t.updatedAt = Date.now();
     }
   }
   storeDirty = true;
+}
+/** 按 work 目录分集文件重建任务每集状态：文件在=成功保留，缺失=失败待补下。 */
+function rescanTaskFiles(t) {
+  const dir = safeJoin(DOWNLOAD_DIR, 'work_' + t.id);
+  t.failedEpisodes = [];
+  if (!fs.existsSync(dir)) {
+    for (const ep of t.episodes) { ep._ok = false; ep.failed = false; }
+    return;
+  }
+  t.episodes.forEach((ep, i) => {
+    const f = safeJoin(dir, `ep${String(i + 1).padStart(3, '0')}.mp4`);
+    let ok = false;
+    try { ok = fs.existsSync(f) && fs.statSync(f).size > 0; } catch { ok = false; }
+    ep._ok = ok;
+    ep.failed = !ok;
+    if (!ok) t.failedEpisodes.push({ index: i + 1, error: '分集缺失，待重试补下' });
+  });
 }
 function flushStore(force) {
   if (!storeDirty && !force) return;
@@ -331,114 +351,140 @@ async function runTask(task) {
     flushStore(true);
   }
 
-  // 下载阶段（并发 N 集）
-  const queue = task.episodes.map((ep, idx) => ({ ep, idx }));
+  // 下载阶段（并发 N 集，多轮自动重试）：
+  //  - 每轮只下载未成功的分集；失败集自动进入下一轮，下一轮重新取流换新 URL（解决 403/地址过期）
+  //  - 全部成功或达到自动重试轮数后结束；仍失败的集保留在 failedEpisodes，可手动重试失败集
   const headersFor = ep => ep.key
     ? { 'User-Agent': HONGGUO_VIDEO_UA, Referer: HONGGUO_REFERER, 'Accept-Encoding': 'identity' }
     : { 'User-Agent': BROWSER_UA, 'Accept-Encoding': 'identity' };
   const signal = { aborted: false };
-
-  const workers = [];
-  let next = 0;
+  const AUTO_RETRY_ROUNDS = 2; // 初始 1 轮 + 自动补 2 轮（每轮重新取流）
   let downloaded = 0;
-  const fileSizes = new Array(queue.length).fill(0);
-
-  for (let w = 0; w < Math.min(CONCURRENCY, queue.length); w++) {
-    workers.push((async () => {
-      while (!signal.aborted) {
-        const item = queue[next++];
-        if (!item) break;
-        const { ep, idx } = item;
-        const plainFile = safeJoin(dir, `ep${String(idx + 1).padStart(3, '0')}.mp4`); // 明文分集
-        task.progress.episode = idx + 1;
-        task.progress.detail = `下载第 ${idx + 1}/${queue.length} 集`;
-        touch(task);
-        let attempt = 0;
-        while (attempt <= RETRIES && !signal.aborted) {
-          try {
-            const started = Date.now();
-            // 红果 App 取流：video_model/v1 拿最高档直链 + CENC 密钥（失败降级网页源）
-            if (ep.vid && !ep._appStream) {
-              try {
-                const s = await hgApp.videoModel(ep.vid);
-                if (s && s.url) {
-                  ep.url = s.url;
-                  ep.key = s.key || '';
-                  ep._appStream = true;
-                  task.progress.detail = `第 ${idx + 1} 集取流 ${s.quality || ''}`;
+  for (let round = 0; round <= AUTO_RETRY_ROUNDS; round++) {
+    const queue = task.episodes.map((ep, idx) => ({ ep, idx })).filter(item => !item.ep._ok);
+    if (queue.length === 0) break;
+    if (round > 0) {
+      task.progress.detail = `自动重试第 ${round} 轮（剩余 ${queue.length} 集）`;
+      touch(task);
+    }
+    const workers = [];
+    let next = 0;
+    for (let w = 0; w < Math.min(CONCURRENCY, queue.length); w++) {
+      workers.push((async () => {
+        while (!signal.aborted) {
+          const item = queue[next++];
+          if (!item) break;
+          const { ep, idx } = item;
+          const plainFile = safeJoin(dir, `ep${String(idx + 1).padStart(3, '0')}.mp4`); // 明文分集
+          task.progress.episode = idx + 1;
+          task.progress.detail = `下载第 ${idx + 1}/${queue.length} 集`;
+          touch(task);
+          let attempt = 0;
+          while (attempt <= RETRIES && !signal.aborted) {
+            try {
+              const started = Date.now();
+              // 红果 App 取流：每轮每集首次尝试重新取流（换新 URL 解 403/过期；失败保留旧 url 降级网页源）
+              if (ep.vid && attempt === 0) {
+                try {
+                  const s = await hgApp.videoModel(ep.vid);
+                  if (s && s.url) {
+                    ep.url = s.url;
+                    ep.key = s.key || '';
+                    task.progress.detail = `第 ${idx + 1} 集取流 ${s.quality || ''}`;
+                  }
+                } catch (e) {
+                  console.log(`[hongguo-app] 第 ${idx + 1} 集取流失败，降级网页源: ${e.message}`);
                 }
-              } catch (e) {
-                console.log(`[hongguo-app] 第 ${idx + 1} 集取流失败，降级网页源: ${e.message}`);
               }
-            }
-            if (ep.key) {
-              // 红果 CENC-AES-CTR：完整下载密文后由 ffmpeg -decryption_key 本地解密（与 juku-backend 一致，
-              // ffmpeg mov demuxer 原生支持 CENC，产物为标准明文 MP4；避免对不支持 Range 的服务器直连拉流）
-              const rawFile = safeJoin(dir, `ep${String(idx + 1).padStart(3, '0')}.enc`);
-              task.progress.detail = `下载第 ${idx + 1} 集`;
-              touch(task);
-              await downloadFile(ep.url, rawFile, headersFor(ep), received => {
-                if (signal.aborted) return;
-                task.progress.percent = Math.min(98, Math.round((downloaded + Math.min(1, received / 1e8)) / queue.length * 100));
+              if (ep.key) {
+                // 红果 CENC-AES-CTR：完整下载密文后由 ffmpeg -decryption_key 本地解密（与 juku-backend 一致，
+                // ffmpeg mov demuxer 原生支持 CENC，产物为标准明文 MP4；避免对不支持 Range 的服务器直连拉流）
+                const rawFile = safeJoin(dir, `ep${String(idx + 1).padStart(3, '0')}.enc`);
+                task.progress.detail = `下载第 ${idx + 1} 集`;
                 touch(task);
-              }, signal);
-              task.progress.detail = `解密第 ${idx + 1} 集`;
-              touch(task);
-              try {
-                await runFFmpeg(['-decryption_key', ep.key, '-i', rawFile, '-c', 'copy', '-f', 'mp4', '-y', plainFile]);
-              } finally {
-                fs.rmSync(rawFile, { force: true });
+                await downloadFile(ep.url, rawFile, headersFor(ep), received => {
+                  if (signal.aborted) return;
+                  task.progress.percent = Math.min(98, Math.round((downloaded + Math.min(1, received / 1e8)) / task.episodes.length * 100));
+                  touch(task);
+                }, signal);
+                task.progress.detail = `解密第 ${idx + 1} 集`;
+                touch(task);
+                try {
+                  await runFFmpeg(['-decryption_key', ep.key, '-i', rawFile, '-c', 'copy', '-f', 'mp4', '-y', plainFile]);
+                } finally {
+                  fs.rmSync(rawFile, { force: true });
+                }
+              } else {
+                const rawFile = safeJoin(dir, `ep${String(idx + 1).padStart(3, '0')}.enc`);
+                await downloadFile(ep.url, rawFile, headersFor(ep), received => {
+                  if (signal.aborted) return;
+                  task.progress.percent = Math.min(98, Math.round((downloaded + Math.min(1, received / 1e8)) / task.episodes.length * 100));
+                  touch(task);
+                }, signal);
+                fs.renameSync(rawFile, plainFile);
               }
-            } else {
-              const rawFile = safeJoin(dir, `ep${String(idx + 1).padStart(3, '0')}.enc`);
-              await downloadFile(ep.url, rawFile, headersFor(ep), received => {
-                if (signal.aborted) return;
-                task.progress.percent = Math.min(98, Math.round((downloaded + Math.min(1, received / 1e8)) / queue.length * 100));
+              const size = fs.statSync(plainFile).size;
+              ep._ok = true;
+              downloaded++;
+              task.progress.percent = Math.min(98, Math.round(downloaded / task.episodes.length * 100));
+              task.progress.detail = `已下载 ${downloaded}/${task.episodes.length} 集`;
+              touch(task);
+              if (Date.now() - started > REDOWNLOAD_TIMEOUT_MS) throw new Error('播放地址超时失效，请重新提交');
+              break;
+            } catch (err) {
+              fs.rmSync(safeJoin(dir, `ep${String(idx + 1).padStart(3, '0')}.enc`), { force: true });
+              fs.rmSync(plainFile, { force: true });
+              attempt++;
+              if (attempt > RETRIES) {
+                // 单集失败不中断整剧：标记失败集进入下一轮自动重试，其余分集继续
+                ep.failed = true;
+                ep.error = err.message;
+                if (!task.failedEpisodes) task.failedEpisodes = [];
+                if (!task.failedEpisodes.some(f => f.index === idx + 1)) task.failedEpisodes.push({ index: idx + 1, error: err.message });
+                task.progress.detail = `第 ${idx + 1} 集失败（将自动重试）`;
                 touch(task);
-              }, signal);
-              fs.renameSync(rawFile, plainFile);
+                break;
+              }
+              await new Promise(r => setTimeout(r, 1500 * attempt));
             }
-            const size = fs.statSync(plainFile).size;
-            fileSizes[idx] = size;
-            downloaded++;
-            task.progress.percent = Math.min(98, Math.round(downloaded / queue.length * 100));
-            task.progress.detail = `已下载 ${downloaded}/${queue.length} 集`;
-            touch(task);
-            if (Date.now() - started > REDOWNLOAD_TIMEOUT_MS) throw new Error('播放地址超时失效，请重新提交');
-            break;
-          } catch (err) {
-            fs.rmSync(safeJoin(dir, `ep${String(idx + 1).padStart(3, '0')}.enc`), { force: true });
-            fs.rmSync(plainFile, { force: true });
-            attempt++;
-            if (attempt > RETRIES) throw new Error(`第 ${idx + 1} 集下载失败: ${err.message}`);
-            await new Promise(r => setTimeout(r, 1500 * attempt));
           }
         }
-      }
-    })());
+      })());
+    }
+    await Promise.all(workers);
+    if (task.status === 'canceled') return;
+    const remaining = task.episodes.filter(ep => !ep._ok).length;
+    if (remaining === 0 || round >= AUTO_RETRY_ROUNDS) break;
   }
-  await Promise.all(workers);
   signal.aborted = true;
   if (task.status === 'canceled') return;
-  if (downloaded < queue.length) throw new Error(`仅成功下载 ${downloaded}/${queue.length} 集，任务中止`);
 
   // 手动合并：下载完成后保留分集，等待用户在下载管理里点「合并」再合并（不再自动合并）
   task.status = 'ready';
-  task.progress = { phase: 'ready', episode: queue.length, total: queue.length, percent: 100, detail: `已下载 ${queue.length} 集，待合并` };
+  const failedCount = (task.failedEpisodes || []).length;
+  if (failedCount > 0) {
+    task.progress = { phase: 'ready', episode: downloaded, total: task.episodes.length, percent: 100, detail: `已下载 ${downloaded}/${task.episodes.length} 集，失败 ${failedCount} 集（可重试失败集，也可先合并成功部分）` };
+  } else {
+    task.progress = { phase: 'ready', episode: task.episodes.length, total: task.episodes.length, percent: 100, detail: `已下载 ${task.episodes.length} 集，待合并` };
+  }
   touch(task);
   flushStore(true);
 }
 
 /** 合并阶段（runTask 拆分）：合并分集 -> 单文件，成功后清理分集目录 */
 async function mergeStage(task, dir, workDir) {
-  const outName = `${sanitizeName(task.title)}_全${task.episodes.length}集.mp4`;
+  // 失败的分集跳过，只合并已成功下载的分集；产物名用成功数
+  const okEpisodes = task.episodes.filter(ep => !ep.failed);
+  if (okEpisodes.length === 0) throw new Error('没有可合并的成功分集');
+  const outName = `${sanitizeName(task.title)}_全${okEpisodes.length}集.mp4`;
   const outputPath = safeJoin(DOWNLOAD_DIR, outName);
   task.status = 'merging';
   task.progress.phase = 'merging';
   task.progress.percent = 98;
-  task.progress.detail = '开始合并';
+  task.progress.detail = `开始合并（成功 ${okEpisodes.length} 集${(task.failedEpisodes || []).length ? `，跳过失败 ${task.failedEpisodes.length} 集` : ''}）`;
   touch(task);
-  const files = task.episodes.map((_, i) => safeJoin(dir, `ep${String(i + 1).padStart(3, '0')}.mp4`));
+  const files = task.episodes.map((_, i) => safeJoin(dir, `ep${String(i + 1).padStart(3, '0')}.mp4`))
+    .filter((f, i) => !task.episodes[i].failed);
   await mergeEpisodes(files, outputPath, workDir, (percent, detail) => {
     task.progress.percent = percent;
     task.progress.detail = detail;
@@ -450,7 +496,7 @@ async function mergeStage(task, dir, workDir) {
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
   task.status = 'done';
   task.output = outputPath;
-  task.progress = { phase: 'done', episode: task.episodes.length, total: task.episodes.length, percent: 100, detail: '完成' };
+  task.progress = { phase: 'done', episode: okEpisodes.length, total: task.episodes.length, percent: 100, detail: '完成' };
   touch(task);
   flushStore(true);
 }
@@ -482,6 +528,25 @@ function mergeTask(id, owner, isAdmin) {
   return publicTask(t);
 }
 
+/** 重试失败分集：只重下 failedEpisodes 标记的集（已下载的成功分集保留不动），重新取流换新 URL。 */
+function retryFailedEpisodes(id, owner, isAdmin) {
+  const t = tasks[id];
+  if (!t) return null;
+  if (!isAdmin && t.owner && t.owner !== owner) return null;
+  if (t.status !== 'ready' && t.status !== 'failed') throw new Error('当前状态不可重试失败集');
+  const failed = (t.failedEpisodes || []).filter(f => f && f.index);
+  if (failed.length === 0) throw new Error('没有失败分集');
+  t.failedEpisodes = [];
+  t.error = '';
+  for (const f of failed) {
+    const ep = t.episodes[f.index - 1];
+    if (ep) { ep._ok = false; ep.failed = false; ep.error = ''; }
+  }
+  t.status = 'queued';
+  startTask(t);
+  return publicTask(t);
+}
+
 // ---- 对外 API ----
 function createTask({ source, title, seriesId, episodes, owner }) {
   if (!Array.isArray(episodes) || episodes.length === 0) throw new Error('没有可下载的分集');
@@ -494,7 +559,7 @@ function createTask({ source, title, seriesId, episodes, owner }) {
     id, source: source === 'huangguo' ? 'huangguo' : 'hongguo',
     title: sanitizeName(title), seriesId: String(seriesId || ''),
     episodes: episodes.map((ep, i) => ({ index: i + 1, url: String(ep.url), key: ep.key ? String(ep.key) : '' })),
-    status: 'queued', owner: String(owner || ''), output: '',
+    status: 'queued', owner: String(owner || ''), output: '', failedEpisodes: [],
     progress: { phase: 'queued', episode: 0, total: episodes.length, percent: 0, detail: '排队中' },
     createdAt: Date.now(), updatedAt: Date.now(), error: '',
   };
@@ -509,9 +574,11 @@ function publicTask(t) {
   const p = t.progress || {};
   const total = p.total || t.episodes.length || 0;
   const done = p.episode || 0;
+  const failedEpisodes = (t.failedEpisodes || []).filter(f => f && f.index);
   return {
     id: t.id, source: t.source, title: t.title, seriesId: t.seriesId, status: t.status,
     output: t.output, progress: t.progress, error: t.error,
+    failedEpisodes: failedEpisodes.map(f => ({ index: f.index, error: f.error || '' })),
     createdAt: t.createdAt, updatedAt: t.updatedAt,
     episodeCount: t.episodes.length, owner: t.owner,
     percent: p.percent || (t.status === 'done' ? 100 : 0),
@@ -574,4 +641,4 @@ function status() {
 loadTasks();
 ensureDirs();
 
-module.exports = { createTask, listTasks, getTask, deleteTask, mergeTask, status, DOWNLOAD_DIR, mergeEpisodes };
+module.exports = { createTask, listTasks, getTask, deleteTask, mergeTask, retryFailedEpisodes, status, DOWNLOAD_DIR, mergeEpisodes };

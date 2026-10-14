@@ -610,6 +610,7 @@ public final class MainActivity extends Activity {
             case "nas-download-list": return account.getJson("api/download/tasks");
             case "nas-download-cancel": account.deleteJson("api/download/tasks/" + args.optString("id")); return new JSONObject().put("ok", true);
             case "nas-download-merge": return account.postJson("api/download/merge", new JSONObject().put("id", args.optString("id")));
+            case "nas-download-retry-failed": return account.postJson("api/download/retry-failed", new JSONObject().put("id", args.optString("id")));
             case "choose-avatar": {
                 if (!account.isLoggedIn()) throw new IllegalStateException("请先登录");
                 runOnUiThread(() -> {

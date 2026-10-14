@@ -876,23 +876,30 @@ function downloadTaskRow(task, kind) {
   const cancelBtn = running ? `<button type="button" class="dl-cancel" data-dl-cancel="${kind}" data-dl-id="${esc(task.id)}">取消</button>` : '';
   const retryBtn = !running && kind === 'phone' && (task.status === 'failed' || task.status === 'canceled') && !(task.error || '').includes('合并失败')
     ? `<button type="button" class="dl-cancel dl-retry" data-dl-retry="phone" data-dl-id="${esc(task.id)}">重试</button>` : '';
-  // 手动合并：下载完成（ready）或合并失败（分集保留）时显示合并按钮，等用户点合并才合并
+  const failedList = task.failedEpisodes || [];
+  // NAS 任务部分失败：可只重下失败集（已下载分集保留不动），或先合并成功部分
+  const retryFailedBtn = !running && kind === 'nas' && task.status === 'ready' && failedList.length > 0
+    ? `<button type="button" class="dl-cancel dl-retry" data-dl-retry-failed="nas" data-dl-id="${esc(task.id)}">重试失败${failedList.length}集</button>` : '';
+  // 手动合并：下载完成（ready，含部分失败）或合并失败（分集保留）时显示合并按钮，等用户点合并才合并
   const mergeBtn = !running && (task.status === 'ready' || ((task.status === 'failed' || task.status === 'done') && (task.error || '').includes('合并失败')))
     ? `<button type="button" class="dl-cancel dl-retry" data-dl-merge="${kind}" data-dl-id="${esc(task.id)}">合并</button>` : '';
   const deleteBtn = !running ? `<button type="button" class="dl-cancel" data-dl-delete="${kind}" data-dl-id="${esc(task.id)}">删除</button>` : '';
+  const failedInfo = failedList.length > 0
+    ? `<span class="dl-error" data-dl-copy="${esc(task.id)}" data-dl-log="${esc('失败集: ' + failedList.map(f => '第' + f.index + '集(' + (f.error || '') + ')').join('；'))}" title="点击复制失败明细">失败 ${failedList.length} 集：${esc(failedList.slice(0, 3).map(f => '第' + f.index + '集').join('、'))}${failedList.length > 3 ? ' 等' : ''}</span>` : '';
   const errLog = task.error || task.debug || '';
   const errBlock = errLog
     ? `<span class="dl-error" data-dl-copy="${esc(task.id)}" data-dl-log="${esc(errLog.replace(/\n/g, '\\n'))}" title="点击复制全部日志">${task.error ? esc(task.error.split('\n').slice(0, 4).join('<br>')) : '<span class="dl-log-link">复制合并日志</span>'}</span>` : '';
   return `<div class="download-task">
     <div class="download-task-head"><strong>${esc(task.title || '未知剧集')}</strong>${sourceBadge}<span class="dl-status ${running ? 'is-running' : ''}">${statusText}</span></div>
-    <div class="download-task-meta">${task.doneCount}/${task.totalCount} 集 · ${task.doneCount === task.totalCount && task.status !== 'running' ? '已下载全部集' : ''}</div>
+    <div class="download-task-meta">${task.doneCount}/${task.totalCount} 集 · ${task.doneCount === task.totalCount && task.status !== 'running' ? '已下载全部集' : (failedList.length ? `失败 ${failedList.length} 集` : '')}</div>
     <div class="download-track"><i style="width:${Math.max(0, Math.min(100, Number(task.percent) || 0))}%"></i></div>
-    <div class="download-task-foot">${output ? `<span class="dl-output">${esc(output)}</span>` : ''}${errBlock}${mergeBtn}${retryBtn}${cancelBtn}${deleteBtn}</div>
+    <div class="download-task-foot">${output ? `<span class="dl-output">${esc(output)}</span>` : ''}${failedInfo}${errBlock}${mergeBtn}${retryFailedBtn}${retryBtn}${cancelBtn}${deleteBtn}</div>
   </div>`;
 }
 
 function downloadStatusText(task, kind) {
-  if (task.status === 'ready') return '已下载 · 待合并';
+  const failedCount = (task.failedEpisodes || []).length;
+  if (task.status === 'ready') return failedCount > 0 ? `已下载 · 失败${failedCount}集` : '已下载 · 待合并';
   if (task.status === 'done') {
     if (kind === 'nas') return '已下载 · 已合并';
     if ((task.detail || '').includes('已合并')) return '已下载 · 已合并';
@@ -2129,6 +2136,12 @@ document.addEventListener('click', async event => {
     const kind = button.dataset.dlMerge, id = button.dataset.dlId;
     const action = kind === 'nas' ? 'nas-download-merge' : 'download-merge';
     api(action, { id }).then(() => { toast('已开始合并'); refreshCurrentDownloads(); }).catch(error => toast(error.message, true));
+    return;
+  }
+  if (event.target.closest('[data-dl-retry-failed]')) {
+    const button = event.target.closest('[data-dl-retry-failed]');
+    const id = button.dataset.dlId;
+    api('nas-download-retry-failed', { id }).then(() => { toast('已开始重试失败集（已下载分集保留）'); refreshCurrentDownloads(); }).catch(error => toast(error.message, true));
     return;
   }
   if (event.target.closest('[data-dl-delete]')) {
