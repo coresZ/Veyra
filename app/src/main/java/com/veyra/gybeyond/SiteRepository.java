@@ -408,6 +408,23 @@ final class SiteRepository {
             if (!seenEpisodes.add(number)) continue;
             episodes.put(new JSONObject().put("number", number).put("url", channelizedUrl(profile.origin() + href)));
         }
+        if (episodes.length() == 0 && node != null) {
+            // AI 换脸/魔改等无选集链接的作品：videoInitialData 直接给出 epPlaySrcs（集数→m3u8），按集数生成选集
+            try {
+                JSONObject srcs = data.optJSONObject("epPlaySrcs");
+                if (srcs != null && srcs.length() > 0) {
+                    for (java.util.Iterator<String> keys = srcs.keys(); keys.hasNext();) {
+                        try {
+                            int n = Integer.parseInt(keys.next());
+                            if (n >= 1 && seenEpisodes.add(n)) {
+                                episodes.put(new JSONObject().put("number", n)
+                                        .put("url", channelizedUrl(profile.origin() + "/video/" + id + "/")));
+                            }
+                        } catch (NumberFormatException ignored) { }
+                    }
+                }
+            } catch (Exception ignored) { }
+        }
         if (episodes.length() == 0) throw new IllegalStateException("未找到选集列表");
         result.put("episodeLabel", "共 " + episodes.length() + " 集");
         result.put("episodes", episodes);
