@@ -382,14 +382,43 @@ final class SiteRepository {
         return base.isEmpty() ? query : base;
     }
 
+    /** 联想接口查询集：宽词 + 主体第 + 主体季 + 各"第N季" + 冒号"：第N季"（N=1..10）。
+     *  实测单次返回不稳定（同一关键词两次子集不同）、部分查询偶发 500，且"持械入宋第三季"只返回
+     *  100 集版、341 集版需"持械入宋：第三季"带冒号变体才返回——故穷举组合查询合并，三轮实测
+     *  全量覆盖（143 第二季 / 100 第二季 / 341 第三季 / 214 第五季 / 138 主剧 / 宣和铁骑×2，共 15 部）。 */
+    private static java.util.LinkedHashSet<String> suggestionQueries(String base) {
+        java.util.LinkedHashSet<String> queries = new java.util.LinkedHashSet<>();
+        queries.add(base);
+        if (base.length() <= 8) {
+            queries.add(base + "第");
+            queries.add(base + "季");
+        }
+        for (String n : CN_NUM) {
+            if (base.length() + n.length() + 3 <= 12) {
+                queries.add(base + "第" + n + "季");
+                queries.add(base + "：" + n + "季");
+            }
+        }
+        return queries;
+    }
+
     /** 红果联想接口（hongguoduanju.com 官方站，juku 同款）：返回以关键词开头的完整短剧名。
-     *  剥离季后缀后双查询（主体 + 主体第）合并——实测单次返回不稳定（同一关键词两次结果不同子集），
-     *  双查询互补可覆盖 341 集版第三季、100 集版第二季等全部版本。失败由调用方兜底。 */
+     *  剥离季后缀后按 suggestionQueries 穷举查询并行合并，覆盖网页搜索漏掉的全集版
+     *  （341 集版第三季、100 集版第二季等）。失败由调用方兜底。 */
     private JSONArray suggestionItems(String query) throws Exception {
+        return suggestionItemsFor(seasonBase(query), suggestionQueries(seasonBase(query)));
+    }
+
+    /** 联想浮层用轻量版：只查 宽词 + 主体第 + 主体季（3 个请求，快）。 */
+    private JSONArray suggestionItemsLight(String query) throws Exception {
         String base = seasonBase(query);
         java.util.LinkedHashSet<String> queries = new java.util.LinkedHashSet<>();
         queries.add(base);
-        if (base.length() <= 8) queries.add(base + "第");
+        if (base.length() <= 8) { queries.add(base + "第"); queries.add(base + "季"); }
+        return suggestionItemsFor(base, queries);
+    }
+
+    private JSONArray suggestionItemsFor(final String base, java.util.LinkedHashSet<String> queries) throws Exception {
         java.util.LinkedHashMap<String, JSONObject> seen = new java.util.LinkedHashMap<>();
         java.util.List<Future<Void>> futures = new java.util.ArrayList<>();
         for (final String q : queries) {
@@ -456,9 +485,9 @@ final class SiteRepository {
         // 网页/联想返回的"持械入宋：第一季"等标题不含完整查询词"持械入宋第二季"，必须放宽到主体。
         final String baseQuery = seasonBase(query);
         if (suggest) {
-            // 联想浮层：优先红果联想接口（真实短剧名建议），失败回退网页查询
+            // 联想浮层：优先红果联想接口（真实短剧名建议，轻量 3 查询，快），失败回退网页查询
             try {
-                JSONArray suggestList = suggestionItems(query);
+                JSONArray suggestList = suggestionItemsLight(query);
                 java.util.LinkedHashMap<String, JSONObject> filtered = new java.util.LinkedHashMap<>();
                 for (int i = 0; i < suggestList.length(); i++) {
                     JSONObject it = suggestList.optJSONObject(i);
@@ -484,6 +513,32 @@ final class SiteRepository {
                 if (it != null) seen.putIfAbsent(it.optString("id"), it);
             }
         }
+        // 三层补全（并行）：
+        // 1) 网页按季穷举 base+第N季(N=1..10)：网页搜索是确定性的，实测"持械入宋第三季"必出 341 集版、
+        //    "持械入宋第二季"必出 143 集版 —— 这是确保全集版出现的确定性通道；
+        // 2) 联想接口组合（23 查询）：补网页搜不到的条目（138 集主剧、宣和铁骑系列等）；
+        // 3) 联想接口整体不可用时回退网页变体穷举（去尾字/+第/+季）。
+        java.util.List<Future<Void>> futures = new java.util.ArrayList<>();
+        for (final String n : CN_NUM) {
+            if (baseQuery.length() + n.length() + 3 > 12) continue;
+            final String variant = baseQuery + "第" + n + "季";
+            futures.add(SEARCH_POOL.submit(new Callable<Void>() {
+                @Override public Void call() {
+                    try {
+                        JSONObject extra = listing(page(profile.route("search", "query", java.net.URLEncoder.encode(variant, StandardCharsets.UTF_8))), 1, "");
+                        JSONArray extraItems = extra.optJSONArray("items");
+                        synchronized (seen) {
+                            for (int i = 0; extraItems != null && i < extraItems.length(); i++) {
+                                JSONObject it = extraItems.optJSONObject(i);
+                                if (it == null) continue;
+                                if (it.optString("title").contains(baseQuery)) seen.putIfAbsent(it.optString("id"), it);
+                            }
+                        }
+                    } catch (Exception ignored) { }
+                    return null;
+                }
+            }));
+        }
         boolean suggestionOk = false;
         try {
             JSONArray suggestList = suggestionItems(query);
@@ -502,12 +557,9 @@ final class SiteRepository {
             if (shorter.length() >= 2) variants.add(shorter);
             if (query.length() <= 8) variants.add(query + "第");
             variants.add(query + "季");
-            if (query.length() >= 3 && query.length() <= 6) {
-                for (String n : CN_NUM) variants.add(query + "第" + n + "季");
-            }
-            java.util.List<Future<Void>> futures = new java.util.ArrayList<>();
+            java.util.List<Future<Void>> fallbackFutures = new java.util.ArrayList<>();
             for (final String variant : variants) {
-                futures.add(SEARCH_POOL.submit(new Callable<Void>() {
+                fallbackFutures.add(SEARCH_POOL.submit(new Callable<Void>() {
                     @Override public Void call() {
                         try {
                             JSONObject extra = listing(page(profile.route("search", "query", java.net.URLEncoder.encode(variant, StandardCharsets.UTF_8))), 1, "");
@@ -526,8 +578,9 @@ final class SiteRepository {
                     }
                 }));
             }
-            for (Future<Void> f : futures) { try { f.get(); } catch (Exception ignored) { } }
+            for (Future<Void> f : fallbackFutures) { try { f.get(); } catch (Exception ignored) { } }
         }
+        for (Future<Void> f : futures) { try { f.get(); } catch (Exception ignored) { } }
         if (seen.size() > count) {
             java.util.List<JSONObject> ordered = new java.util.ArrayList<>(seen.values());
             final String rankQuery = query;
