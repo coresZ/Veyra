@@ -64,6 +64,20 @@ function saveSettings() {
 }
 // WebUI 管理员密码（环境变量 ADMIN_PASSWORD 配置，未配置则管理功能不可用）
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+// 注册限流：同一 IP 10 分钟内最多 5 次注册，防公网扫描器/爬虫批量注册
+const REG_WINDOW_MS = 10 * 60 * 1000;
+const REG_LIMIT = 5;
+const regHits = new Map(); // ip -> [timestamp...]
+function regTooFrequent(req) {
+  const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() ||
+    (req.socket && req.socket.remoteAddress) || 'unknown';
+  const now = Date.now();
+  const arr = (regHits.get(ip) || []).filter(t => now - t < REG_WINDOW_MS);
+  if (arr.length >= REG_LIMIT) return true;
+  arr.push(now);
+  regHits.set(ip, arr);
+  return false;
+}
 const ADMIN_SESSION_TTL_MS = 8 * 3600 * 1000; // 管理员会话 8 小时
 const adminSessions = new Map(); // adminToken -> expiry ms
 
@@ -560,7 +574,7 @@ app.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
 
 // 状态统计（状态页用，需管理员）
 app.get('/api/stats', requireAdmin, (_req, res) => {
-  res.json({ service: 'veyra-backend', status: 'ok', users: Object.keys(users).length, dataDir: DATA_DIR, registerOpen });
+  res.json({ service: "veyra-backend", status: "ok", registerOpen });
 });
 
 // 管理台设置：开放注册开关 + 后端代理（实时生效，持久化到 settings.json，无需重启）
@@ -781,6 +795,7 @@ app.get('/api/health', (_req, res) => {
 
 // 注册（密码不限长度：1 位即可；开关在 WebUI 管理台实时控制，持久化到 settings.json）
 app.post('/api/register', (req, res) => {
+  if (regTooFrequent(req)) return res.status(429).json({ error: '注册过于频繁，请稍后再试' });
   const username = String(req.body.username || '').trim();
   const password = String(req.body.password || '');
   if (!USERNAME_RE.test(username))
