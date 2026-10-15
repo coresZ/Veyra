@@ -606,6 +606,17 @@ public final class MainActivity extends Activity {
             case "download-retry": DownloadManager.get(this).retry(args.optString("id")); return new JSONObject().put("ok", true);
             case "download-merge": return DownloadManager.get(this).merge(args.optString("id"));
             case "input-edit": setInputEditing(args.optBoolean("active")); return new JSONObject().put("ok", true);
+            case "open-url": {
+                String url = args.optString("url");
+                if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                    } catch (Exception error) {
+                        return new JSONObject().put("ok", false).put("error", error.getMessage());
+                    }
+                }
+                return new JSONObject().put("ok", true);
+            }
             case "crash-log": return new JSONObject().put("log", crashLog());
             case "nas-download-start": return account.postJson("api/download/tasks", new JSONObject()
                     .put("source", args.optString("source")).put("title", args.optString("title"))

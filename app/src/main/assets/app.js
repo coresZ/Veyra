@@ -1049,7 +1049,7 @@ function renderSettings() {
     <section class="update-settings"><div><h2>界面与站点资源</h2><p data-resource-status>后台自动检查，已下载的更新在合适时机启用。</p><button type="button" data-apply-resources hidden>启用已下载资源</button></div><button type="button" data-check-resources>检查资源</button></section>
     <section class="update-settings"><div><h2>应用更新</h2><button type="button" class="app-version ${updateAvailable ? 'has-update' : ''}" aria-label="当前版本 ${esc(appVersion)}"><span class="app-version-text">版本 ${appVersion ? `v${esc(appVersion)}` : '读取中…'}</span></button><p>启动后自动检查，也可以在这里手动检查。</p></div><button type="button" data-check-update>检查更新</button></section>
     <section class="settings-storage"><h2>内容模式</h2><p>${state.privateUnlocked ? '该账号已解锁私密模式，切换无需动态码。' : '首次进入私密模式需输入后端动态码（鉴权一次，跟账号走）。'}</p>${privateMode() ? '<button type="button" data-return-public>返回红果（公开模式）</button>' : '<button type="button" data-enter-private>进入私密模式</button>'}</section><section class="settings-storage"><h2>本地存储</h2><button type="button" data-clear="cache">清理内容缓存</button></section>
-    <section class="settings-storage"><h2>关于 Veyra</h2><p>项目地址：<a href="https://github.com/gybeyond1/Veyra" target="_blank" rel="noopener noreferrer">github.com/gybeyond1/Veyra</a></p><p>Veyra 基于开源项目二次开发，遵循 GPL-3.0 开源协议发布，完整源码、自建后端与 Docker 部署说明见仓库。</p></section></div>`;
+    <section class="settings-storage"><h2>关于 Veyra</h2><p>项目地址：<button type="button" class="settings-url" data-open-url="https://github.com/gybeyond1/Veyra">github.com/gybeyond1/Veyra</button></p><p>Veyra 基于开源项目二次开发，遵循 GPL-3.0 开源协议发布，完整源码、自建后端与 Docker 部署说明见仓库。</p></section></div>`;
   api('hot-update-status').then(window.hgHotUpdateStatus).catch(() => {});
   api('get-proxy').then(value => {
     state.proxy = value || '';
@@ -1249,7 +1249,7 @@ function renderDetail() {
   window.AndroidHost?.setDetailMode?.(true);
   const episodes = asArray(data.episodes);
   content.innerHTML = `<div class="detail-page"><button class="detail-back" type="button" data-back="1">${icon('back')} 返回</button>
-    <div class="detail-art"><img data-cover="${esc(data.cover)}" alt=""></div><div class="detail-copy"><h1>${esc(data.title)}</h1><p>${loading ? '正在获取内容…' : `${esc(data.score)} ${esc(data.episodeLabel)}`}</p><p class="detail-description${detailExpanded ? ' expanded' : ''}">${esc(data.description || '')}</p>${!loading && (data.description || '').length > 90 ? `<button type="button" class="detail-expand" data-detail-expand="1">${detailExpanded ? '收起' : '展开全文'}</button>` : ''}
+    <div class="detail-art"><img data-cover="${esc(data.cover)}" alt=""></div><div class="detail-copy"><h1>${esc(data.title)}</h1><p>${loading ? '正在获取内容…' : `${esc(data.score)} ${esc(data.episodeLabel)}`}</p><div class="detail-desc-wrap${detailExpanded ? ' expanded' : ''}"><p class="detail-description">${esc(data.description || '')}</p>${!loading && (data.description || '').length > 90 ? `<button type="button" class="detail-expand" data-detail-expand="1">${detailExpanded ? '收起' : '展开全文'}</button>` : ''}</div>
     <div class="detail-buttons"><button class="detail-play" type="button" data-play="1" ${loading ? 'disabled' : ''}>${loading ? '正在加载…' : '立即播放'}</button><button class="bookmark-button" type="button" data-bookmark="1" aria-label="${state.bookmarked ? '取消收藏' : '收藏'}" ${loading ? 'disabled' : ''}>${state.bookmarked ? '★' : '☆'}</button><button class="detail-download" type="button" data-download="1" ${loading ? 'disabled' : ''}>下载</button></div>
     ${loading ? '<div class="detail-loading" role="status">正在获取选集…</div>' : episodes.length ? `<h2>选集</h2><div class="episode-grid">${episodes.map((item, index) => `<button type="button" data-episode="${item.number}" class="${index === 0 ? 'active' : ''}">${item.number}</button>`).join('')}</div>` : ''}</div></div>`;
   hydrateImages();
@@ -2101,11 +2101,16 @@ document.addEventListener('click', async event => {
   }
   if (event.target.closest('[data-apply-resources]')) { api('apply-hot-update').catch(error => toast(error.message, true)); return; }
   if (event.target.closest('[data-account-management]')) { goAccountManagement(); return; }
+  const openUrl = event.target.closest('[data-open-url]');
+  if (openUrl) {
+    api('open-url', { url: openUrl.dataset.openUrl }).catch(error => toast(error.message, true));
+    return;
+  }
   const detailExpand = event.target.closest('[data-detail-expand]');
   if (detailExpand) {
     detailExpanded = !detailExpanded;
-    const desc = content.querySelector('.detail-description');
-    if (desc) desc.classList.toggle('expanded', detailExpanded);
+    const wrap = content.querySelector('.detail-desc-wrap');
+    if (wrap) wrap.classList.toggle('expanded', detailExpanded);
     detailExpand.textContent = detailExpanded ? '收起' : '展开全文';
     return;
   }
