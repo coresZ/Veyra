@@ -29,16 +29,18 @@ import android.widget.FrameLayout;
 import androidx.core.graphics.PathParser;
 
 /**
- * 原生液态玻璃底栏 —— 复刻 Android Liquid Glass（backdrop）：
- * WebView 背景软件绘制截屏 → AGSL RuntimeShader 圆角矩形折射（内置采样模糊+色散），
- * 三层分离渲染（容器玻璃层 / 胶囊折射层 / 胶囊 UI 层），按压/拖动 pressProgress
- * 驱动折射强度/高光/阴影/放大，弹性吸附动画+水平拖动。
- * 仅使用与官方签名一致的 RenderEffect.createRuntimeShaderEffect(shader, "content")（API 33+）。
+ * 原生液态玻璃底栏 —— 复刻 Android Liquid Glass（kyant backdrop，Apache-2.0）。
+ * 可靠结构：仅两层子 View。
+ *   RefractionLayer（下层）：WebView 软件截屏 + AGSL 圆角矩形折射 shader（内置 9-tap 采样模糊），
+ *                             失败时静默降级（UI 层仍完整显示）。
+ *   UiLayer（上层，无 shader）：半透明容器色 + 非选中 tab + 金色选中胶囊（高光/投影/内阴影/图标/文字）。
+ *                             无论折射是否成功，底栏 UI 必然可见。
+ * 触摸/拖动在父 FrameLayout 处理；pressProgress 驱动折射/高光/阴影/放大。
  */
 public class GlassBottomBar extends FrameLayout {
     private static final String TAG = "GlassBottomBar";
 
-    // ---- AGSL shader（来自 Android Liquid Glass / kyant backdrop，Apache-2.0，内置 9-tap 采样模糊）----
+    // ---- AGSL shader（来自 Android Liquid Glass / kyant，Apache-2.0，内置 9-tap 采样模糊）----
     private static final String SDF = """
 float radiusAt(float2 coord, float4 radii) {
     if (coord.x >= 0.0) { if (coord.y <= 0.0) return radii.y; else return radii.z; }
@@ -96,48 +98,6 @@ half4 main(float2 coord) {
     return blurSample(refractedCoord);
 }""";
 
-    /** 胶囊：圆角矩形折射 + 色散（无模糊） */
-    private static final String CAPSULE_SHADER = """
-uniform shader content;
-uniform float2 size;
-uniform float2 offset;
-uniform float4 cornerRadii;
-uniform float refractionHeight;
-uniform float refractionAmount;
-uniform float depthEffect;
-uniform float chromaticAberration;
-""" + SDF + """
-half4 main(float2 coord) {
-    float2 halfSize = size * 0.5;
-    float2 centeredCoord = (coord + offset) - halfSize;
-    float radius = radiusAt(coord, cornerRadii);
-    float sd = sdRoundedRect(centeredCoord, halfSize, radius);
-    if (-sd >= refractionHeight) return content.eval(coord);
-    sd = min(sd, 0.0);
-    float d = circleMap(1.0 - -sd / refractionHeight) * refractionAmount;
-    float gradRadius = min(radius * 1.5, min(halfSize.x, halfSize.y));
-    float2 grad = normalize(gradSdRoundedRect(centeredCoord, halfSize, gradRadius) + depthEffect * normalize(centeredCoord));
-    float2 refractedCoord = coord + d * grad;
-    float dispersionIntensity = chromaticAberration * ((centeredCoord.x * centeredCoord.y) / (halfSize.x * halfSize.y));
-    float2 dispersedCoord = d * grad * dispersionIntensity;
-    half4 color = half4(0.0);
-    half4 red = content.eval(refractedCoord + dispersedCoord);
-    color.r += red.r / 3.5; color.a += red.a / 7.0;
-    half4 orange = content.eval(refractedCoord + dispersedCoord * (2.0 / 3.0));
-    color.r += orange.r / 3.5; color.g += orange.g / 7.0; color.a += orange.a / 7.0;
-    half4 yellow = content.eval(refractedCoord + dispersedCoord * (1.0 / 3.0));
-    color.r += yellow.r / 3.5; color.g += yellow.g / 3.5; color.a += yellow.a / 7.0;
-    half4 green = content.eval(refractedCoord);
-    color.g += green.g / 3.5; color.a += green.a / 7.0;
-    half4 cyan = content.eval(refractedCoord - dispersedCoord * (1.0 / 3.0));
-    color.g += cyan.g / 3.5; color.b += cyan.b / 3.0; color.a += cyan.a / 7.0;
-    half4 blue = content.eval(refractedCoord - dispersedCoord * (2.0 / 3.0));
-    color.b += blue.b / 3.0; color.a += blue.a / 7.0;
-    half4 purple = content.eval(refractedCoord - dispersedCoord);
-    color.r += purple.r / 7.0; color.b += purple.b / 3.0; color.a += purple.a / 7.0;
-    return color;
-}""";
-
     private static class TabItem {
         final String id;
         final String label;
@@ -173,8 +133,8 @@ half4 main(float2 coord) {
     private static final float CONTAINER_REFRACTION_DP = 24f;
     private static final float CAPSULE_REFRACTION_DP = 14f;
     private static final float PANEL_OFFSET_DP = 4f;
-    private static final float CAP_PAD_DP = 16f;          // 胶囊截屏外扩
-    private static final float CONTAINER_BLUR_PX = 5f;    // 容器内置模糊半径(px)
+    private static final float CAP_PAD_DP = 16f;
+    private static final float CONTAINER_BLUR_PX = 5f;
 
     private final float density;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -183,14 +143,13 @@ half4 main(float2 coord) {
     private boolean darkTheme;
     private boolean detailMode;
 
-    // ---- 几何（px）----
+    // ---- 几何（px，父 View 坐标 = root 全屏坐标）----
     private RectF containerRect = new RectF();
     private RectF capsuleRect = new RectF();
     private float capsuleCenterX;
     private float tabWidth;
     private float pad;
-    private Rect snapshotSrcRect = new Rect();        // webView 局部坐标
-    private RectF snapshotDstRect = new RectF();      // 父 View 坐标
+    private Rect snapshotSrcRect = new Rect();
 
     // ---- 渲染状态 ----
     private Bitmap snapshot;
@@ -198,18 +157,15 @@ half4 main(float2 coord) {
     private float capsuleScale = 1f;
     private float panelOffset;
     private int selectedIndex = 0;
-    private boolean animating;
+    private boolean dragging;
+    private float downX, downStart;
+    private ValueAnimator pressAnimator;
     private boolean snapshotPending;
     private long lastSnapshotMs;
-    private ValueAnimator pressAnimator;
 
-    // ---- 四层子 View ----
-    private ContainerGlassLayer containerLayer;
-    private TabBarLayer tabBarLayer;
-    private CapsuleGlassLayer capsuleBackdropLayer;
-    private CapsuleUiLayer capsuleUiLayer;
+    private RefractionLayer refractionLayer;
 
-    // ---- Paint（父层，供 UI 层复用绘制参数）----
+    // ---- Paint ----
     private final Paint iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint capsuleFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -218,11 +174,12 @@ half4 main(float2 coord) {
     private final Paint highlightPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint innerShadowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint containerFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint containerEdgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private final Path shadowPath = new Path();
 
     private float[] cornerRadii = new float[4];
-    private float[] capsuleRadii = new float[4];
 
     public GlassBottomBar(Context context) {
         this(context, null);
@@ -231,32 +188,16 @@ half4 main(float2 coord) {
     public GlassBottomBar(Context context, AttributeSet attrs) {
         super(context, attrs);
         density = context.getResources().getDisplayMetrics().density;
-        setWillNotDraw(true); // 父层只做布局/动画/触摸，绘制全在子层
+        setWillNotDraw(false); // 父层自绘全部 UI（不依赖子 View 渲染链路）
         setVisibility(View.VISIBLE);
         textPaint.setTextAlign(Paint.Align.CENTER);
         textPaint.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
         borderPaint.setStyle(Paint.Style.STROKE);
 
-        containerLayer = new ContainerGlassLayer(context);
-        tabBarLayer = new TabBarLayer(context);
-        capsuleBackdropLayer = new CapsuleGlassLayer(context);
-        capsuleUiLayer = new CapsuleUiLayer(context);
-        addViewLayer(containerLayer, 0);
-        addViewLayer(tabBarLayer, 1);
-        addViewLayer(capsuleBackdropLayer, 2);
-        addViewLayer(capsuleUiLayer, 3);
-    }
-
-    private void addViewLayer(View v, int order) {
+        refractionLayer = new RefractionLayer(context);
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
-        v.setLayoutParams(lp);
-        addView(v);
-    }
-
-    @Override
-    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-        super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+        addView(refractionLayer, lp);
     }
 
     public void attachWebView(WebView view) {
@@ -266,8 +207,7 @@ half4 main(float2 coord) {
     public void setDarkTheme(boolean dark) {
         if (darkTheme == dark) return;
         darkTheme = dark;
-        capsuleUiLayer.invalidate();
-        containerLayer.invalidate();
+        invalidateAll();
     }
 
     public void setDetailMode(boolean enabled) {
@@ -308,9 +248,7 @@ half4 main(float2 coord) {
             canvas.translate(-snapshotSrcRect.left, -snapshotSrcRect.top);
             webView.draw(canvas);
             snapshot = bitmap;
-            invalidate();
-            containerLayer.invalidate();
-            capsuleBackdropLayer.invalidate();
+            refractionLayer.invalidate();
             if (snapshotPending) {
                 snapshotPending = false;
                 lastSnapshotMs = 0;
@@ -338,48 +276,26 @@ half4 main(float2 coord) {
         capsuleCenterX = capsuleCenterFor(selectedIndex);
         float radius = dp(CONTAINER_RADIUS_DP);
         cornerRadii[0] = radius; cornerRadii[1] = radius; cornerRadii[2] = radius; cornerRadii[3] = radius;
-        float cRadius = dp(CAPSULE_RADIUS_DP);
-        capsuleRadii[0] = cRadius; capsuleRadii[1] = cRadius; capsuleRadii[2] = cRadius; capsuleRadii[3] = cRadius;
         pad = dp(CONTAINER_REFRACTION_DP) + dp(8);
         int[] loc = new int[2];
-        webView.getLocationOnScreen(loc);
         int[] myLoc = new int[2];
-        getLocationOnScreen(myLoc);
+        try {
+            webView.getLocationOnScreen(loc);
+            getLocationOnScreen(myLoc);
+        } catch (Throwable t) {
+            loc[0] = 0; loc[1] = 0; myLoc[0] = 0; myLoc[1] = 0;
+        }
         float dx = myLoc[0] - loc[0];
         float dy = myLoc[1] - loc[1];
         snapshotSrcRect.set((int) (containerRect.left + dx - pad), (int) (containerRect.top + dy - pad),
                 (int) (containerRect.right + dx + pad), (int) (containerRect.bottom + dy + pad));
-        snapshotDstRect.set(containerRect.left - pad, containerRect.top - pad,
-                containerRect.right + pad, containerRect.bottom + pad);
-        // 胶囊层尺寸：胶囊 + 外扩 CAP_PAD
-        float capW = tabWidth + dp(CAP_PAD_DP) * 2f;
-        float capH = capsuleH + dp(CAP_PAD_DP) * 2f;
-        FrameLayout.LayoutParams capLp = new FrameLayout.LayoutParams(
-                (int) capW, (int) capH);
-        capsuleBackdropLayer.setLayoutParams(capLp);
-        capsuleUiLayer.setLayoutParams(capLp);
-        syncCapsuleLayers(false);
+        refractionLayer.invalidate();
+        invalidate();
         requestSnapshot();
     }
 
     private float capsuleCenterFor(int index) {
         return capsuleRect.left + tabWidth * index + tabWidth / 2f;
-    }
-
-    /** 胶囊两层跟随 capsuleCenterX（左/上=胶囊左上角-pad） */
-    private void syncCapsuleLayers(boolean animated) {
-        float left = capsuleCenterX - (tabWidth + dp(CAP_PAD_DP) * 2f) / 2f;
-        float top = capsuleRect.top - dp(CAP_PAD_DP);
-        capsuleBackdropLayer.setTranslationX(left - capsuleBackdropLayer.getLeft());
-        capsuleBackdropLayer.setTranslationY(top - capsuleBackdropLayer.getTop());
-        capsuleUiLayer.setTranslationX(left - capsuleUiLayer.getLeft());
-        capsuleUiLayer.setTranslationY(top - capsuleUiLayer.getTop());
-        capsuleBackdropLayer.setCapsuleScale(capsuleScale);
-        capsuleUiLayer.setCapsuleScale(capsuleScale);
-        if (animated) {
-            capsuleBackdropLayer.invalidate();
-            capsuleUiLayer.invalidate();
-        }
     }
 
     public void setSelectedIndex(int index, boolean animate) {
@@ -392,28 +308,30 @@ half4 main(float2 coord) {
             panelOffset = 0f;
             capsuleScale = 1f;
             pressProgress = 0f;
-            syncCapsuleLayers(false);
-            containerLayer.invalidate();
+            invalidateAll();
             return;
         }
         float start = capsuleCenterX;
-        animating = true;
         ValueAnimator move = ValueAnimator.ofFloat(start, target);
         move.setDuration(380);
         move.setInterpolator(new OvershootInterpolator(1.8f));
         move.addUpdateListener(a -> {
             capsuleCenterX = (float) a.getAnimatedValue();
             updatePanelOffset();
-            syncCapsuleLayers(true);
+            invalidateAll();
         });
         move.addListener(new AnimatorListenerAdapter() {
             @Override public void onAnimationEnd(Animator animation) {
-                animating = false;
                 panelOffset = 0f;
-                containerLayer.invalidate();
+                invalidateAll();
             }
         });
         move.start();
+    }
+
+    private void invalidateAll() {
+        refractionLayer.invalidate();
+        invalidate();
     }
 
     private void animatePress() {
@@ -423,7 +341,7 @@ half4 main(float2 coord) {
         press.addUpdateListener(a -> {
             pressProgress = (float) a.getAnimatedValue();
             capsuleScale = 1f + 0.14f * pressProgress;
-            syncCapsuleLayers(true);
+            invalidateAll();
         });
         pressAnimator = press;
         press.start();
@@ -434,7 +352,7 @@ half4 main(float2 coord) {
             float v = (float) a.getAnimatedValue();
             pressProgress = Math.max(0f, v);
             capsuleScale = 1f + 0.14f * pressProgress;
-            syncCapsuleLayers(true);
+            invalidateAll();
         });
         release.addListener(new AnimatorListenerAdapter() {
             @Override public void onAnimationEnd(Animator animation) {
@@ -452,14 +370,9 @@ half4 main(float2 coord) {
         float fraction = ((capsuleCenterX - containerRect.left) / containerRect.width()) * 2f - 1f;
         fraction = Math.max(-1f, Math.min(1f, fraction));
         panelOffset = dp(PANEL_OFFSET_DP) * (fraction < 0 ? -1f : 1f) * (1f - Math.abs(fraction));
-        containerLayer.setPanelOffset(panelOffset);
-        tabBarLayer.setPanelOffset(panelOffset);
     }
 
-    // ---- 拖动 ----
-    private boolean dragging;
-    private float downX, downStart;
-
+    // ---- 触摸/拖动 ----
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         if (detailMode || getVisibility() != View.VISIBLE) return false;
@@ -476,7 +389,7 @@ half4 main(float2 coord) {
                 pressProgress = 1f;
                 capsuleScale = 1.14f;
                 if (pressAnimator != null) pressAnimator.cancel();
-                syncCapsuleLayers(true);
+                invalidateAll();
                 getParent().requestDisallowInterceptTouchEvent(true);
                 return true;
             case MotionEvent.ACTION_MOVE: {
@@ -485,7 +398,7 @@ half4 main(float2 coord) {
                 float rightBound = capsuleRect.right - tabWidth / 2f;
                 capsuleCenterX = Math.max(leftBound, Math.min(rightBound, raw));
                 updatePanelOffset();
-                syncCapsuleLayers(true);
+                invalidateAll();
                 return true;
             }
             case MotionEvent.ACTION_UP:
@@ -503,240 +416,162 @@ half4 main(float2 coord) {
         return super.onTouchEvent(event);
     }
 
-    // ================= 非选中 tab 层（无 shader，画图标/文字） =================
-    private class TabBarLayer extends View {
-        private float offset;
-
-        TabBarLayer(Context c) {
-            super(c);
-            setWillNotDraw(false);
-        }
-
-        void setPanelOffset(float v) { offset = v; invalidate(); }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            canvas.save();
-            canvas.translate(offset, 0f);
-            for (int i = 0; i < tabs.length; i++) {
-                if (i == selectedIndex) continue;
-                float cx = capsuleRect.left + tabWidth * i + tabWidth / 2f;
-                float cy = containerRect.centerY();
-                TabItem tab = tabs[i];
-                iconPaint.setColor(darkTheme ? Color.argb(190, 196, 190, 177) : Color.argb(200, 105, 102, 94));
-                iconPaint.setStyle(tab.stroke ? Paint.Style.STROKE : Paint.Style.FILL);
-                iconPaint.setStrokeWidth(dp(1.9f));
-                canvas.save();
-                canvas.translate(cx, cy - dp(8));
-                float s = dp(ICON_SIZE_DP) / 24f;
-                canvas.scale(s, s);
-                canvas.drawPath(tab.icon, iconPaint);
-                canvas.restore();
-                textPaint.setColor(darkTheme ? Color.argb(220, 196, 190, 177) : Color.argb(220, 105, 102, 94));
-                textPaint.setTextSize(dp(10f));
-                textPaint.setFakeBoldText(false);
-                Paint.FontMetrics fm = textPaint.getFontMetrics();
-                float textY = cy + dp(23) - (fm.ascent + fm.descent) / 2f;
-                canvas.drawText(tab.label, cx, textY, textPaint);
-            }
-            canvas.restore();
-        }
-    }
-
-    // ================= 容器玻璃层（全屏，画 snapshot + 折射） =================
-    private class ContainerGlassLayer extends View {
-        private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint edgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private float offset;
+    // ================= 折射层（下层：snapshot + AGSL 容器折射） =================
+    private class RefractionLayer extends View {
         private RuntimeShader shader;
 
-        ContainerGlassLayer(Context c) {
+        RefractionLayer(Context c) {
             super(c);
             setWillNotDraw(false);
             if (Build.VERSION.SDK_INT >= 33) {
-                try { shader = new RuntimeShader(CONTAINER_SHADER); } catch (Throwable t) { shader = null; }
+                try { shader = new RuntimeShader(CONTAINER_SHADER); } catch (Throwable t) { shader = null; Log.w(TAG, "shader init fail", t); }
             }
         }
-
-        void setPanelOffset(float v) { offset = v; invalidate(); }
 
         @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
+            if (snapshot == null) return;
             canvas.save();
-            canvas.translate(offset, 0f);
-            float radius = dp(CONTAINER_RADIUS_DP);
-            if (snapshot != null) {
-                canvas.save();
-                canvas.clipPath(containerPathFor(containerRect, radius));
-                if (Build.VERSION.SDK_INT >= 33 && shader != null) {
+            canvas.translate(panelOffset, 0f);
+            if (Build.VERSION.SDK_INT >= 33 && shader != null) {
+                try {
                     shader.setFloatUniform("size", containerRect.width(), containerRect.height());
                     shader.setFloatUniform("offset", 0f, 0f);
                     shader.setFloatUniform("cornerRadii", cornerRadii);
-                    shader.setFloatUniform("refractionHeight", dp(CONTAINER_REFRACTION_DP));
-                    shader.setFloatUniform("refractionAmount", dp(CONTAINER_REFRACTION_DP));
+                    shader.setFloatUniform("refractionHeight", dp(CONTAINER_REFRACTION_DP) * (0.5f + 0.5f * pressProgress));
+                    shader.setFloatUniform("refractionAmount", dp(CONTAINER_REFRACTION_DP) * (0.4f + 0.6f * pressProgress));
                     shader.setFloatUniform("depthEffect", 1f);
                     shader.setFloatUniform("blurRadius", CONTAINER_BLUR_PX * density);
                     setRenderEffect(android.graphics.RenderEffect.createRuntimeShaderEffect(shader, "content"));
+                } catch (Throwable t) {
+                    Log.w(TAG, "shader apply fail", t);
+                    setRenderEffect(null);
                 }
-                RectF dst = new RectF(containerRect.left - pad, containerRect.top - pad,
-                        containerRect.right + pad, containerRect.bottom + pad);
-                canvas.drawBitmap(snapshot, null, dst, new Paint(Paint.FILTER_BITMAP_FLAG));
-                canvas.restore();
+            } else {
+                setRenderEffect(null);
             }
-            fillPaint.setShader(new LinearGradient(
-                    containerRect.left, containerRect.top, containerRect.left, containerRect.bottom,
-                    darkTheme ? Color.argb(200, 44, 52, 57) : Color.argb(170, 255, 255, 255),
-                    darkTheme ? Color.argb(150, 26, 31, 34) : Color.argb(110, 255, 252, 244),
-                    Shader.TileMode.CLAMP));
-            canvas.drawRoundRect(containerRect, radius, radius, fillPaint);
-            edgePaint.setShader(new LinearGradient(0, containerRect.top, 0, containerRect.top + dp(14),
-                    darkTheme ? Color.argb(55, 255, 255, 255) : Color.argb(100, 255, 255, 255),
-                    Color.TRANSPARENT, Shader.TileMode.CLAMP));
-            canvas.drawRoundRect(new RectF(containerRect.left, containerRect.top, containerRect.right, containerRect.top + dp(14)),
-                    radius, radius, edgePaint);
-            borderPaint.setStrokeWidth(dp(1));
-            borderPaint.setColor(darkTheme ? Color.argb(55, 255, 255, 255) : Color.argb(120, 255, 255, 255));
-            canvas.drawRoundRect(containerRect, radius, radius, borderPaint);
+            canvas.drawBitmap(snapshot, null,
+                    new RectF(containerRect.left - pad, containerRect.top - pad,
+                            containerRect.right + pad, containerRect.bottom + pad),
+                    new Paint(Paint.FILTER_BITMAP_FLAG));
             canvas.restore();
         }
     }
 
-    private Path containerPathFor(RectF r, float radius) {
-        Path p = new Path();
-        p.addRoundRect(r, radius, radius, Path.Direction.CW);
-        return p;
-    }
-
-    // ================= 胶囊折射层（画胶囊区域背景折射） =================
-    private class CapsuleGlassLayer extends View {
-        private float scale = 1f;
-        private RuntimeShader shader;
-
-        CapsuleGlassLayer(Context c) {
-            super(c);
-            setWillNotDraw(false);
-            if (Build.VERSION.SDK_INT >= 33) {
-                try { shader = new RuntimeShader(CAPSULE_SHADER); } catch (Throwable t) { shader = null; }
-            }
-        }
-
-        void setCapsuleScale(float v) { scale = v; }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            if (snapshot == null || shader == null) return;
-            float w = tabWidth * scale;
-            float h = dp(CAPSULE_HEIGHT_DP) * scale;
-            // 胶囊中心在容器中的位置（snapshot 坐标 = 容器坐标 + pad）
-            float cx = capsuleCenterX - containerRect.left + pad;
-            float cy = containerRect.centerY() - containerRect.top + pad;
-            float capPad = dp(CAP_PAD_DP);
-            // snapshot 子区域（胶囊外扩 capPad）
-            float left = cx - w / 2f - capPad;
-            float top = cy - h / 2f - capPad;
-            Rect src = new Rect((int) left, (int) top, (int) (left + w + capPad * 2f), (int) (top + h + capPad * 2f));
-            src.left = Math.max(0, src.left); src.top = Math.max(0, src.top);
-            src.right = Math.min(snapshot.getWidth(), src.right);
-            src.bottom = Math.min(snapshot.getHeight(), src.bottom);
-            if (src.width() <= 0 || src.height() <= 0) return;
-            shader.setFloatUniform("size", w, h);
-            shader.setFloatUniform("offset", 0f, 0f);
-            shader.setFloatUniform("cornerRadii", capsuleRadii);
-            shader.setFloatUniform("refractionHeight", dp(10f) * pressProgress);
-            shader.setFloatUniform("refractionAmount", dp(CAPSULE_REFRACTION_DP) * pressProgress);
-            shader.setFloatUniform("depthEffect", 1f);
-            shader.setFloatUniform("chromaticAberration", 1f);
-            setRenderEffect(android.graphics.RenderEffect.createRuntimeShaderEffect(shader, "content"));
-            RectF dst = new RectF(0, 0, getWidth(), getHeight());
-            canvas.drawBitmap(snapshot, src, dst, new Paint(Paint.FILTER_BITMAP_FLAG));
-        }
-    }
-
-    // ================= 胶囊 UI 层（金色胶囊 + 高光/阴影 + 图标/文字，无 shader） =================
-    private class CapsuleUiLayer extends View {
-        private float scale = 1f;
-
-        CapsuleUiLayer(Context c) {
-            super(c);
-            setWillNotDraw(false);
-        }
-
-        void setCapsuleScale(float v) { scale = v; }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            float w = tabWidth * scale;
-            float h = dp(CAPSULE_HEIGHT_DP) * scale;
-            float cx = getWidth() / 2f;
-            float cy = getHeight() / 2f;
-            float left = cx - w / 2f;
-            float top = cy - h / 2f;
-            float radius = dp(CAPSULE_RADIUS_DP);
-            Path cap = new Path();
-            cap.addRoundRect(new RectF(left, top, left + w, top + h), radius, radius, Path.Direction.CW);
-
-            if (pressProgress > 0.01f) {
-                shadowPath.reset();
-                shadowPath.addRoundRect(new RectF(left + dp(2), top + dp(5), left + w + dp(2), top + h + dp(5)),
-                        radius, radius, Path.Direction.CW);
-                shadowPaint.setColor(Color.argb((int) (90 * pressProgress), 0, 0, 0));
-                shadowPaint.setShadowLayer(dp(10) * pressProgress, 0f, 0f, Color.argb((int) (90 * pressProgress), 0, 0, 0));
-                canvas.drawPath(shadowPath, shadowPaint);
-                shadowPaint.clearShadowLayer();
-            }
-
-            capsuleFillPaint.setShader(new LinearGradient(0, top, 0, top + h,
-                    darkTheme ? Color.rgb(255, 212, 91) : Color.rgb(240, 189, 76),
-                    darkTheme ? Color.rgb(230, 182, 60) : Color.rgb(214, 156, 4),
-                    Shader.TileMode.CLAMP));
-            capsuleFillPaint.setAlpha((int) (255 * (0.55f + 0.45f * pressProgress)));
-            canvas.drawPath(cap, capsuleFillPaint);
-
-            dimPaint.setColor(darkTheme ? Color.WHITE : Color.BLACK);
-            dimPaint.setAlpha((int) (25 * (1f - pressProgress) + 8 * pressProgress));
-            canvas.drawRoundRect(new RectF(left, top, left + w, top + h), radius, radius, dimPaint);
-
-            highlightPaint.setShader(new LinearGradient(0, top, 0, top + h * 0.55f,
-                    Color.argb((int) (110 * pressProgress + 25), 255, 255, 255),
-                    Color.TRANSPARENT, Shader.TileMode.CLAMP));
-            canvas.drawRoundRect(new RectF(left, top, left + w, top + h), radius, radius, highlightPaint);
-
-            innerShadowPaint.setShader(new LinearGradient(0, top + h * 0.7f, 0, top + h,
-                    Color.TRANSPARENT, Color.argb((int) (70 * pressProgress + 20), 0, 0, 0),
-                    Shader.TileMode.CLAMP));
-            canvas.drawRoundRect(new RectF(left, top, left + w, top + h), radius, radius, innerShadowPaint);
-
-            // 图标 + 文字
-            TabItem tab = tabs[selectedIndex];
-            iconPaint.setColor(Color.WHITE);
-            iconPaint.setStyle(tab.stroke ? Paint.Style.STROKE : Paint.Style.FILL);
-            iconPaint.setStrokeWidth(dp(1.9f));
-            canvas.save();
-            canvas.translate(cx, cy - dp(8));
-            float s = dp(ICON_SIZE_DP) / 24f;
-            canvas.scale(s, s);
-            canvas.drawPath(tab.icon, iconPaint);
-            canvas.restore();
-            textPaint.setColor(Color.WHITE);
-            textPaint.setTextSize(dp(10f));
-            textPaint.setFakeBoldText(true);
-            Paint.FontMetrics fm = textPaint.getFontMetrics();
-            float textY = cy + dp(23) - (fm.ascent + fm.descent) / 2f;
-            canvas.drawText(tab.label, cx, textY, textPaint);
-            textPaint.setFakeBoldText(false);
-        }
-    }
-
+    // ================= 父 View 自绘 UI（容器色 + tab + 金色胶囊，无 shader，必然可见） =================
     @Override
-    protected void onLayout(boolean changed, int l, int t, int r, int b) {
-        super.onLayout(changed, l, t, r, b);
-        capsuleBackdropLayer.layout(0, 0, capsuleBackdropLayer.getMeasuredWidth(), capsuleBackdropLayer.getMeasuredHeight());
-        capsuleUiLayer.layout(0, 0, capsuleUiLayer.getMeasuredWidth(), capsuleUiLayer.getMeasuredHeight());
-        syncCapsuleLayers(false);
+    protected void onDraw(Canvas canvas) {
+        super.onDraw(canvas);
+        if (containerRect.width() <= 0) return;
+        float radius = dp(CONTAINER_RADIUS_DP);
+        canvas.save();
+        canvas.translate(panelOffset, 0f);
+
+        // 容器半透明填充（磨砂基色）
+        containerFillPaint.setShader(new LinearGradient(
+                containerRect.left, containerRect.top, containerRect.left, containerRect.bottom,
+                darkTheme ? Color.argb(150, 44, 52, 57) : Color.argb(120, 255, 255, 255),
+                darkTheme ? Color.argb(110, 26, 31, 34) : Color.argb(70, 255, 252, 244),
+                Shader.TileMode.CLAMP));
+        canvas.drawRoundRect(containerRect, radius, radius, containerFillPaint);
+
+        // 顶部亮边
+        containerEdgePaint.setShader(new LinearGradient(0, containerRect.top, 0, containerRect.top + dp(14),
+                darkTheme ? Color.argb(50, 255, 255, 255) : Color.argb(90, 255, 255, 255),
+                Color.TRANSPARENT, Shader.TileMode.CLAMP));
+        canvas.drawRoundRect(new RectF(containerRect.left, containerRect.top, containerRect.right, containerRect.top + dp(14)),
+                radius, radius, containerEdgePaint);
+        borderPaint.setStrokeWidth(dp(1));
+        borderPaint.setColor(darkTheme ? Color.argb(50, 255, 255, 255) : Color.argb(100, 255, 255, 255));
+        canvas.drawRoundRect(containerRect, radius, radius, borderPaint);
+
+        // 非选中 tab
+        for (int i = 0; i < tabs.length; i++) {
+            if (i == selectedIndex) continue;
+            drawTabIcon(canvas, tabs[i], capsuleRect.left + tabWidth * i + tabWidth / 2f,
+                    containerRect.centerY(), false);
+        }
+
+        // 选中胶囊（金色）
+        drawCapsule(canvas, capsuleCenterX, containerRect.centerY());
+        canvas.restore();
+    }
+
+    private void drawTabIcon(Canvas canvas, TabItem tab, float cx, float cy, boolean white) {
+        iconPaint.setColor(white ? Color.WHITE : (darkTheme ? Color.argb(190, 196, 190, 177) : Color.argb(200, 105, 102, 94)));
+        iconPaint.setStyle(tab.stroke ? Paint.Style.STROKE : Paint.Style.FILL);
+        iconPaint.setStrokeWidth(dp(1.9f));
+        canvas.save();
+        canvas.translate(cx, cy - dp(8));
+        float s = dp(ICON_SIZE_DP) / 24f;
+        canvas.scale(s, s);
+        canvas.drawPath(tab.icon, iconPaint);
+        canvas.restore();
+        textPaint.setColor(white ? Color.WHITE : (darkTheme ? Color.argb(220, 196, 190, 177) : Color.argb(220, 105, 102, 94)));
+        textPaint.setTextSize(dp(10f));
+        textPaint.setFakeBoldText(false);
+        Paint.FontMetrics fm = textPaint.getFontMetrics();
+        canvas.drawText(tab.label, cx, cy + dp(23) - (fm.ascent + fm.descent) / 2f, textPaint);
+    }
+
+    private void drawCapsule(Canvas canvas, float centerX, float centerY) {
+        float w = tabWidth * capsuleScale;
+        float h = dp(CAPSULE_HEIGHT_DP) * capsuleScale;
+        float left = centerX - w / 2f;
+        float top = centerY - h / 2f;
+        float radius = dp(CAPSULE_RADIUS_DP);
+
+        // 投影
+        if (pressProgress > 0.01f) {
+            shadowPath.reset();
+            shadowPath.addRoundRect(new RectF(left + dp(2), top + dp(5), left + w + dp(2), top + h + dp(5)),
+                    radius, radius, Path.Direction.CW);
+            shadowPaint.setColor(Color.argb((int) (90 * pressProgress), 0, 0, 0));
+            shadowPaint.setShadowLayer(dp(10) * pressProgress, 0f, 0f, Color.argb((int) (90 * pressProgress), 0, 0, 0));
+            canvas.drawPath(shadowPath, shadowPaint);
+            shadowPaint.clearShadowLayer();
+        }
+
+        // 金色胶囊
+        capsuleFillPaint.setShader(new LinearGradient(0, top, 0, top + h,
+                darkTheme ? Color.rgb(255, 212, 91) : Color.rgb(240, 189, 76),
+                darkTheme ? Color.rgb(230, 182, 60) : Color.rgb(214, 156, 4),
+                Shader.TileMode.CLAMP));
+        capsuleFillPaint.setAlpha((int) (255 * (0.55f + 0.45f * pressProgress)));
+        canvas.drawRoundRect(new RectF(left, top, left + w, top + h), radius, radius, capsuleFillPaint);
+
+        dimPaint.setColor(darkTheme ? Color.WHITE : Color.BLACK);
+        dimPaint.setAlpha((int) (25 * (1f - pressProgress) + 8 * pressProgress));
+        canvas.drawRoundRect(new RectF(left, top, left + w, top + h), radius, radius, dimPaint);
+
+        highlightPaint.setShader(new LinearGradient(0, top, 0, top + h * 0.55f,
+                Color.argb((int) (110 * pressProgress + 25), 255, 255, 255),
+                Color.TRANSPARENT, Shader.TileMode.CLAMP));
+        canvas.drawRoundRect(new RectF(left, top, left + w, top + h), radius, radius, highlightPaint);
+
+        innerShadowPaint.setShader(new LinearGradient(0, top + h * 0.7f, 0, top + h,
+                Color.TRANSPARENT, Color.argb((int) (70 * pressProgress + 20), 0, 0, 0),
+                Shader.TileMode.CLAMP));
+        canvas.drawRoundRect(new RectF(left, top, left + w, top + h), radius, radius, innerShadowPaint);
+
+        // 选中 tab 图标/文字（白色）
+        TabItem tab = tabs[selectedIndex];
+        iconPaint.setColor(Color.WHITE);
+        iconPaint.setStyle(tab.stroke ? Paint.Style.STROKE : Paint.Style.FILL);
+        iconPaint.setStrokeWidth(dp(1.9f));
+        canvas.save();
+        canvas.translate(centerX, centerY - dp(8));
+        float s = dp(ICON_SIZE_DP) / 24f;
+        canvas.scale(s, s);
+        canvas.drawPath(tab.icon, iconPaint);
+        canvas.restore();
+        textPaint.setColor(Color.WHITE);
+        textPaint.setTextSize(dp(10f));
+        textPaint.setFakeBoldText(true);
+        Paint.FontMetrics fm = textPaint.getFontMetrics();
+        canvas.drawText(tab.label, centerX, centerY + dp(23) - (fm.ascent + fm.descent) / 2f, textPaint);
+        textPaint.setFakeBoldText(false);
     }
 
     private float dp(float v) {
