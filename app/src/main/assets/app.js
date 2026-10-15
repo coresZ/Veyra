@@ -1997,6 +1997,15 @@ document.addEventListener('focusout', event => {
     api('input-edit', { active: false }).catch(() => {});
   }
 });
+// 点击非输入区域时强制失焦输入框：软键盘收起后输入框往往仍聚焦，若不失焦则长按放行状态泄漏到全局（任意位置长按都弹系统菜单并震动）
+document.addEventListener('pointerdown', event => {
+  const active = document.activeElement;
+  if (!active) return;
+  if (active.tagName !== 'INPUT' && active.tagName !== 'TEXTAREA' && !active.isContentEditable) return;
+  const t = event.target;
+  if (!(t instanceof Element)) return;
+  if (t !== active && !active.contains(t)) active.blur();
+}, true);
 
 document.addEventListener('submit', async event => {
   if (event.target.id !== 'password-form') return;

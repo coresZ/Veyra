@@ -182,10 +182,11 @@ public final class MainActivity extends Activity {
         webView.getSettings().setAllowFileAccessFromFileURLs(false);
         webView.getSettings().setAllowUniversalAccessFromFileURLs(false);
         webView.getSettings().setMediaPlaybackRequiresUserGesture(true);
-        // 全局禁用长按文本选择（复制/分享/全选/搜索/朗读等系统菜单）。
-        // 注意：输入框聚焦时通过 JS 的 input-edit 回调临时放行，恢复搜索框/代理地址框的长按复制粘贴，
-        // 非输入区域仍保持禁选，避免误触系统菜单。
+        // 全局禁用长按文本选择（复制/分享/全选/搜索/朗读等系统菜单）与触摸触感。
+        // 注意：输入框聚焦时通过 JS 的 input-edit 回调临时放行（仅选中文字时系统震动），
+        // 非输入区域保持禁选禁震，避免误触系统菜单。
         webView.setLongClickable(false);
+        webView.setHapticFeedbackEnabled(false);
         webView.setOnLongClickListener(v -> true);
         webView.setClickable(true);
         WebViewAssetLoader loader = new WebViewAssetLoader.Builder()
@@ -292,15 +293,17 @@ public final class MainActivity extends Activity {
         return (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
     }
 
-    /** 输入框聚焦时临时放行长按（恢复复制/粘贴菜单），失焦后恢复全局禁选，避免误触系统菜单。 */
+    /** 输入框聚焦时临时放行长按（恢复复制/粘贴菜单与选中震动），失焦后恢复全局禁选禁震。 */
     private void setInputEditing(boolean active) {
         runOnUiThread(() -> {
             if (webView == null || isDestroyed()) return;
             if (active) {
                 webView.setLongClickable(true);
+                webView.setHapticFeedbackEnabled(true);
                 webView.setOnLongClickListener(null);
             } else {
                 webView.setLongClickable(false);
+                webView.setHapticFeedbackEnabled(false);
                 webView.setOnLongClickListener(v -> true);
             }
         });
