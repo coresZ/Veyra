@@ -308,11 +308,8 @@ updateDownloadButton.addEventListener('click', async () => {
 });
 updateLaterButton.addEventListener('click', () => { if (!updateDownloading) { updateOverlay.hidden = true; updateBackEnabled(); } });
 
-window.hgTheme = dark => { document.documentElement.dataset.theme = dark ? 'dark' : 'light'; window.AndroidHost?.setTheme?.(dark); };
+window.hgTheme = dark => { document.documentElement.dataset.theme = dark ? 'dark' : 'light'; };
 api('theme').then(window.hgTheme).catch(() => {});
-
-/** 原生液态玻璃底栏入口：原生点击/拖动落点后调用，复用 WebView 路由 */
-window.hgNav = tab => { if (tab) navigateDock(tab); };
 
 function itemCard(item) {
   const id = esc(item.id);
@@ -450,13 +447,9 @@ function retryFailedImages(force = false) {
   });
 }
 let coverScrollTimer;
-let glassScrollTimer;
 scroll.addEventListener('scroll', () => {
   clearTimeout(coverScrollTimer);
   coverScrollTimer = setTimeout(() => retryFailedImages(), 160);
-  if (!glassScrollTimer) {
-    glassScrollTimer = setTimeout(() => { glassScrollTimer = null; window.AndroidHost?.requestGlassUpdate?.(); }, 60);
-  }
 }, { passive: true });
 window.addEventListener('online', () => retryFailedImages(true));
 function hydrateImages(root = content) {
@@ -1256,35 +1249,10 @@ function renderDetail() {
   window.AndroidHost?.setDetailMode?.(true);
   const episodes = asArray(data.episodes);
   content.innerHTML = `<div class="detail-page"><button class="detail-back" type="button" data-back="1">${icon('back')} 返回</button>
-    <div class="detail-art"><img data-cover="${esc(data.cover)}" alt=""></div><div class="detail-copy"><h1>${esc(data.title)}</h1><p>${loading ? '正在获取内容…' : `${esc(data.score)} ${esc(data.episodeLabel)}`}</p><div class="detail-desc-wrap"><p class="detail-description" data-full="${esc(data.description || '')}">${esc(data.description || '')}${!loading && data.description ? `<button type="button" class="detail-expand" data-detail-expand="1">${detailExpanded ? '收起' : '展开全文'}</button>` : ''}</p></div>
+    <div class="detail-art"><img data-cover="${esc(data.cover)}" alt=""></div><div class="detail-copy"><h1>${esc(data.title)}</h1><p>${loading ? '正在获取内容…' : `${esc(data.score)} ${esc(data.episodeLabel)}`}</p><div class="detail-desc-wrap${detailExpanded ? ' expanded' : ''}"><p class="detail-description">${esc(data.description || '')}</p>${!loading && (data.description || '').length > 90 ? `<button type="button" class="detail-expand" data-detail-expand="1">${detailExpanded ? '收起' : '展开全文'}</button>` : ''}</div>
     <div class="detail-buttons"><button class="detail-play" type="button" data-play="1" ${loading ? 'disabled' : ''}>${loading ? '正在加载…' : '立即播放'}</button><button class="bookmark-button" type="button" data-bookmark="1" aria-label="${state.bookmarked ? '取消收藏' : '收藏'}" ${loading ? 'disabled' : ''}>${state.bookmarked ? '★' : '☆'}</button><button class="detail-download" type="button" data-download="1" ${loading ? 'disabled' : ''}>下载</button></div>
     ${loading ? '<div class="detail-loading" role="status">正在获取选集…</div>' : episodes.length ? `<h2>选集</h2><div class="episode-grid">${episodes.map((item, index) => `<button type="button" data-episode="${item.number}" class="${index === 0 ? 'active' : ''}">${item.number}</button>`).join('')}</div>` : ''}</div></div>`;
   hydrateImages();
-  if (!loading && data.description) applyDetailDescription();
-}
-
-// 简介折叠：整字截断（绝不切半字），省略号"…"紧跟正文，展开按钮作为独立行内控件跟在省略号后
-function applyDetailDescription() {
-  const wrap = content.querySelector('.detail-desc-wrap');
-  if (!wrap) return;
-  const p = wrap.querySelector('.detail-description');
-  const btn = wrap.querySelector('.detail-expand');
-  if (!p || !btn) return;
-  const textNode = p.childNodes[0];
-  // 完整文本固定存 data-full，不能从 textNode 读（折叠后会被截断串污染）
-  const full = p.dataset.full || (textNode ? textNode.textContent : '');
-  if (detailExpanded) { if (textNode) textNode.textContent = full; btn.hidden = false; return; }
-  const lineHeight = parseFloat(getComputedStyle(p).lineHeight) || 20;
-  const maxH = lineHeight * 3;
-  if (p.scrollHeight <= maxH) { if (textNode) textNode.textContent = full; btn.hidden = true; return; }
-  btn.hidden = false;
-  let lo = 0, hi = full.length;
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1;
-    textNode.textContent = full.slice(0, mid) + '…';
-    if (p.scrollHeight <= maxH) lo = mid; else hi = mid - 1;
-  }
-  textNode.textContent = full.slice(0, lo) + '…';
 }
 
 function searchFeedback() {
@@ -1350,7 +1318,6 @@ function restoreScreen(snapshot) {
   if (snapshot.route === 'settings') renderSettings();
   searchInput.value = snapshot.searchValue || '';
   document.querySelectorAll('#dock [data-nav]').forEach(button => button.classList.toggle('active', button.dataset.nav === state.tab));
-  window.AndroidHost?.setTab?.(state.tab);
   scroll.scrollTop = snapshot.scrollTop || 0;
   content.querySelectorAll('.film-row,.filter-row,.home-tag-scroll').forEach((row, index) => {
     row.scrollLeft = snapshot.horizontalScroll?.[index] || 0;
@@ -1514,7 +1481,6 @@ function setNav(tab) {
   listingObserver?.disconnect();
   categoryObserver?.disconnect();
   document.querySelectorAll('#dock [data-nav]').forEach(button => button.classList.toggle('active', button.dataset.nav === tab));
-  window.AndroidHost?.setTab?.(tab);
   compact.classList.remove('visible');
   compact.inert = true;
   state.compactHeld = false;
@@ -1853,7 +1819,6 @@ function returnFromDetail() {
   });
   document.querySelectorAll('#dock [data-nav]').forEach(button =>
     button.classList.toggle('active', button.dataset.nav === state.tab));
-  window.AndroidHost?.setTab?.(state.tab);
   scroll.scrollTop = previous.scrollTop || 0;
   if (previous.route === 'category') compact.innerHTML = compactMarkup();
   updateCompact();
@@ -2144,7 +2109,8 @@ document.addEventListener('click', async event => {
   const detailExpand = event.target.closest('[data-detail-expand]');
   if (detailExpand) {
     detailExpanded = !detailExpanded;
-    applyDetailDescription();
+    const wrap = content.querySelector('.detail-desc-wrap');
+    if (wrap) wrap.classList.toggle('expanded', detailExpanded);
     detailExpand.textContent = detailExpanded ? '收起' : '展开全文';
     return;
   }

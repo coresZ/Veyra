@@ -28,7 +28,6 @@ import android.window.OnBackAnimationCallback;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
 import android.widget.FrameLayout;
-import android.widget.LinearLayout;
 import androidx.core.content.FileProvider;
 import androidx.webkit.WebViewAssetLoader;
 import android.os.Handler;
@@ -57,8 +56,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService localRequests = Executors.newSingleThreadExecutor();
     private final ExecutorService coverRequests = Executors.newFixedThreadPool(2);
     private WebView webView;
-    private LinearLayout root;
-    private GlassBottomBar glassBar;
+    private FrameLayout root;
     private DualContentRepository repository;
     private AppStore store;
     private AccountService account;
@@ -67,10 +65,6 @@ public final class MainActivity extends Activity {
     private HotUpdateManager.Session hotSession;
     private boolean migratingOrigin;
     private boolean resourceReady;
-
-    private float dp(float v) {
-        return v * getResources().getDisplayMetrics().density;
-    }
     private final Handler hotHandler = new Handler(Looper.getMainLooper());
     private final Runnable resourceTimeout = () -> recoverResources();
     private File pendingUpdateApk;
@@ -156,18 +150,10 @@ public final class MainActivity extends Activity {
         if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             WebView.setWebContentsDebuggingEnabled(true);
         }
-        root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-
+        root = new FrameLayout(this);
         webView = new WebView(this);
         webView.setBackgroundColor(Color.TRANSPARENT);
-        FrameLayout webContainer = new FrameLayout(this);
-        webContainer.addView(webView, new FrameLayout.LayoutParams(-1, -1));
-        root.addView(webContainer, new LinearLayout.LayoutParams(-1, 0, 1f));
-        glassBar = new GlassBottomBar(this);
-        glassBar.attachWebView(webView);
-        float barH = Math.round(dp(96));
-        root.addView(glassBar, new LinearLayout.LayoutParams(-1, (int) barH));
+        root.addView(webView, new FrameLayout.LayoutParams(-1, -1));
         setContentView(root);
         UiRefreshRate.apply(this, webView);
         if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
@@ -217,9 +203,6 @@ public final class MainActivity extends Activity {
                 }
             }
             @Override public void onPageFinished(WebView view, String url) {
-                if (glassBar != null) {
-                    view.postDelayed(() -> { if (glassBar != null) glassBar.requestSnapshot(); }, 120);
-                }
                 if (migratingOrigin && "file:///android_asset/app.html".equals(url)) {
                     view.evaluateJavascript("localStorage.getItem('adult-confirmed')", value -> {
                         if (isDestroyed()) return;
@@ -745,20 +728,10 @@ public final class MainActivity extends Activity {
     private final class Bridge {
         @JavascriptInterface public void setDetailMode(boolean enabled) {
             runOnUiThread(() -> {
-                if (glassBar != null) glassBar.setDetailMode(enabled);
                 if (detailSystemBars == enabled) return;
                 detailSystemBars = enabled;
                 applySystemBars();
             });
-        }
-        @JavascriptInterface public void setTab(String tab) {
-            runOnUiThread(() -> { if (glassBar != null) glassBar.setSelectedTab(tab, true); });
-        }
-        @JavascriptInterface public void setTheme(boolean dark) {
-            runOnUiThread(() -> { if (glassBar != null) glassBar.setDarkTheme(dark); });
-        }
-        @JavascriptInterface public void requestGlassUpdate() {
-            runOnUiThread(() -> { if (glassBar != null) glassBar.requestSnapshot(); });
         }
         @JavascriptInterface public void setBackEnabled(boolean enabled) {
             runOnUiThread(() -> updateBackRegistration(enabled));
