@@ -308,8 +308,11 @@ updateDownloadButton.addEventListener('click', async () => {
 });
 updateLaterButton.addEventListener('click', () => { if (!updateDownloading) { updateOverlay.hidden = true; updateBackEnabled(); } });
 
-window.hgTheme = dark => { document.documentElement.dataset.theme = dark ? 'dark' : 'light'; };
+window.hgTheme = dark => { document.documentElement.dataset.theme = dark ? 'dark' : 'light'; window.AndroidHost?.setTheme?.(dark); };
 api('theme').then(window.hgTheme).catch(() => {});
+
+/** 原生液态玻璃底栏入口：原生点击/拖动落点后调用，复用 WebView 路由 */
+window.hgNav = tab => { if (tab) navigateDock(tab); };
 
 function itemCard(item) {
   const id = esc(item.id);
@@ -447,9 +450,13 @@ function retryFailedImages(force = false) {
   });
 }
 let coverScrollTimer;
+let glassScrollTimer;
 scroll.addEventListener('scroll', () => {
   clearTimeout(coverScrollTimer);
   coverScrollTimer = setTimeout(() => retryFailedImages(), 160);
+  if (!glassScrollTimer) {
+    glassScrollTimer = setTimeout(() => { glassScrollTimer = null; window.AndroidHost?.requestGlassUpdate?.(); }, 60);
+  }
 }, { passive: true });
 window.addEventListener('online', () => retryFailedImages(true));
 function hydrateImages(root = content) {
@@ -1343,6 +1350,7 @@ function restoreScreen(snapshot) {
   if (snapshot.route === 'settings') renderSettings();
   searchInput.value = snapshot.searchValue || '';
   document.querySelectorAll('#dock [data-nav]').forEach(button => button.classList.toggle('active', button.dataset.nav === state.tab));
+  window.AndroidHost?.setTab?.(state.tab);
   scroll.scrollTop = snapshot.scrollTop || 0;
   content.querySelectorAll('.film-row,.filter-row,.home-tag-scroll').forEach((row, index) => {
     row.scrollLeft = snapshot.horizontalScroll?.[index] || 0;
@@ -1506,6 +1514,7 @@ function setNav(tab) {
   listingObserver?.disconnect();
   categoryObserver?.disconnect();
   document.querySelectorAll('#dock [data-nav]').forEach(button => button.classList.toggle('active', button.dataset.nav === tab));
+  window.AndroidHost?.setTab?.(tab);
   compact.classList.remove('visible');
   compact.inert = true;
   state.compactHeld = false;
@@ -1844,6 +1853,7 @@ function returnFromDetail() {
   });
   document.querySelectorAll('#dock [data-nav]').forEach(button =>
     button.classList.toggle('active', button.dataset.nav === state.tab));
+  window.AndroidHost?.setTab?.(state.tab);
   scroll.scrollTop = previous.scrollTop || 0;
   if (previous.route === 'category') compact.innerHTML = compactMarkup();
   updateCompact();

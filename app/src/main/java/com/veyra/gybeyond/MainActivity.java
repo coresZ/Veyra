@@ -57,6 +57,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService coverRequests = Executors.newFixedThreadPool(2);
     private WebView webView;
     private FrameLayout root;
+    private GlassBottomBar glassBar;
     private DualContentRepository repository;
     private AppStore store;
     private AccountService account;
@@ -154,6 +155,12 @@ public final class MainActivity extends Activity {
         webView = new WebView(this);
         webView.setBackgroundColor(Color.TRANSPARENT);
         root.addView(webView, new FrameLayout.LayoutParams(-1, -1));
+        glassBar = new GlassBottomBar(this);
+        glassBar.attachWebView(webView);
+        FrameLayout.LayoutParams barLp = new FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.MATCH_PARENT);
+        barLp.gravity = android.view.Gravity.BOTTOM;
+        root.addView(glassBar, barLp);
         setContentView(root);
         UiRefreshRate.apply(this, webView);
         if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
@@ -203,6 +210,9 @@ public final class MainActivity extends Activity {
                 }
             }
             @Override public void onPageFinished(WebView view, String url) {
+                if (glassBar != null) {
+                    view.postDelayed(() -> { if (glassBar != null) glassBar.requestSnapshot(); }, 120);
+                }
                 if (migratingOrigin && "file:///android_asset/app.html".equals(url)) {
                     view.evaluateJavascript("localStorage.getItem('adult-confirmed')", value -> {
                         if (isDestroyed()) return;
@@ -728,10 +738,20 @@ public final class MainActivity extends Activity {
     private final class Bridge {
         @JavascriptInterface public void setDetailMode(boolean enabled) {
             runOnUiThread(() -> {
+                if (glassBar != null) glassBar.setDetailMode(enabled);
                 if (detailSystemBars == enabled) return;
                 detailSystemBars = enabled;
                 applySystemBars();
             });
+        }
+        @JavascriptInterface public void setTab(String tab) {
+            runOnUiThread(() -> { if (glassBar != null) glassBar.setSelectedTab(tab, true); });
+        }
+        @JavascriptInterface public void setTheme(boolean dark) {
+            runOnUiThread(() -> { if (glassBar != null) glassBar.setDarkTheme(dark); });
+        }
+        @JavascriptInterface public void requestGlassUpdate() {
+            runOnUiThread(() -> { if (glassBar != null) glassBar.requestSnapshot(); });
         }
         @JavascriptInterface public void setBackEnabled(boolean enabled) {
             runOnUiThread(() -> updateBackRegistration(enabled));
