@@ -15,8 +15,6 @@ import android.graphics.RectF;
 import android.graphics.RuntimeShader;
 import android.graphics.Shader;
 import android.os.Build;
-import android.os.Handler;
-import android.os.Looper;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.view.MotionEvent;
@@ -29,13 +27,13 @@ import android.widget.FrameLayout;
 import androidx.core.graphics.PathParser;
 
 /**
- * 原生液态玻璃底栏 —— 复刻 Android Liquid Glass（kyant backdrop，Apache-2.0）。
- * 可靠结构：仅两层子 View。
- *   RefractionLayer（下层）：WebView 软件截屏 + AGSL 圆角矩形折射 shader（内置 9-tap 采样模糊），
- *                             失败时静默降级（UI 层仍完整显示）。
- *   UiLayer（上层，无 shader）：半透明容器色 + 非选中 tab + 金色选中胶囊（高光/投影/内阴影/图标/文字）。
- *                             无论折射是否成功，底栏 UI 必然可见。
- * 触摸/拖动在父 FrameLayout 处理；pressProgress 驱动折射/高光/阴影/放大。
+ * 原生液态玻璃底栏（布局块版）—— 复刻 Android Liquid Glass（kyant backdrop，Apache-2.0）。
+ * 结构上保证可见：底栏作为 LinearLayout 布局中的固定高度块（WebView 在其上方），
+ * 天然存在于布局流中，不再依赖"全屏覆盖层"。
+ * 渲染：父 View 自绘全部 UI（容器色/高光/tab/金色胶囊，无 shader，必然显示）；
+ *       RefractionLayer 子 View 绘制 WebView 底部对应区域的截屏 + AGSL 圆角矩形折射
+ *       shader（内置 9-tap 采样模糊），失败 try-catch 降级，不影响 UI。
+ * 交互：按压 pressProgress 驱动折射/高光/投影/放大，弹性吸附 + 水平拖动胶囊 + 容器反向偏移。
  */
 public class GlassBottomBar extends FrameLayout {
     private static final String TAG = "GlassBottomBar";
@@ -125,7 +123,7 @@ half4 main(float2 coord) {
     private static final float CONTAINER_HEIGHT_DP = 68f;
     private static final float CONTAINER_RADIUS_DP = 24f;
     private static final float CONTAINER_MARGIN_X_DP = 14f;
-    private static final float CONTAINER_MARGIN_BOTTOM_DP = 12f;
+    private static final float CONTAINER_MARGIN_Y_DP = 8f;
     private static final float CAPSULE_HEIGHT_DP = 54f;
     private static final float CAPSULE_RADIUS_DP = 22f;
     private static final float CONTAINER_PADDING_DP = 4f;
@@ -133,23 +131,21 @@ half4 main(float2 coord) {
     private static final float CONTAINER_REFRACTION_DP = 24f;
     private static final float CAPSULE_REFRACTION_DP = 14f;
     private static final float PANEL_OFFSET_DP = 4f;
-    private static final float CAP_PAD_DP = 16f;
+    private static final float CAP_PAD_DP = 14f;
     private static final float CONTAINER_BLUR_PX = 5f;
 
     private final float density;
-    private final Handler handler = new Handler(Looper.getMainLooper());
-
     private WebView webView;
     private boolean darkTheme;
     private boolean detailMode;
 
-    // ---- 几何（px，父 View 坐标 = root 全屏坐标）----
+    // ---- 几何（px，glassBar 局部坐标）----
     private RectF containerRect = new RectF();
     private RectF capsuleRect = new RectF();
     private float capsuleCenterX;
     private float tabWidth;
     private float pad;
-    private Rect snapshotSrcRect = new Rect();
+    private Rect snapshotSrcRect = new Rect();        // webView 局部坐标（底部对应区域）
 
     // ---- 渲染状态 ----
     private Bitmap snapshot;
@@ -178,7 +174,6 @@ half4 main(float2 coord) {
     private final Paint containerEdgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private final Path shadowPath = new Path();
-
     private float[] cornerRadii = new float[4];
 
     public GlassBottomBar(Context context) {
@@ -188,7 +183,7 @@ half4 main(float2 coord) {
     public GlassBottomBar(Context context, AttributeSet attrs) {
         super(context, attrs);
         density = context.getResources().getDisplayMetrics().density;
-        setWillNotDraw(false); // 父层自绘全部 UI（不依赖子 View 渲染链路）
+        setWillNotDraw(false);
         setVisibility(View.VISIBLE);
         textPaint.setTextAlign(Paint.Align.CENTER);
         textPaint.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
@@ -237,7 +232,7 @@ half4 main(float2 coord) {
         takeSnapshot();
     }
 
-    /** WebView 软件绘制截屏（区域=容器外扩 pad）。硬件加速下 WebView.draw 走软件渲染路径。 */
+    /** WebView 软件绘制截屏（区域=webView 底部与底栏对应的区域，外扩 pad）。 */
     private void takeSnapshot() {
         int w = snapshotSrcRect.width();
         int h = snapshotSrcRect.height();
@@ -263,9 +258,9 @@ half4 main(float2 coord) {
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         super.onSizeChanged(w, h, oldw, oldh);
         float mx = dp(CONTAINER_MARGIN_X_DP);
-        float mb = dp(CONTAINER_MARGIN_BOTTOM_DP);
+        float my = dp(CONTAINER_MARGIN_Y_DP);
         float ch = dp(CONTAINER_HEIGHT_DP);
-        containerRect.set(mx, h - mb - ch, w - mx, h - mb);
+        containerRect.set(mx, h - my - ch, w - mx, h - my);
         float padding = dp(CONTAINER_PADDING_DP);
         tabWidth = (containerRect.width() - padding * 2f) / tabs.length;
         float capsuleH = dp(CAPSULE_HEIGHT_DP);
@@ -277,20 +272,14 @@ half4 main(float2 coord) {
         float radius = dp(CONTAINER_RADIUS_DP);
         cornerRadii[0] = radius; cornerRadii[1] = radius; cornerRadii[2] = radius; cornerRadii[3] = radius;
         pad = dp(CONTAINER_REFRACTION_DP) + dp(8);
-        int[] loc = new int[2];
-        int[] myLoc = new int[2];
-        try {
-            webView.getLocationOnScreen(loc);
-            getLocationOnScreen(myLoc);
-        } catch (Throwable t) {
-            loc[0] = 0; loc[1] = 0; myLoc[0] = 0; myLoc[1] = 0;
+        // 截屏区域 = webView 底部与底栏视觉区域对应的部分（webView 局部坐标）
+        int wvW = webView != null ? webView.getWidth() : 0;
+        int wvH = webView != null ? webView.getHeight() : 0;
+        if (wvW > 0 && wvH > 0) {
+            float barH = h - my; // 底栏视觉区域高度（容器底到顶）
+            snapshotSrcRect.set(0, (int) (wvH - barH - pad), wvW, wvH);
         }
-        float dx = myLoc[0] - loc[0];
-        float dy = myLoc[1] - loc[1];
-        snapshotSrcRect.set((int) (containerRect.left + dx - pad), (int) (containerRect.top + dy - pad),
-                (int) (containerRect.right + dx + pad), (int) (containerRect.bottom + dy + pad));
-        refractionLayer.invalidate();
-        invalidate();
+        invalidateAll();
         requestSnapshot();
     }
 
@@ -377,10 +366,6 @@ half4 main(float2 coord) {
     public boolean onTouchEvent(MotionEvent event) {
         if (detailMode || getVisibility() != View.VISIBLE) return false;
         int action = event.getActionMasked();
-        if (action != MotionEvent.ACTION_MOVE && !dragging
-                && !containerRect.contains(event.getX(), event.getY())) {
-            return false; // 容器外触摸穿透给 WebView
-        }
         switch (action) {
             case MotionEvent.ACTION_DOWN:
                 dragging = true;
@@ -390,7 +375,6 @@ half4 main(float2 coord) {
                 capsuleScale = 1.14f;
                 if (pressAnimator != null) pressAnimator.cancel();
                 invalidateAll();
-                getParent().requestDisallowInterceptTouchEvent(true);
                 return true;
             case MotionEvent.ACTION_MOVE: {
                 float raw = downStart + (event.getX() - downX);
@@ -416,7 +400,7 @@ half4 main(float2 coord) {
         return super.onTouchEvent(event);
     }
 
-    // ================= 折射层（下层：snapshot + AGSL 容器折射） =================
+    // ================= 折射层（下层：snapshot + AGSL 容器折射，失败降级） =================
     private class RefractionLayer extends View {
         private RuntimeShader shader;
 
@@ -471,19 +455,19 @@ half4 main(float2 coord) {
         // 容器半透明填充（磨砂基色）
         containerFillPaint.setShader(new LinearGradient(
                 containerRect.left, containerRect.top, containerRect.left, containerRect.bottom,
-                darkTheme ? Color.argb(150, 44, 52, 57) : Color.argb(120, 255, 255, 255),
-                darkTheme ? Color.argb(110, 26, 31, 34) : Color.argb(70, 255, 252, 244),
+                darkTheme ? Color.argb(160, 44, 52, 57) : Color.argb(130, 255, 255, 255),
+                darkTheme ? Color.argb(120, 26, 31, 34) : Color.argb(80, 255, 252, 244),
                 Shader.TileMode.CLAMP));
         canvas.drawRoundRect(containerRect, radius, radius, containerFillPaint);
 
         // 顶部亮边
         containerEdgePaint.setShader(new LinearGradient(0, containerRect.top, 0, containerRect.top + dp(14),
-                darkTheme ? Color.argb(50, 255, 255, 255) : Color.argb(90, 255, 255, 255),
+                darkTheme ? Color.argb(55, 255, 255, 255) : Color.argb(95, 255, 255, 255),
                 Color.TRANSPARENT, Shader.TileMode.CLAMP));
         canvas.drawRoundRect(new RectF(containerRect.left, containerRect.top, containerRect.right, containerRect.top + dp(14)),
                 radius, radius, containerEdgePaint);
         borderPaint.setStrokeWidth(dp(1));
-        borderPaint.setColor(darkTheme ? Color.argb(50, 255, 255, 255) : Color.argb(100, 255, 255, 255));
+        borderPaint.setColor(darkTheme ? Color.argb(55, 255, 255, 255) : Color.argb(110, 255, 255, 255));
         canvas.drawRoundRect(containerRect, radius, radius, borderPaint);
 
         // 非选中 tab
@@ -499,7 +483,7 @@ half4 main(float2 coord) {
     }
 
     private void drawTabIcon(Canvas canvas, TabItem tab, float cx, float cy, boolean white) {
-        iconPaint.setColor(white ? Color.WHITE : (darkTheme ? Color.argb(190, 196, 190, 177) : Color.argb(200, 105, 102, 94)));
+        iconPaint.setColor(white ? Color.WHITE : (darkTheme ? Color.argb(195, 196, 190, 177) : Color.argb(205, 105, 102, 94)));
         iconPaint.setStyle(tab.stroke ? Paint.Style.STROKE : Paint.Style.FILL);
         iconPaint.setStrokeWidth(dp(1.9f));
         canvas.save();
@@ -508,7 +492,7 @@ half4 main(float2 coord) {
         canvas.scale(s, s);
         canvas.drawPath(tab.icon, iconPaint);
         canvas.restore();
-        textPaint.setColor(white ? Color.WHITE : (darkTheme ? Color.argb(220, 196, 190, 177) : Color.argb(220, 105, 102, 94)));
+        textPaint.setColor(white ? Color.WHITE : (darkTheme ? Color.argb(225, 196, 190, 177) : Color.argb(225, 105, 102, 94)));
         textPaint.setTextSize(dp(10f));
         textPaint.setFakeBoldText(false);
         Paint.FontMetrics fm = textPaint.getFontMetrics();
@@ -538,7 +522,7 @@ half4 main(float2 coord) {
                 darkTheme ? Color.rgb(255, 212, 91) : Color.rgb(240, 189, 76),
                 darkTheme ? Color.rgb(230, 182, 60) : Color.rgb(214, 156, 4),
                 Shader.TileMode.CLAMP));
-        capsuleFillPaint.setAlpha((int) (255 * (0.55f + 0.45f * pressProgress)));
+        capsuleFillPaint.setAlpha((int) (255 * (0.6f + 0.4f * pressProgress)));
         canvas.drawRoundRect(new RectF(left, top, left + w, top + h), radius, radius, capsuleFillPaint);
 
         dimPaint.setColor(darkTheme ? Color.WHITE : Color.BLACK);
@@ -546,12 +530,12 @@ half4 main(float2 coord) {
         canvas.drawRoundRect(new RectF(left, top, left + w, top + h), radius, radius, dimPaint);
 
         highlightPaint.setShader(new LinearGradient(0, top, 0, top + h * 0.55f,
-                Color.argb((int) (110 * pressProgress + 25), 255, 255, 255),
+                Color.argb((int) (115 * pressProgress + 30), 255, 255, 255),
                 Color.TRANSPARENT, Shader.TileMode.CLAMP));
         canvas.drawRoundRect(new RectF(left, top, left + w, top + h), radius, radius, highlightPaint);
 
         innerShadowPaint.setShader(new LinearGradient(0, top + h * 0.7f, 0, top + h,
-                Color.TRANSPARENT, Color.argb((int) (70 * pressProgress + 20), 0, 0, 0),
+                Color.TRANSPARENT, Color.argb((int) (75 * pressProgress + 25), 0, 0, 0),
                 Shader.TileMode.CLAMP));
         canvas.drawRoundRect(new RectF(left, top, left + w, top + h), radius, radius, innerShadowPaint);
 

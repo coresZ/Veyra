@@ -28,6 +28,7 @@ import android.window.OnBackAnimationCallback;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import androidx.core.content.FileProvider;
 import androidx.webkit.WebViewAssetLoader;
 import android.os.Handler;
@@ -56,7 +57,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService localRequests = Executors.newSingleThreadExecutor();
     private final ExecutorService coverRequests = Executors.newFixedThreadPool(2);
     private WebView webView;
-    private FrameLayout root;
+    private LinearLayout root;
     private GlassBottomBar glassBar;
     private DualContentRepository repository;
     private AppStore store;
@@ -66,6 +67,10 @@ public final class MainActivity extends Activity {
     private HotUpdateManager.Session hotSession;
     private boolean migratingOrigin;
     private boolean resourceReady;
+
+    private float dp(float v) {
+        return v * getResources().getDisplayMetrics().density;
+    }
     private final Handler hotHandler = new Handler(Looper.getMainLooper());
     private final Runnable resourceTimeout = () -> recoverResources();
     private File pendingUpdateApk;
@@ -151,16 +156,17 @@ public final class MainActivity extends Activity {
         if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             WebView.setWebContentsDebuggingEnabled(true);
         }
-        root = new FrameLayout(this);
+        root = new LinearLayout(this);
+
         webView = new WebView(this);
         webView.setBackgroundColor(Color.TRANSPARENT);
-        root.addView(webView, new FrameLayout.LayoutParams(-1, -1));
+        FrameLayout webContainer = new FrameLayout(this);
+        webContainer.addView(webView, new FrameLayout.LayoutParams(-1, -1));
+        root.addView(webContainer, new LinearLayout.LayoutParams(-1, 0, 1f));
         glassBar = new GlassBottomBar(this);
         glassBar.attachWebView(webView);
-        FrameLayout.LayoutParams barLp = new FrameLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.MATCH_PARENT);
-        barLp.gravity = android.view.Gravity.BOTTOM;
-        root.addView(glassBar, barLp);
+        float barH = Math.round(dp(96));
+        root.addView(glassBar, new LinearLayout.LayoutParams(-1, (int) barH));
         setContentView(root);
         UiRefreshRate.apply(this, webView);
         if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
