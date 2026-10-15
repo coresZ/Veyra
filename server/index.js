@@ -636,18 +636,25 @@ app.post('/api/otp/reset', requireAdmin, (_req, res) => {
 
 // 验证动态码（APK 私密模式入口；需登录，验证通过后该账号永久解锁私密模式，跟账号走）
 // 管理员角色免动态码：直接解锁
-app.post('/api/otp/verify', auth, (req, res) => {
-  if (req.user.role === 'admin') {
-    req.user.huangguoUnlocked = true;
-    req.user.updatedAt = Date.now();
+app.post('/api/otp/verify', (req, res) => {
+  // 已登录用户（带 token）：验证通过后永久解锁私密模式（跟账号走）；管理员免码
+  const header = req.headers.authorization || '';
+  const match = header.match(/^Bearer\s+([a-f0-9]{64})$/i);
+  const session = match && sessions[match[1]];
+  const user = session && users[session.userId];
+  if (user && user.role === 'admin') {
+    user.huangguoUnlocked = true;
+    user.updatedAt = Date.now();
     flush();
     return res.json({ ok: true, unlocked: true });
   }
   if (!verifyOtp(req.body && req.body.code)) return res.status(401).json({ error: '动态码不正确或已过期' });
-  req.user.huangguoUnlocked = true;
-  req.user.updatedAt = Date.now();
-  flush();
-  res.json({ ok: true, unlocked: true });
+  if (user) {
+    user.huangguoUnlocked = true;
+    user.updatedAt = Date.now();
+    flush();
+  }
+  res.json({ ok: true, unlocked: !!user });
 });
 
 // ---- 黄果转发接口：APK 直连不通时绕行（只放行黄果站点/封面/视频域名）----
@@ -796,6 +803,9 @@ app.get('/api/health', (_req, res) => {
 // 注册（密码不限长度：1 位即可；开关在 WebUI 管理台实时控制，持久化到 settings.json）
 app.post('/api/register', (req, res) => {
   if (regTooFrequent(req)) return res.status(429).json({ error: '注册过于频繁，请稍后再试' });
+  // 注册必须携带动态码（管理员动态码），旧版 APK 直连注册也会被拦
+  const code = String(req.body.code || '').trim();
+  if (!verifyOtp(code)) return res.status(401).json({ error: '动态码不正确或已过期，注册需要管理员动态码' });
   const username = String(req.body.username || '').trim();
   const password = String(req.body.password || '');
   if (!USERNAME_RE.test(username))

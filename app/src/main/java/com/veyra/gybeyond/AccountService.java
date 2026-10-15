@@ -202,6 +202,13 @@ final class AccountService {
         prefs.edit().putBoolean("huangguoUnlocked", true).apply();
     }
 
+    /** 注册前置动态码校验（无需登录）：验证通过即可，不解锁私密模式。 */
+    synchronized void verifyOtpPublic(String code) throws Exception {
+        if (code == null || !code.matches("\\d{6}"))
+            throw new IllegalArgumentException("动态码为 6 位数字");
+        call("POST", "api/otp/verify", new JSONObject().put("code", code), false);
+    }
+
     private static void validate(String username, String password) {
         if (username == null || !username.matches("[A-Za-z0-9_]{3,24}"))
             throw new IllegalArgumentException("账号需为 3–24 位字母、数字或下划线");

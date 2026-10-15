@@ -187,6 +187,10 @@ function showAuth(mode = 'login') {
   document.getElementById('auth-title').textContent = mode === 'login' ? '登录应用账号' : '注册应用账号';
   setAuthPending(authPending, mode);
   document.getElementById('auth-password').autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+  const codeField = document.getElementById('auth-code');
+  const codeLabel = document.getElementById('auth-code-label');
+  if (codeField) { codeField.hidden = mode !== 'register'; codeField.required = mode === 'register'; codeField.value = ''; }
+  if (codeLabel) codeLabel.hidden = mode !== 'register';
   document.querySelectorAll('[data-auth-mode]').forEach(button => button.classList.toggle('selected', button.dataset.authMode === mode));
   document.getElementById('auth-error').hidden = true;
 }
@@ -213,7 +217,12 @@ document.getElementById('auth-form').addEventListener('submit', async event => {
   setAuthPending(true, mode);
   error.hidden = true;
   try {
-    const profile = await api(mode, { username, password, server });
+    if (mode === 'register') {
+      const code = document.getElementById('auth-code')?.value.trim() || '';
+      if (!/^\d{6}$/.test(code)) throw new Error('注册需要管理员提供的 6 位动态码');
+      await api('verify-otp-public', { code }); // 先验证动态码，通过才允许注册
+    }
+    const profile = await api(mode, { username, password, server, code: mode === 'register' ? (document.getElementById('auth-code')?.value.trim() || '') : undefined });
     hideAuth();
     setAccount(profile);
     if (state.route === 'library') goLibrary(state.libraryTab);
