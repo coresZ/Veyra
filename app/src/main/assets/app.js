@@ -2109,9 +2109,13 @@ document.addEventListener('click', async event => {
   const detailExpand = event.target.closest('[data-detail-expand]');
   if (detailExpand) {
     detailExpanded = !detailExpanded;
+    const data = state.detail;
     const wrap = content.querySelector('.detail-desc-wrap');
-    if (wrap) wrap.classList.toggle('expanded', detailExpanded);
-    detailExpand.textContent = detailExpanded ? '收起' : '展开全文';
+    if (data && wrap) {
+      const long = (data.description || '').length > 90;
+      wrap.classList.toggle('expanded', detailExpanded);
+      wrap.innerHTML = `<p class="detail-description">${esc(data.description || '')}${detailExpanded && long ? `<button type="button" class="detail-expand" data-detail-expand="1">收起</button>` : ''}</p>${!detailExpanded && long ? `<button type="button" class="detail-expand" data-detail-expand="1">展开全文</button>` : ''}`;
+    }
     return;
   }
   if (event.target.closest('[data-downloads]')) { goDownloads(); return; }
