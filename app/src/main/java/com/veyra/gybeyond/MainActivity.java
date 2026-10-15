@@ -157,6 +157,7 @@ public final class MainActivity extends Activity {
             WebView.setWebContentsDebuggingEnabled(true);
         }
         root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
 
         webView = new WebView(this);
         webView.setBackgroundColor(Color.TRANSPARENT);
