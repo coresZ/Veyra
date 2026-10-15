@@ -75,8 +75,8 @@ final class HongguoAppApi {
                 .url(BASE + "/novel/player/video_detail/v1/?" + rawQuery)
                 .post(RequestBody.create(JSON, body))
                 .header("User-Agent", UA)
-                .header("Accept", "application/json")
-                .header("Accept-Encoding", "gzip");
+                .header("Accept", "application/json");
+        // 注意：不要手动设 Accept-Encoding: gzip——okhttp 只有在未显式设置时才会自动解压 gzip 响应。
         try (Response response = http.newCall(rb.build()).execute()) {
             if (!response.isSuccessful() || response.body() == null) return null;
             JSONObject json = new JSONObject(response.body().string());
