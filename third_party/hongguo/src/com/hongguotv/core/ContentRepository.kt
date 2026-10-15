@@ -27,6 +27,21 @@ class SearchSessionExpiredException: IOException("搜索结果已过期，请从
 class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis) {
     private val signer = Signer()
     private val site = "https://hongguoduanju.com"
+    // 取流接口固定设备参数（hongguo-dl 同款，2026-10-15 实测无需签名即可取流）
+    private val STREAM_UA = "com.phoenix.read/71532 (Linux; U; Android 9; SM-N9860; Build/PQ3A.190705.10241111;tt-ok/3.12.13.20)"
+    private val STREAM_QUERY = linkedMapOf(
+        "klink_egdi" to "AAI29o4dI-eMiO73_SRSbZ_0By1v3fUSriNeu8-L951MoXhWT88pzj5B",
+        "iid" to "3788260546453235", "device_id" to "538083340353620", "ac" to "wifi",
+        "channel" to "oppo_8662_64", "aid" to "8662", "app_name" to "novelread",
+        "version_code" to "71532", "version_name" to "7.1.5.32", "device_platform" to "android",
+        "os" to "android", "ssmix" to "a", "device_type" to "SM-N9860", "device_brand" to "Samsung",
+        "language" to "zh", "os_api" to "28", "os_version" to "9", "manifest_version_code" to "71532",
+        "resolution" to "900*1600", "dpi" to "320", "update_version_code" to "71532",
+        "host_abi" to "arm64-v8a", "dragon_device_type" to "pad", "pv_player" to "71532",
+        "compliance_status" to "0", "need_personal_recommend" to "1", "player_so_load" to "1",
+        "is_android_pad_screen" to "0", "rom_version" to "PQ3A.190705.10241111+release-keys",
+        "cdid" to "b4f93387-5319-4134-aab9-2cd4e9279b8f"
+    )
     private data class SearchCursor(val searchId: String, val passback: String, val offset: Int?, val updatedAt: Long)
     private val searchCursors=linkedMapOf<Triple<ContentType,String,Int>,SearchCursor>()
     private fun text(url: String, signed: Signer.Request? = null): String {
@@ -125,14 +140,39 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
-        // 红果新版单集取流接口：video_model/v1/ + 随机设备 + 简单 XOR 版 X-Gorgon（guoapp 同款）。
-        // 旧版 multi_video_model/v1/ + 固定设备已被红果拒绝（Code≠0），实测新版接口正常返回明文 mp4 直链。
-        val payload = """{"video_id":"$id","content_type":1,"biz_param":{"need_all_video_definition":true,"video_platform":3}}""".toByteArray()
-        val signed = GuoSigner.sign("/novel/player/video_model/v1/", payload)
-        val data = JSONObject(text(signed.url, signed))
-        if (data.optInt("Code", data.optInt("code", 0)) != 0) throw IOException("播放接口暂不可用")
-        val map = data.optJSONObject("data") ?: throw IOException("播放信息为空")
-        val model = map.optJSONObject("video_model") ?: JSONObject(map.str("video_model"))
+        // 红果取流接口（2026-10-15 变更）：video_model/v1 已对第三方签名静默返回空（风控 200 空 body）。
+        // 改用 multi_video_model/preload/v1（固定设备参数 + 无需签名，hongguo-dl 同款，实测正常返回直链）。
+        val biz = JSONObject()
+            .put("detail_page_version", 0).put("device_level", 3).put("disable_digg_stat", false)
+            .put("need_all_video_definition", true).put("need_mp4_align", false)
+            .put("use_os_player", false).put("use_server_dns", false).put("video_platform", 1024)
+        val payload = JSONObject()
+            .put("biz_param", biz).put("dr_scene", "preload")
+            .put("mixed_video_id_map", JSONObject().put("1004", JSONArray().put(id)))
+            .toString()
+        val query = STREAM_QUERY.toMutableMap()
+        query["_rticket"] = clock().toString()
+        val queryStr = query.toList().joinToString("&") { (k, v) -> "$k=${Signer.encode(v)}" }
+        val url = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1?$queryStr"
+        val request = Request.Builder().url(url)
+            .header("User-Agent", STREAM_UA)
+            .header("Accept", "application/json; charset=utf-8,application/x-protobuf")
+            .header("Content-Type", "application/json; charset=utf-8")
+            .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+        val data = JSONObject(RequestScope.execute(http.newCall(request)) { response ->
+            if (!response.isSuccessful) throw IOException("内容请求失败（HTTP ${response.code}）")
+            val body = response.body ?: throw IOException("内容响应为空")
+            if (body.contentLength() > 16 * 1024 * 1024) throw IOException("内容响应过大")
+            val input = body.byteStream(); val out = java.io.ByteArrayOutputStream(); val buffer = ByteArray(8192)
+            while (out.size() <= 16 * 1024 * 1024) { val n = input.read(buffer); if (n < 0) break; out.write(buffer, 0, n) }
+            val bytes = out.toByteArray()
+            if (bytes.size > 16 * 1024 * 1024) throw IOException("内容响应过大")
+            String(bytes, Charsets.UTF_8)
+        })
+        if (data.optInt("code", -1) != 0) throw IOException("播放接口暂不可用")
+        val item = data.optJSONObject("data")?.optJSONObject(id) ?: throw IOException("播放信息为空")
+        val model = item.optJSONObject("video_model") ?: JSONObject(item.str("video_model"))
         val rawList = model.opt("video_list")
         val variants = when (rawList) {
             is JSONArray -> (0 until rawList.length()).mapNotNull { rawList.optJSONObject(it) }
@@ -149,11 +189,11 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         }.sortedByDescending { it.first }
         if (rows.isEmpty()) throw IOException("没有可用清晰度")
         val selected = rows.firstOrNull { it.first <= maxQuality } ?: rows.lastOrNull() ?: throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
-        val url = cleanUrl(selected.third)
-        if (!url.startsWith("https://") && !url.startsWith("http://")) throw IOException("播放地址无效")
+        val playUrl = cleanUrl(selected.third)
+        if (!playUrl.startsWith("https://") && !playUrl.startsWith("http://")) throw IOException("播放地址无效")
         val key = selected.second.optJSONObject("encrypt_info")?.str("spade_a")?.takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
         val quality = if (selected.first > 0) "${selected.first}P" else "自动"
-        return StreamInfo(url, key, quality)
+        return StreamInfo(playUrl, key, quality)
     }
     companion object {
         fun extractRouter(html: String): JSONObject {

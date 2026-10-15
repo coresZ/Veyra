@@ -8,27 +8,22 @@ import okhttp3.Response;
 import org.json.JSONObject;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * 红果 App 详情接口（api5-normal-sinfonlineb.fqnovel.com /novel/player/video_detail/v1/）。
- * 复刻 juku 签名体系（X-SS-STUB / X-Khronos / X-Gorgon / X-SS-Req-Ticket），每次请求随机生成
- * 设备身份（device_id/iid），规避固定设备画像风控；低频调用（搜索结果补齐系列/季数据用）。
+ * 2026-10-15 变更：签名接口已被红果对第三方静默风控（HTTP 200 空 body），改用无签名 +
+ * 固定设备参数（klink_egdi/iid/device_id/cdid…，与 hongguo-dl 同款，实测 video_detail 正常返回）。
  * 目标：拿到红果官方系列键 related_album_id 与官方季序号 season_index，供前端按官方系列分组。
  */
 final class HongguoAppApi {
     private static final String BASE = "https://api5-normal-sinfonlineb.fqnovel.com";
-    private static final String UA = "com.phoenix.read/73532 (Linux; U; Android 16; zh_CN; 25053RT47C; "
-            + "Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)";
+    private static final String UA = "com.phoenix.read/71532 (Linux; U; Android 9; SM-N9860; "
+            + "Build/PQ3A.190705.10241111;tt-ok/3.12.13.20)";
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
-    private static final byte[] KEY = { (byte) 0x44, (byte) 0xb9, (byte) 0xb9, (byte) 0xd9, (byte) 0xa4, (byte) 0xae,
-            (byte) 0xf9, (byte) 0xfc, (byte) 0xa4, (byte) 0x93, (byte) 0xaa, (byte) 0x75, (byte) 0x7c, (byte) 0xa3,
-            (byte) 0xc2, (byte) 0xc4, (byte) 0xa4, (byte) 0x96, (byte) 0x93, (byte) 0x8f };
 
     private final OkHttpClient http;
     private final LinkedHashMap<String, JSONObject> cache = new LinkedHashMap<>(32, 0.75f, true);
@@ -57,17 +52,22 @@ final class HongguoAppApi {
     }
 
     private JSONObject doFetch(String seriesId) throws Exception {
-        final long nowSec = System.currentTimeMillis() / 1000L;
-        final String deviceId = newDeviceId(), installId = newDeviceId();
+        // 固定设备参数（hongguo-dl 同款）：无签名接口依赖这些参数，每次请求只变 _rticket
         Map<String, String> params = new TreeMap<>();
-        params.put("aid", "8662"); params.put("app_name", "novelread");
-        params.put("version_code", "73532"); params.put("version_name", "7.3.5.32");
-        params.put("manifest_version_code", "73532"); params.put("update_version_code", "73532");
-        params.put("channel", "update_64"); params.put("device_platform", "android");
-        params.put("os", "android"); params.put("ssmix", "a"); params.put("device_type", "25053RT47C");
-        params.put("device_brand", "Redmi"); params.put("language", "zh"); params.put("os_api", "36");
-        params.put("os_version", "16"); params.put("resolution", "1280*2772"); params.put("dpi", "520");
-        params.put("ac", "wifi"); params.put("device_id", deviceId); params.put("iid", installId);
+        params.put("klink_egdi", "AAI29o4dI-eMiO73_SRSbZ_0By1v3fUSriNeu8-L951MoXhWT88pzj5B");
+        params.put("iid", "3788260546453235"); params.put("device_id", "538083340353620");
+        params.put("ac", "wifi"); params.put("channel", "oppo_8662_64"); params.put("aid", "8662");
+        params.put("app_name", "novelread"); params.put("version_code", "71532");
+        params.put("version_name", "7.1.5.32"); params.put("device_platform", "android");
+        params.put("os", "android"); params.put("ssmix", "a"); params.put("device_type", "SM-N9860");
+        params.put("device_brand", "Samsung"); params.put("language", "zh"); params.put("os_api", "28");
+        params.put("os_version", "9"); params.put("manifest_version_code", "71532");
+        params.put("resolution", "900*1600"); params.put("dpi", "320"); params.put("update_version_code", "71532");
+        params.put("host_abi", "arm64-v8a"); params.put("dragon_device_type", "pad"); params.put("pv_player", "71532");
+        params.put("compliance_status", "0"); params.put("need_personal_recommend", "1");
+        params.put("player_so_load", "1"); params.put("is_android_pad_screen", "0");
+        params.put("rom_version", "PQ3A.190705.10241111+release-keys");
+        params.put("cdid", "b4f93387-5319-4134-aab9-2cd4e9279b8f");
         params.put("_rticket", String.valueOf(System.currentTimeMillis()));
         String rawQuery = goEncode(params);
         byte[] body = ("{\"series_id\":\"" + seriesId + "\"}").getBytes(StandardCharsets.UTF_8);
@@ -76,9 +76,7 @@ final class HongguoAppApi {
                 .post(RequestBody.create(JSON, body))
                 .header("User-Agent", UA)
                 .header("Accept", "application/json")
-                .header("Sdk-Version", "2")
-                .header("X-XS-From-Web", "0");
-        sign(rb, rawQuery, body, nowSec);
+                .header("Accept-Encoding", "gzip");
         try (Response response = http.newCall(rb.build()).execute()) {
             if (!response.isSuccessful() || response.body() == null) return null;
             JSONObject json = new JSONObject(response.body().string());
@@ -91,53 +89,6 @@ final class HongguoAppApi {
                     .put("episode_cnt", video.optInt("episode_cnt", 0))
                     .put("series_title", video.optString("series_title", ""));
         }
-    }
-
-    /** juku signHongguoRequest：X-SS-STUB=body MD5 大写；X-Gorgon=20 字节载荷混淆+固定前缀。 */
-    private static void sign(Request.Builder rb, String rawQuery, byte[] body, long nowSec) {
-        byte[] queryHash = md5(rawQuery.getBytes(StandardCharsets.UTF_8));
-        byte[] payload = new byte[20];
-        System.arraycopy(queryHash, 0, payload, 0, 4);
-        if (body != null) {
-            byte[] bodyHash = md5(body);
-            System.arraycopy(bodyHash, 0, payload, 4, 4);
-            rb.header("X-SS-STUB", hex(bodyHash));
-        }
-        payload[12] = 0; payload[13] = 6; payload[14] = 11; payload[15] = 28;
-        payload[16] = (byte) (nowSec >>> 24); payload[17] = (byte) (nowSec >>> 16);
-        payload[18] = (byte) (nowSec >>> 8); payload[19] = (byte) nowSec;
-        for (int i = 0; i < 20; i++) payload[i] ^= KEY[i];
-        for (int i = 0; i < 20; i++)
-            payload[i] = (byte) (rev8(rotl8(payload[i] & 0xff, 4) ^ (payload[(i + 1) % 20] & 0xff)) ^ 0xff ^ 20);
-        byte[] signature = new byte[26];
-        signature[0] = (byte) 0x84; signature[1] = 0x04; signature[2] = 0x40; signature[3] = 0x1c;
-        signature[4] = 0; signature[5] = 0;
-        System.arraycopy(payload, 0, signature, 6, 20);
-        rb.header("X-Khronos", String.valueOf(nowSec));
-        // juku：X-Gorgon=Go hex.EncodeToString（小写）；X-SS-STUB=fmt.Sprintf("%X")（大写）
-        rb.header("X-Gorgon", hex(signature, false));
-        rb.header("X-SS-Req-Ticket", String.valueOf(System.currentTimeMillis()));
-    }
-
-    private static int rotl8(int x, int n) { return ((x << n) | (x >>> (8 - n))) & 0xff; }
-    private static int rev8(int x) { return Integer.reverse(x & 0xff) >>> 24; }
-
-    private static byte[] md5(byte[] input) {
-        try {
-            MessageDigest d = MessageDigest.getInstance("MD5");
-            return d.digest(input);
-        } catch (Exception e) { throw new IllegalStateException(e); }
-    }
-
-    private static String hex(byte[] bytes) { return hex(bytes, true); }
-
-    private static String hex(byte[] bytes, boolean upper) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            String h = String.format(Locale.ROOT, upper ? "%02X" : "%02x", b & 0xff);
-            sb.append(h);
-        }
-        return sb.toString();
     }
 
     /** Go url.Values.Encode()：TreeMap 按键排序 + QueryEscape（空格→+、~ 保留、其余 %XX 大写）。 */
@@ -161,10 +112,5 @@ final class HongguoAppApi {
             else out.append('%').append(String.format(Locale.ROOT, "%02X", c));
         }
         return out.toString();
-    }
-
-    private static String newDeviceId() {
-        long base = 1_000_000_000_000_000_000L + Math.floorMod(ThreadLocalRandom.current().nextLong(), 8_000_000_000_000_000_000L);
-        return String.valueOf(base);
     }
 }
