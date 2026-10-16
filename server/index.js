@@ -84,7 +84,7 @@ const adminSessions = new Map(); // adminToken -> expiry ms
 // 黄果站点域名白名单（后端转发接口只允许抓这些域名，避免变成开放代理）
 // 主站为 *.pqhybuxo.cc 系；封面 CDN pic.drleao.cn / 详情图 expose.eisees.com；视频播放 yd-hls.hzjvlo.cn；
 // hongguoduanju.com 为红果官方站（搜索联想接口 /incent_resource/suggestion 补全短剧名用）
-const HUANGGUO_HOST_RE = /(^\.)(pqhybuxo\.cc|im41z53s\.cc|huangguoju\.com|drleao\.cn|eisees\.com|hzjvlo\.cn|hongguoduanju\.com)$/i;
+const HUANGGUO_HOST_RE = /(^|\.)(pqhybuxo\.cc|im41z53s\.cc|huangguoju\.com|drleao\.cn|eisees\.com|hzjvlo\.cn|hongguoduanju\.com)$/i;
 const proxyFetch = require('./proxy-fetch');
 
 // ---- TOTP 动态码（RFC 6238，30 秒窗口，6 位）----
@@ -402,7 +402,7 @@ async function testProxy(){
   el.textContent='测试中…'; el.style.color='var(--mut)';
   try{
     const r=await fetch('/api/admin/proxy-test',{method:'POST',headers:Object.assign({'Content-Type':'application/json'},AUTH()),body:JSON.stringify({proxy})}).then(x=>x.json());
-    if(r.ok) el.textContent='✅ 通：'+r.target+' → HTTP '+r.code+'（'+r.ms+'ms'+(proxy?',经代理':',直连')+'）';
+    if(r.ok) el.textContent='✅ 通：'+r.target+' → HTTP '+r.code+'（'+r.ms+'ms'+(proxy?'，经代理':'，直连')+'）';
     else el.textContent='❌ 失败：'+(r.error||'未知错误');
     el.style.color=r.ok?'var(--ok)':'var(--err)';
   }catch(e){ el.textContent='❌ 请求失败：'+e.message; el.style.color='var(--err)'; }
@@ -497,7 +497,7 @@ async function apiTest(kind){
     const r=await fetch('/api/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
     const d=await r.json().catch(()=>({}));
     out.textContent=r.ok
-      ? (kind==='register'?'注册成功：':'登录成功：')+'\n'+JSON.stringify(d,null,2)
+      ? (kind==='register'?'注册成功：':'登录成功：')+'\\n'+JSON.stringify(d,null,2)
       : (r.status+' '+(d.error||'请求失败'));
   }catch(e){ out.textContent='请求失败: '+e.message }
 }
@@ -560,7 +560,7 @@ app.put('/api/admin/users/:id/role', requireAdmin, (req, res) => {
   res.json({ ok: true, user: publicUser(user) });
 });
 
-// 删除用户（连同其会话、片单、头像）
+// 删除用户（连带其会话、片单、头像）
 app.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
   const id = String(req.params.id);
   if (!users[id]) return res.status(404).json({ error: '用户不存在' });
