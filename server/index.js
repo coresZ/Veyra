@@ -691,6 +691,7 @@ function kindOf(type, body) {
 }
 app.get('/api/huangguo-proxy', (req, res) => {
   const target = String(req.query.url || '');
+  console.log('[proxy]', new Date().toISOString(), 'REQ', (req.headers['user-agent'] || '').slice(0, 24), target.slice(0, 120));
   let parsed;
   try { parsed = new URL(target); } catch { return res.status(400).json({ error: '无效地址' }); }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
@@ -699,6 +700,7 @@ app.get('/api/huangguo-proxy', (req, res) => {
     return res.status(403).json({ error: '仅允许黄果站点域名' });
   const cached = cacheGet(target);
   if (cached) {
+    console.log('[proxy]', new Date().toISOString(), 'HIT', cached.type, target.slice(0, 90));
     res.setHeader('Content-Type', cached.type);
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Proxy-Cache', 'hit');
@@ -713,6 +715,7 @@ app.get('/api/huangguo-proxy', (req, res) => {
     headers, timeout: 25_000, maxBytes: 50 * 1024 * 1024, redirects: 5,
   }, (err, result) => {
     if (err) {
+      console.log('[proxy]', new Date().toISOString(), 'ERR', (err.message || '').slice(0, 120), target.slice(0, 90));
       if (!res.headersSent) return res.status(502).json({ error: '上游站点连接失败: ' + (err.message || '') });
       return res.end();
     }
@@ -727,7 +730,12 @@ app.get('/api/huangguo-proxy', (req, res) => {
     if (kind === 'm3u8') {
       type = 'application/vnd.apple.mpegurl; charset=utf-8';
       // 重写 m3u8：普通 URI 行 + #EXT-X-KEY/#EXT-X-MAP 的 URI="..." 全部包一层后端代理
-      const base = `${req.protocol}://${req.headers.host}/api/huangguo-proxy?url=`;
+      // 协议跟随访问方式：公网经反代 TLS 终止后本服务收到的是 HTTP（req.protocol 不可靠），
+      // 故公网域名固定 https、局域网/本机保持 http；host 用请求真实 Host（反代透传）。
+      const proxyHost = String(req.headers.host || '');
+      const proxyHostOnly = proxyHost.split(':')[0].toLowerCase();
+      const privateHostRe = /^(localhost|127\.0\.0\.1|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
+      const base = `${privateHostRe.test(proxyHostOnly) ? 'http' : 'https'}://${proxyHost}/api/huangguo-proxy?url=`;
       let text = body.toString('utf8');
       text = text.replace(/(URI=")([^"]+)(")/g, (_m, a, u, c) => {
         try { return a + base + encodeURIComponent(new URL(u, target).toString()) + c; }
@@ -742,6 +750,7 @@ app.get('/api/huangguo-proxy', (req, res) => {
       body = Buffer.from(text, 'utf8');
     }
     if (kind === 'm3u8' || kind === 'html' || kind === 'image') cachePut(target, body, type, CACHE_TTL[kind]);
+    console.log('[proxy]', new Date().toISOString(), 'RES', kind, 'bytes=' + body.length, target.slice(0, 90));
     res.status(200);
     res.setHeader('Content-Type', type);
     res.setHeader('Cache-Control', 'no-store');
