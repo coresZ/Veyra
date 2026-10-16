@@ -1,5 +1,13 @@
-// proxy-fetch.js —— 支持通过 HTTP/SOCKS5 代理抓取 URL（零依赖，Node >=18）
+// proxy-fetch.js —— 通过 HTTP/SOCKS5 代理抓取 URL（底层调用系统 curl）
 // 用途：后端转发接口 /api/huangguo-proxy 在服务器出口被限时，可按 WebUI 配置的代理抓取黄果源。
+//
+// 2026-10-16 抓取底层从 Node https（CONNECT 隧道）改为系统 curl：
+//   黄果站点边缘对 Node TLS 客户端指纹（ClientHello/JA3）返回 400，对 curl 正常放行
+//   （实测：同一代理同一目标，curl=301 正常响应，Node=400 被拒）。curl 依赖由 Dockerfile 安装。
+const { execFile } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const http = require('http');
 const https = require('https');
 const net = require('net');
@@ -12,6 +20,7 @@ function parseProxy(url) {
 }
 
 // 通过代理建立到 (host, port) 的隧道，回调 (err, socket)
+// 保留供诊断/扩展使用；正常抓取已由 requestThroughProxy 委托给系统 curl。
 function connectViaProxy(proxy, host, port, done) {
   const socket = net.connect(proxy.port, proxy.host, () => {
     if (proxy.type === 'http') {
@@ -58,57 +67,38 @@ function connectViaProxy(proxy, host, port, done) {
 }
 
 // 抓取 URL（proxyUrl 为空则直连）；跟随重定向；返回 { status, headers, body(Buffer) }
+// 底层用系统 curl：目标站点对 Node TLS 指纹风控（400）时 curl 可正常访问（浏览器级指纹更接近）。
 function requestThroughProxy(targetUrl, proxyUrl, opts, done) {
   const { headers = {}, timeout = 25000, maxBytes = 5 * 1024 * 1024, redirects = 5 } = opts || {};
   let parsed;
   try { parsed = new URL(targetUrl); } catch (e) { return done(e); }
-  const isHttps = parsed.protocol === 'https:';
-  const mod = isHttps ? https : http;
-  const reqOptions = {
-    hostname: parsed.hostname,
-    port: parsed.port || (isHttps ? 443 : 80),
-    path: parsed.pathname + parsed.search,
-    method: 'GET',
-    headers,
-  };
-  const perform = () => {
-    const req = mod.request(reqOptions, onResponse);
-    req.setTimeout(timeout, () => req.destroy(new Error('上游站点超时')));
-    req.on('error', (e) => done(e));
-    req.end();
-  };
-  if (!proxyUrl) {
-    perform();
-  } else {
-    let proxy;
-    try { proxy = parseProxy(proxyUrl); } catch (e) { return done(e); }
-    connectViaProxy(proxy, reqOptions.hostname, reqOptions.port, (err, socket) => {
-      if (err) return done(err);
-      reqOptions.createConnection = () => socket;
-      perform();
-    });
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return done(new Error('仅支持 http/https'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'veyra-curl-'));
+  const bodyFile = path.join(dir, 'body');
+  const args = ['-sS', '-L', '--max-redirs', String(redirects),
+    '--max-time', String(Math.max(1, Math.round(timeout / 1000)))];
+  if (proxyUrl) args.push('-x', proxyUrl);
+  for (const [k, v] of Object.entries(headers)) {
+    if (v !== undefined && v !== null) args.push('-H', `${k}: ${v}`);
   }
-  function onResponse(res) {
-    const status = res.statusCode || 0;
-    if (status >= 300 && status < 400 && res.headers.location && redirects > 0) {
-      res.resume();
-      const next = new URL(res.headers.location, targetUrl).toString();
-      return requestThroughProxy(next, proxyUrl, { ...opts, redirects: redirects - 1 }, done);
+  // -w 输出跟随重定向后的最终状态码与 content-type；body 落临时文件，避免内存/管道限制
+  args.push('-o', bodyFile, '-w', '%{http_code}\n%{content_type}', targetUrl);
+  execFile('curl', args, { maxBuffer: 16 * 1024 * 1024, timeout: timeout + 5000 }, (err, stdout, stderr) => {
+    const cleanup = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 忽略 */ } };
+    if (err) {
+      cleanup();
+      const msg = String(stderr || '').trim() || err.message || 'curl 抓取失败';
+      return done(new Error(msg));
     }
-    const chunks = [];
-    let size = 0;
-    let overflow = false;
-    res.on('data', (c) => {
-      size += c.length;
-      if (size > maxBytes) { overflow = true; res.destroy(); }
-      else chunks.push(c);
-    });
-    res.on('end', () => {
-      if (overflow) return done(new Error('响应超过大小限制 ' + maxBytes));
-      done(null, { status, headers: res.headers, body: Buffer.concat(chunks) });
-    });
-    res.on('error', (e) => done(e));
-  }
+    const lines = String(stdout).split('\n');
+    const code = parseInt(lines[0], 10) || 0;
+    const contentType = String(lines[1] || '').trim();
+    let body;
+    try { body = fs.readFileSync(bodyFile); } catch (e) { cleanup(); return done(e); }
+    if (body.length > maxBytes) { cleanup(); return done(new Error('响应超过大小限制 ' + maxBytes)); }
+    cleanup();
+    done(null, { status: code, headers: { 'content-type': contentType }, body });
+  });
 }
 
 module.exports = { requestThroughProxy, parseProxy, connectViaProxy };
