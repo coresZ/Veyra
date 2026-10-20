@@ -599,7 +599,7 @@ public final class MainActivity extends Activity {
             case "screen-corners": return screenCorners();
             case "window-insets": return statusBarInsetDp;
             case "account": return account.profile();
-            case "register": return account.register(args.optString("username"), args.optString("password"), args.optString("server"));
+            case "register": return account.register(args.optString("username"), args.optString("password"), args.optString("server"), args.optString("code"));
             case "login": return account.login(args.optString("username"), args.optString("password"), args.optString("server"));
             case "change-password": return account.changePassword(args.optString("oldPassword"), args.optString("newPassword"));
             case "logout": account.logout(); return account.profile();

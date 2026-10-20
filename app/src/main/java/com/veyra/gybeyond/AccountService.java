@@ -129,11 +129,11 @@ final class AccountService {
         } finally { if (temporary.exists()) temporary.delete(); }
     }
 
-    synchronized JSONObject register(String username, String password, String server) throws Exception {
+    synchronized JSONObject register(String username, String password, String server, String code) throws Exception {
         validate(username, password);
         applyServerBase(server);
         JSONObject body = new JSONObject().put("username", username).put("password", password)
-                .put("device", deviceModel());
+                .put("code", code == null ? "" : code).put("device", deviceModel());
         JSONObject result;
         try {
             result = call("POST", "api/register", body, false);
