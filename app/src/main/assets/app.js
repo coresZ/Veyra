@@ -220,7 +220,7 @@ document.getElementById('auth-form').addEventListener('submit', async event => {
     if (mode === 'register') {
       const code = document.getElementById('auth-code')?.value.trim() || '';
       if (!/^\d{6}$/.test(code)) throw new Error('注册需要管理员提供的 6 位动态码');
-      await api('verify-otp-public', { code }); // 先验证动态码，通过才允许注册
+      await api('verify-otp-public', { code, server }); // 先验证动态码，通过才允许注册
     }
     const profile = await api(mode, { username, password, server, code: mode === 'register' ? (document.getElementById('auth-code')?.value.trim() || '') : undefined });
     hideAuth();

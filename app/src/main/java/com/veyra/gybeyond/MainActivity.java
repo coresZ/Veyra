@@ -561,7 +561,7 @@ public final class MainActivity extends Activity {
         }
         if ("verify-otp-public".equals(action)) {
             // 注册前置动态码校验（无需登录，复用 /api/otp/verify）
-            account.verifyOtpPublic(args.optString("code"));
+            account.verifyOtpPublic(args.optString("code"), args.optString("server"));
             return new JSONObject().put("ok", true);
         }
         if ("confirm-private-age".equals(action)) {

@@ -203,9 +203,10 @@ final class AccountService {
     }
 
     /** 注册前置动态码校验（无需登录）：验证通过即可，不解锁私密模式。 */
-    synchronized void verifyOtpPublic(String code) throws Exception {
+    synchronized void verifyOtpPublic(String code, String server) throws Exception {
         if (code == null || !code.matches("\\d{6}"))
             throw new IllegalArgumentException("动态码为 6 位数字");
+        applyServerBase(server);
         call("POST", "api/otp/verify", new JSONObject().put("code", code), false);
     }
 
