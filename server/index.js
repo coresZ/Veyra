@@ -603,19 +603,14 @@ app.put('/api/admin/settings', requireAdmin, (req, res) => {
 // 测试后端代理连通性：按给定代理（未给则用已保存配置）抓黄果主页
 app.post('/api/admin/proxy-test', requireAdmin, (req, res) => {
   const proxy = String((req.body && req.body.proxy) || '').trim();
-  const target = 'https://thu.pqhybuxo.cc/';
+  const target = 'https://www.google.com/generate_204';
   const started = Date.now();
   proxyFetch.requestThroughProxy(target, proxy || backendProxy, {
-    // 与 /api/huangguo-proxy 真实转发同款请求头，避免测试结果与真实效果不一致
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36',
-      'Accept': '*/*',
-      'Referer': 'https://thu.pqhybuxo.cc/',
-    },
-    timeout: 15_000, maxBytes: 1024 * 1024, redirects: 5,
+    headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': '*/*' },
+    timeout: 8_000, maxBytes: 64 * 1024, redirects: 3,
   }, (err, result) => {
     if (err) return res.json({ ok: false, error: err.message || '连接失败' });
-    if (result.status < 200 || result.status >= 300)
+    if (result.status < 200 || result.status >= 400)
       return res.json({ ok: false, error: '上游返回 HTTP ' + result.status, code: result.status });
     res.json({ ok: true, target, code: result.status, ms: Date.now() - started });
   });
