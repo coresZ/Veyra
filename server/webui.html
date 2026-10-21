@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Veyra</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+<style>
+:root{--bg:#0f1115;--card:#1a1e26;--line:#2a3040;--fg:#e8ecf3;--mut:#8a93a5;--ok:#37d67a;--err:#ff5c5c;--acc:#f5d782;--acc2:#6c8cff}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;min-height:100vh}
+.header{position:sticky;top:0;z-index:100;background:rgba(15,17,21,.88);backdrop-filter:blur(20px);border-bottom:1px solid var(--line);padding:12px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.logo{font-size:20px;font-weight:800;letter-spacing:1px;color:var(--acc);white-space:nowrap}
+.search{flex:1;min-width:180px;max-width:480px;background:#0d0f13;border:1px solid var(--line);border-radius:10px;padding:8px 14px;color:var(--fg);font-size:14px;outline:none}
+.search:focus{border-color:var(--acc2)}
+.mode-toggle{display:flex;background:#0d0f13;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.mode-toggle button{background:transparent;border:none;color:var(--mut);padding:8px 16px;cursor:pointer;font-size:13px;font-weight:600;transition:.2s}
+.mode-toggle button.active{background:var(--acc);color:#1a1e26}
+.gear{background:transparent;border:1px solid var(--line);color:var(--mut);width:38px;height:38px;border-radius:10px;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center}
+.gear:hover{border-color:var(--mut);color:var(--fg)}
+.container{max-width:1200px;margin:0 auto;padding:20px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:16px}
+.card-poster{cursor:pointer;transition:transform .2s}
+.card-poster:hover{transform:translateY(-4px)}
+.poster-img{width:100%;aspect-ratio:2/3;border-radius:10px;object-fit:cover;background:var(--card);border:1px solid var(--line)}
+.poster-title{font-size:13px;margin-top:8px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.poster-badge{font-size:11px;color:var(--mut);margin-top:2px}
+.loading{text-align:center;padding:60px;color:var(--mut)}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;display:none;align-items:flex-start;justify-content:center;overflow-y:auto;padding:20px}
+.modal-overlay.open{display:flex}
+.modal{background:var(--card);border:1px solid var(--line);border-radius:16px;max-width:700px;width:100%;padding:24px;margin:auto}
+.modal-close{float:right;background:transparent;border:none;color:var(--mut);font-size:22px;cursor:pointer}
+.ep-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(60px,1fr));gap:8px;margin-top:16px}
+.ep-btn{background:#0d0f13;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:10px 0;text-align:center;cursor:pointer;font-size:13px}
+.ep-btn:hover{border-color:var(--acc2)}
+.ep-btn.playing{background:var(--acc);color:#1a1e26;font-weight:700}
+.player-wrap{margin-top:16px;display:none}
+.player-wrap.open{display:block}
+video{width:100%;border-radius:10px;background:#000}
+.drawer{position:fixed;top:0;right:-440px;width:420px;max-width:95vw;height:100vh;background:var(--card);border-left:1px solid var(--line);z-index:300;transition:right .3s;overflow-y:auto;padding:24px}
+.drawer.open{right:0}
+.drawer h2{font-size:15px;color:var(--acc);margin:20px 0 10px}
+.drawer h2:first-child{margin-top:0}
+.drawer input{width:100%;background:#0d0f13;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:8px 10px;font-size:13px;margin-bottom:8px}
+.drawer button{background:var(--acc);color:#1a1e26;border:none;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:700;cursor:pointer;margin-right:6px}
+.drawer button.ghost{background:transparent;color:var(--mut);border:1px solid var(--line)}
+.drawer button.danger{background:var(--err);color:#fff}
+.drawer .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.drawer .k{color:var(--mut);font-size:12px}
+.drawer table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+.drawer td,.drawer th{border:1px solid var(--line);padding:5px 7px;text-align:left}
+.drawer th{color:var(--mut)}
+.otp-big{font-size:28px;letter-spacing:4px;font-weight:700;color:var(--acc)}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--card);border:1px solid var(--line);padding:10px 20px;border-radius:10px;font-size:13px;z-index:400;display:none}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="logo">Veyra</div>
+  <input class="search" id="search-input" placeholder="搜索短剧…">
+  <div class="mode-toggle">
+    <button id="mode-public" class="active">公开</button>
+    <button id="mode-private">私密</button>
+  </div>
+  <button class="gear" id="btn-settings">⚙</button>
+</div>
+<div class="container">
+  <div class="grid" id="grid"><div class="loading">加载中…</div></div>
+</div>
+
+<div class="modal-overlay" id="detail-overlay">
+  <div class="modal">
+    <button class="modal-close" id="btn-close-detail">✕</button>
+    <div style="display:flex;gap:16px;flex-wrap:wrap">
+      <img id="d-poster" class="poster-img" style="width:140px;flex-shrink:0" src="">
+      <div style="flex:1;min-width:200px">
+        <h2 id="d-title" style="margin-bottom:8px"></h2>
+        <p id="d-desc" style="color:var(--mut);font-size:13px"></p>
+        <p id="d-badge" style="color:var(--mut);font-size:12px;margin-top:6px"></p>
+      </div>
+    </div>
+    <div class="player-wrap" id="player-wrap">
+      <video id="player" controls></video>
+    </div>
+    <div class="ep-list" id="ep-list"></div>
+  </div>
+</div>
+
+<div class="drawer" id="drawer">
+  <h2>管理</h2>
+  <div id="login-area">
+    <input type="password" id="admin-pass" placeholder="管理员密码">
+    <button id="btn-admin-login">登录</button>
+    <span id="login-err" style="color:var(--err);font-size:12px"></span>
+  </div>
+  <div id="admin-area" style="display:none">
+    <div class="row"><span class="k">用户</span><b id="s-users">-</b><span class="k">注册</span><b id="s-reg">-</b></div>
+    <h2>注册开关</h2>
+    <div class="row"><label style="font-size:13px"><input type="checkbox" id="reg-open" style="width:auto"> 开放注册</label><button id="btn-save-reg">保存</button></div>
+    <h2>后端代理</h2>
+    <input id="backend-proxy" placeholder="http://ip:port 或 socks5://ip:port">
+    <div class="row"><button id="btn-save-proxy">保存</button><button class="ghost" id="btn-test-proxy">测试</button></div>
+    <p id="proxy-status" style="font-size:12px;color:var(--mut)"></p>
+    <h2>动态码</h2>
+    <div class="row"><span class="otp-big" id="otp-code">------</span><span class="k" id="otp-remain"></span></div>
+    <button class="ghost" id="btn-reset-otp">重置动态码</button>
+    <h2>用户管理</h2>
+    <table><thead><tr><th>用户</th><th>角色</th><th>操作</th></tr></thead><tbody id="user-rows"></tbody></table>
+    <div class="row" style="margin-top:16px"><button class="ghost" id="btn-admin-logout">退出登录</button></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+let mode='public', adminToken=localStorage.getItem('veyraAdmin')||'';
+const AUTH=()=>({Authorization:'Bearer '+adminToken});
+const grid=document.getElementById('grid');
+
+function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',2500)}
+
+document.getElementById('mode-public').onclick=()=>setMode('public');
+document.getElementById('mode-private').onclick=()=>setMode('private');
+document.getElementById('search-input').addEventListener('keydown',e=>{if(e.key==='Enter')doSearch()});
+document.getElementById('btn-settings').onclick=()=>document.getElementById('drawer').classList.toggle('open');
+document.getElementById('btn-close-detail').onclick=closeDetail;
+document.getElementById('detail-overlay').addEventListener('click',e=>{if(e.target.id==='detail-overlay')closeDetail()});
+
+function setMode(m){
+  mode=m;
+  document.getElementById('mode-public').classList.toggle('active',m==='public');
+  document.getElementById('mode-private').classList.toggle('active',m==='private');
+  loadHome();
+}
+
+async function loadHome(){
+  grid.innerHTML='<div class="loading">加载中…</div>';
+  try{
+    if(mode==='public'){
+      const r=await fetch('/api/web/hongguo/home').then(x=>x.json());
+      renderGrid(r.items||[]);
+    }else{
+      const r=await fetch('/api/huangguo-proxy?url='+encodeURIComponent('https://www.pqhybuxo.cc/'));
+      const html=await r.text();
+      renderGrid(parseHuangguoHtml(html));
+    }
+  }catch(e){grid.innerHTML='<div class="loading">加载失败: '+e.message+'</div>'}
+}
+
+function parseHuangguoHtml(html){
+  const items=[];
+  const re=/<a[^>]+href="([^"]*(?:detail|video|play)[^"]*)"[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"[^>]*>[\s\S]*?<(?:h\d|p|span)[^>]*>([^<]+)/gi;
+  let m;
+  while((m=re.exec(html))!==null&&items.length<30)items.push({id:m[1],title:m[3].trim(),cover:m[2],badge:''});
+  return items;
+}
+
+function escapeHtml(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML}
+
+function renderGrid(items){
+  if(!items.length){grid.innerHTML='<div class="loading">暂无内容</div>';return}
+  grid.innerHTML=items.map((it,i)=>{
+    const cover=it.cover||'';
+    const src=cover.startsWith('http')?cover:'/api/huangguo-proxy?url='+encodeURIComponent(cover);
+    return '<div class="card-poster" data-i="'+i+'">'+
+      '<img class="poster-img" src="'+src+'" loading="lazy" onerror="this.style.background=\'#1a1e26\'">'+
+      '<div class="poster-title">'+escapeHtml(it.title)+'</div>'+
+      (it.badge?'<div class="poster-badge">'+escapeHtml(it.badge)+'</div>':'')+'</div>';
+  }).join('');
+  window._items=items;
+  grid.querySelectorAll('.card-poster').forEach(el=>el.onclick=()=>openDetail(+el.dataset.i));
+}
+
+async function doSearch(){
+  const q=document.getElementById('search-input').value.trim();
+  if(!q){loadHome();return}
+  grid.innerHTML='<div class="loading">搜索中…</div>';
+  try{
+    if(mode==='public'){
+      const r=await fetch('/api/web/hongguo/search?q='+encodeURIComponent(q)).then(x=>x.json());
+      renderGrid(r.items||[]);
+    }else{
+      const r=await fetch('/api/huangguo-proxy?url='+encodeURIComponent('https://www.pqhybuxo.cc/search?keyword='+encodeURIComponent(q)));
+      renderGrid(parseHuangguoHtml(await r.text()));
+    }
+  }catch(e){grid.innerHTML='<div class="loading">搜索失败: '+e.message+'</div>'}
+}
+
+function openDetail(i){
+  const it=window._items[i];if(!it)return;
+  document.getElementById('d-title').textContent=it.title;
+  document.getElementById('d-desc').textContent=it.description||'';
+  document.getElementById('d-badge').textContent=it.badge||'';
+  const img=document.getElementById('d-poster');
+  img.src=it.cover?(it.cover.startsWith('http')?it.cover:'/api/huangguo-proxy?url='+encodeURIComponent(it.cover)):'';
+  document.getElementById('ep-list').innerHTML='';
+  document.getElementById('player-wrap').classList.remove('open');
+  document.getElementById('detail-overlay').classList.add('open');
+  if(mode==='public'&&it.id){
+    fetch('/api/web/hongguo/detail?id='+encodeURIComponent(it.id)).then(x=>x.json()).then(d=>{
+      const eps=(d.raw&&(d.raw.episode_list||(d.raw.detail_page&&d.raw.detail_page.episode_list)))||[];
+      document.getElementById('ep-list').innerHTML=eps.map((ep,j)=>'<button class="ep-btn" data-j="'+j+'">'+(j+1)+'</button>').join('');
+    }).catch(()=>{});
+  }
+}
+
+function closeDetail(){
+  document.getElementById('detail-overlay').classList.remove('open');
+  const v=document.getElementById('player');if(v)v.pause();
+}
+
+/* admin */
+document.getElementById('btn-admin-login').onclick=async()=>{
+  const p=document.getElementById('admin-pass').value;
+  try{
+    const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){document.getElementById('login-err').textContent=d.error||'失败';return}
+    adminToken=d.token;localStorage.setItem('veyraAdmin',adminToken);
+    document.getElementById('login-area').style.display='none';
+    document.getElementById('admin-area').style.display='block';
+    loadAdmin();
+  }catch(e){document.getElementById('login-err').textContent='网络错误'}
+};
+
+async function loadAdmin(){
+  try{
+    const [st,otp]=await Promise.all([
+      fetch('/api/stats',{headers:AUTH()}).then(r=>r.json()),
+      fetch('/api/otp',{headers:AUTH()}).then(r=>r.json())
+    ]);
+    document.getElementById('s-users').textContent=st.users;
+    document.getElementById('s-reg').textContent=st.registerOpen?'开放':'关闭';
+    document.getElementById('reg-open').checked=!!st.registerOpen;
+    document.getElementById('otp-code').textContent=otp.code;
+    document.getElementById('otp-remain').textContent=otp.expiresIn+'秒';
+    const s=await fetch('/api/admin/settings',{headers:AUTH()}).then(r=>r.json());
+    document.getElementById('backend-proxy').value=s.backendProxy||'';
+    loadUsers();
+  }catch(e){}
+}
+
+document.getElementById('btn-save-reg').onclick=async()=>{
+  const r=await fetch('/api/admin/settings',{method:'PUT',headers:Object.assign({'Content-Type':'application/json'},AUTH()),body:JSON.stringify({registerOpen:document.getElementById('reg-open').checked})}).then(x=>x.json());
+  toast(r.ok?'已保存':(r.error||'失败'));
+};
+
+document.getElementById('btn-save-proxy').onclick=async()=>{
+  const r=await fetch('/api/admin/settings',{method:'PUT',headers:Object.assign({'Content-Type':'application/json'},AUTH()),body:JSON.stringify({backendProxy:document.getElementById('backend-proxy').value.trim()})}).then(x=>x.json());
+  document.getElementById('proxy-status').textContent=r.ok?'已保存':(r.error||'失败');
+};
+
+document.getElementById('btn-test-proxy').onclick=async()=>{
+  const el=document.getElementById('proxy-status');el.textContent='测试中…';
+  try{
+    const r=await fetch('/api/admin/proxy-test',{method:'POST',headers:Object.assign({'Content-Type':'application/json'},AUTH()),body:JSON.stringify({proxy:document.getElementById('backend-proxy').value.trim()})}).then(x=>x.json());
+    el.textContent=r.ok?'✅ 通 ('+r.ms+'ms)':'❌ '+(r.error||'失败');
+  }catch(e){el.textContent='❌ '+e.message}
+};
+
+document.getElementById('btn-reset-otp').onclick=async()=>{
+  if(!confirm('重置动态码？'))return;
+  const d=await fetch('/api/otp/reset',{method:'POST',headers:AUTH()}).then(x=>x.json());
+  document.getElementById('otp-code').textContent=d.code;
+};
+
+document.getElementById('btn-admin-logout').onclick=()=>{adminToken='';localStorage.removeItem('veyraAdmin');location.reload()};
+
+async function loadUsers(){
+  try{
+    const d=await fetch('/api/admin/users',{headers:AUTH()}).then(r=>r.json());
+    document.getElementById('user-rows').innerHTML=(d.users||[]).map(u=>
+      '<tr><td>'+escapeHtml(u.username)+'</td><td>'+(u.role==='admin'?'管理员':'用户')+'</td>'+
+      '<td><button class="ghost" data-uid="'+u.id+'" data-role="'+(u.role==='admin'?'user':'admin')+'">'+(u.role==='admin'?'降级':'升级')+'</button>'+
+      ' <button class="danger" data-del="'+u.id+'">删</button></td></tr>'
+    ).join('');
+    document.querySelectorAll('[data-uid]').forEach(b=>b.onclick=()=>setRole(b.dataset.uid,b.dataset.role));
+    document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>delUser(b.dataset.del));
+  }catch(e){}
+}
+
+async function setRole(id,role){
+  await fetch('/api/admin/users/'+id+'/role',{method:'PUT',headers:Object.assign({'Content-Type':'application/json'},AUTH()),body:JSON.stringify({role})});
+  loadUsers();
+}
+
+async function delUser(id){
+  if(!confirm('删除该用户？'))return;
+  await fetch('/api/admin/users/'+id,{method:'DELETE',headers:AUTH()});
+  loadUsers();
+}
+
+/* init */
+if(adminToken){document.getElementById('login-area').style.display='none';document.getElementById('admin-area').style.display='block';loadAdmin()}
+loadHome();
+</script>
+</body>
+</html>

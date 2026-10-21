@@ -10,6 +10,7 @@ COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund
 
 COPY index.js ./
+COPY webui.html ./
 COPY downloader.js ./
 COPY hongguo-app.js ./
 COPY hongguo-decrypt.js ./
