@@ -307,6 +307,28 @@ app.get('/api/web/hongguo/detail', (req, res) => {
   });
 });
 
+// 红果中转取流代理：手机直连 djapi.999888456.xyz 被墙，由后端转发
+app.get('/api/hongguo/relay-play', (req, res) => {
+  const seriesId = String(req.query.series_id || '').trim();
+  const vid = String(req.query.vid || '').trim();
+  if (!seriesId || !vid) return res.status(400).json({ error: '缺少 series_id 或 vid' });
+  const ref = { content_type: 1004, from_video_id: '', series_id: seriesId, vid: vid, video_platform: 3 };
+  const b64 = Buffer.from(JSON.stringify(ref)).toString('base64');
+  const target = 'https://djapi.999888456.xyz/api/hongguo/play?id=' + encodeURIComponent(b64);
+  console.log('[relay]', new Date().toISOString(), 'series', seriesId, 'vid', vid);
+  proxyFetch.requestThroughProxy(target, backendProxy, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 16; 25053RT47C) AppleWebKit/537.36' },
+    timeout: 15000, maxBytes: 512 * 1024, redirects: 3,
+  }, (err, result) => {
+    if (err) {
+      console.log('[relay] ERR', err.message);
+      return res.status(502).json({ error: '中转请求失败: ' + err.message });
+    }
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.send(result.body.toString('utf-8'));
+  });
+});
+
 // ---- WebUI 管理接口（需管理员密码登录）----
 
 // 管理员登录：签发 8 小时会话 token

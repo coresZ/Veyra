@@ -16,6 +16,7 @@ final class DualContentRepository {
         this.source = source; mode = ContentMode.get(context);
         huangguo = new SiteRepository(context, profile);
         hongguo = new HongguoRepository();
+        com.hongguotv.core.RelayPlayback.setProxyBaseUrl(ServerConfig.get(context));
     }
     private boolean privateMode() { mode.require(source); return ContentMode.PRIVATE.equals(source); }
     JSONObject home() throws Exception { return privateMode() ? huangguo.home() : hongguo.home(); }

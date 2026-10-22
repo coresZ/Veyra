@@ -14,7 +14,9 @@ import javax.crypto.spec.SecretKeySpec
  * 不直连 fqnovel.com，由中转服务处理签名和风控。
  */
 object RelayPlayback {
-    private const val API = "https://djapi.999888456.xyz/api/hongguo/play"
+    private const val DIRECT_API = "https://djapi.999888456.xyz/api/hongguo/play"
+    /** Veyra 后端代理地址（由 Java 层设置，如 https://video.225600.xyz:1314/）。非空时走后端转发。 */
+    @JvmStatic var proxyBaseUrl: String = ""
     private val http = OkHttpClient.Builder().build()
 
     fun stream(seriesId: String, vid: String): StreamInfo {
@@ -25,7 +27,12 @@ object RelayPlayback {
             .put("vid", vid)
             .put("video_platform", 3)
         val b64 = android.util.Base64.encodeToString(ref.toString().toByteArray(), android.util.Base64.NO_WRAP)
-        val url = "$API?id=${URLEncoder.encode(b64, "UTF-8")}"
+        val url = if (proxyBaseUrl.isNotEmpty()) {
+            // 走 Veyra 后端代理（NAS 能访问 djapi）
+            "${proxyBaseUrl.trimEnd('/')}/api/hongguo/relay-play?series_id=$seriesId&vid=$vid"
+        } else {
+            DIRECT_API + "?id=" + URLEncoder.encode(b64, "UTF-8")
+        }
         val req = Request.Builder().url(url)
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 16; 25053RT47C) AppleWebKit/537.36")
             .header("Referer", "https://hongguoduanju.com/")

@@ -1177,7 +1177,7 @@ public final class PlayerActivity extends Activity {
                 runOnUiThread(() -> {
                     if (token != loadToken || destroyed || isFinishing()) return;
                     loading.setVisibility(View.GONE);
-                    message.setText("加载失败，点击重试");
+                    message.setText("加载失败: " + error.getMessage() + "\n点击重试");
                     message.setVisibility(View.VISIBLE);
                     message.setOnClickListener(view -> loadSelection());
                 });
