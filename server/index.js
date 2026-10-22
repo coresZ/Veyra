@@ -230,6 +230,83 @@ app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'webui.html'));
 });
 
+// ---- Web 端红果内容代理（hongguoduanju.com 公开页，无需签名）----
+const { execFile } = require('child_process');
+
+function curlGet(url, timeoutMs, cb) {
+  execFile('curl', ['-s', '-L', '-m', String(timeoutMs || 10), '-A',
+    'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36',
+    url], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => cb(err, stdout || ''));
+}
+
+function extractRouterData(html) {
+  const marker = html.indexOf('_ROUTER_DATA');
+  if (marker < 0) throw new Error('页面没有内容数据');
+  const first = html.indexOf('{', marker);
+  if (first < 0) throw new Error('页面数据格式错误');
+  let depth = 0, quoted = false, escaped = false;
+  for (let i = first; i < html.length; i++) {
+    const ch = html[i];
+    if (quoted) { if (escaped) escaped = false; else if (ch === '\\') escaped = true; else if (ch === '"') quoted = false; continue; }
+    if (ch === '"') quoted = true;
+    else if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') { depth--; if (depth === 0) return JSON.parse(html.substring(first, i + 1)); }
+  }
+  throw new Error('页面数据不完整');
+}
+
+function parseSeriesCard(o) {
+  return {
+    id: String(o.series_id || o.id || ''),
+    title: o.series_title || o.title || o.name || '',
+    cover: o.cover || o.horizontal_cover || o.vertical_cover || '',
+    badge: o.badge || o.episode_count || '',
+    tags: o.tags || o.category_list || [],
+    description: o.description || '',
+  };
+}
+
+app.get('/api/web/hongguo/home', (req, res) => {
+  curlGet('https://hongguoduanju.com/category?tab=1&sort_type=1', 10000, (err, html) => {
+    if (err) return res.status(502).json({ error: '抓取失败: ' + err.message });
+    try {
+      const router = extractRouterData(html).loaderData || {};
+      const section = router.category_page || router.category_$ || {};
+      const list = section.recommendList || (section.categoryData && section.categoryData.recommendList) || [];
+      res.json({ items: list.map(parseSeriesCard) });
+    } catch (e) { res.status(502).json({ error: '解析失败: ' + e.message }); }
+  });
+});
+
+app.get('/api/web/hongguo/search', (req, res) => {
+  const q = String(req.query.q || '').trim();
+  if (!q) return res.json({ items: [] });
+  curlGet('https://hongguoduanju.com/search/' + encodeURIComponent(q), 10000, (err, html) => {
+    if (err) return res.status(502).json({ error: '搜索失败: ' + err.message });
+    try {
+      const router = extractRouterData(html).loaderData || {};
+      const keys = Object.keys(router);
+      let list = [];
+      for (const k of keys) {
+        if (k.startsWith('search')) { list = router[k].searchList || router[k].data || []; break; }
+      }
+      res.json({ items: list.map(parseSeriesCard) });
+    } catch (e) { res.status(502).json({ error: '解析失败: ' + e.message }); }
+  });
+});
+
+app.get('/api/web/hongguo/detail', (req, res) => {
+  const id = String(req.query.id || '').trim();
+  if (!id) return res.status(400).json({ error: '缺少 id' });
+  curlGet('https://hongguoduanju.com/detail/' + id, 10000, (err, html) => {
+    if (err) return res.status(502).json({ error: '抓取失败: ' + err.message });
+    try {
+      const router = extractRouterData(html).loaderData || {};
+      res.json({ raw: router });
+    } catch (e) { res.status(502).json({ error: '解析失败: ' + e.message }); }
+  });
+});
+
 // ---- WebUI 管理接口（需管理员密码登录）----
 
 // 管理员登录：签发 8 小时会话 token
