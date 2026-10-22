@@ -84,7 +84,7 @@ const adminSessions = new Map(); // adminToken -> expiry ms
 // 黄果站点域名白名单（后端转发接口只允许抓这些域名，避免变成开放代理）
 // 主站为 *.pqhybuxo.cc 系；封面 CDN pic.drleao.cn / 详情图 expose.eisees.com；视频播放 yd-hls.hzjvlo.cn；
 // hongguoduanju.com 为红果官方站（搜索联想接口 /incent_resource/suggestion 补全短剧名用）
-const HUANGGUO_HOST_RE = /(^|\.)(pqhybuxo\.cc|im41z53s\.cc|huangguoju\.com|drleao\.cn|eisees\.com|hzjvlo\.cn|hongguoduanju\.com)$/i;
+const HUANGGUO_HOST_RE = /(^|\.)(pqhybuxo\.cc|im41z53s\.cc|huangguoju\.com|drleao\.cn|eisees\.com|hzjvlo\.cn|hongguoduanju\.com|douyinpic\.com|douyinvod\.com|byteicdn\.com|byteimg\.com|bytetos\.com)$/i;
 const proxyFetch = require('./proxy-fetch');
 
 // ---- TOTP 动态码（RFC 6238，30 秒窗口，6 位）----

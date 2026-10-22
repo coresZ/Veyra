@@ -160,7 +160,7 @@ function renderGrid(items){
   if(!items.length){grid.innerHTML='<div class="loading">暂无内容</div>';return}
   grid.innerHTML=items.map((it,i)=>{
     const cover=it.cover||'';
-    const src=cover.startsWith('http')?cover:'/api/huangguo-proxy?url='+encodeURIComponent(cover);
+    const src=cover?'/api/huangguo-proxy?url='+encodeURIComponent(cover):'';
     return '<div class="card-poster" data-i="'+i+'">'+
       '<img class="poster-img" src="'+src+'" loading="lazy" onerror="this.style.background=\'#1a1e26\'">'+
       '<div class="poster-title">'+escapeHtml(it.title)+'</div>'+
@@ -191,7 +191,7 @@ function openDetail(i){
   document.getElementById('d-desc').textContent=it.description||'';
   document.getElementById('d-badge').textContent=it.badge||'';
   const img=document.getElementById('d-poster');
-  img.src=it.cover?(it.cover.startsWith('http')?it.cover:'/api/huangguo-proxy?url='+encodeURIComponent(it.cover)):'';
+  img.src=it.cover?'/api/huangguo-proxy?url='+encodeURIComponent(it.cover):'';
   document.getElementById('ep-list').innerHTML='';
   document.getElementById('player-wrap').classList.remove('open');
   document.getElementById('detail-overlay').classList.add('open');
