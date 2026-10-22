@@ -312,7 +312,7 @@ app.get('/api/hongguo/relay-play', (req, res) => {
   const seriesId = String(req.query.series_id || '').trim();
   const vid = String(req.query.vid || '').trim();
   if (!seriesId || !vid) return res.status(400).json({ error: '缺少 series_id 或 vid' });
-  const ref = { content_type: 1004, from_video_id: '', series_id: seriesId, vid: vid, video_platform: 3 };
+  const ref = { content_type: 1, from_video_id: '', series_id: seriesId, vid: vid, video_platform: 3 };
   const b64 = Buffer.from(JSON.stringify(ref)).toString('base64');
   const target = 'https://djapi.999888456.xyz/api/hongguo/play?id=' + encodeURIComponent(b64);
   console.log('[relay]', new Date().toISOString(), 'series', seriesId, 'vid', vid);

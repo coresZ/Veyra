@@ -21,7 +21,7 @@ object RelayPlayback {
 
     fun stream(seriesId: String, vid: String): StreamInfo {
         val ref = JSONObject()
-            .put("content_type", 1004)
+            .put("content_type", 1)
             .put("from_video_id", "")
             .put("series_id", seriesId)
             .put("vid", vid)
