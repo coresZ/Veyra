@@ -140,7 +140,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
-        // 2026-10-22：preload/v1 也开始校验签名，改回 video_model/v1 + Signer 完整签名（同搜索链路）。
+        // 2026-10-22：preload/v1 也校验签名了，改用 GuoSigner（新版随机设备 + XOR Gorgon）打 video_model/v1。
         val body = JSONObject()
             .put("video_id", id)
             .put("device_platform", "android")
@@ -148,8 +148,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             .put("need_all_video_definition", true)
             .put("video_platform", 1024)
             .toString()
-        val values = VendorConstants.device.toMutableMap()
-        val signed = signer.sign("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/video_model/v1/", values, body.toByteArray())
+        val signed = GuoSigner.sign("/novel/player/video_model/v1/", body.toByteArray())
         val data = JSONObject(text(signed.url, signed))
         if (data.optInt("code", -1) != 0) throw IOException("播放接口暂不可用")
         val dataObj = data.optJSONObject("data") ?: throw IOException("播放信息为空")
