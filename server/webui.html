@@ -121,7 +121,26 @@ function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t
 document.getElementById('mode-public').onclick=()=>setMode('public');
 document.getElementById('mode-private').onclick=()=>setMode('private');
 document.getElementById('search-input').addEventListener('keydown',e=>{if(e.key==='Enter')doSearch()});
-document.getElementById('btn-settings').onclick=()=>document.getElementById('drawer').classList.toggle('open');
+document.getElementById('btn-settings').onclick=async()=>{
+  document.getElementById('drawer').classList.toggle('open');
+  const open=document.getElementById('drawer').classList.contains('open');
+  if(!open)return;
+  // 打开抽屉时校验 token，过期则清掉并显示登录框
+  if(adminToken){
+    try{
+      const r=await fetch('/api/admin/session',{headers:AUTH()});
+      if(r.ok){
+        document.getElementById('login-area').style.display='none';
+        document.getElementById('admin-area').style.display='block';
+        loadAdmin();
+        return;
+      }
+    }catch(e){}
+    adminToken='';localStorage.removeItem('veyraAdmin');
+  }
+  document.getElementById('login-area').style.display='block';
+  document.getElementById('admin-area').style.display='none';
+};
 document.getElementById('btn-close-detail').onclick=closeDetail;
 document.getElementById('detail-overlay').addEventListener('click',e=>{if(e.target.id==='detail-overlay')closeDetail()});
 
