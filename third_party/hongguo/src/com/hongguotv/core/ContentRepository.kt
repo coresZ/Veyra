@@ -140,39 +140,24 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
-        // 红果取流接口（2026-10-15 变更）：video_model/v1 已对第三方签名静默返回空（风控 200 空 body）。
-        // 改用 multi_video_model/preload/v1（固定设备参数 + 无需签名，hongguo-dl 同款，实测正常返回直链）。
-        val biz = JSONObject()
-            .put("detail_page_version", 0).put("device_level", 3).put("disable_digg_stat", false)
-            .put("need_all_video_definition", true).put("need_mp4_align", false)
-            .put("use_os_player", false).put("use_server_dns", false).put("video_platform", 1024)
-        val payload = JSONObject()
-            .put("biz_param", biz).put("dr_scene", "preload")
-            .put("mixed_video_id_map", JSONObject().put("1004", JSONArray().put(id)))
+        // 2026-10-22：preload/v1 也开始校验签名，改回 video_model/v1 + Signer 完整签名（同搜索链路）。
+        val body = JSONObject()
+            .put("video_id", id)
+            .put("device_platform", "android")
+            .put("need_mp4_align", false)
+            .put("need_all_video_definition", true)
+            .put("video_platform", 1024)
             .toString()
-        val query = STREAM_QUERY.toMutableMap()
-        query["_rticket"] = clock().toString()
-        val queryStr = query.toList().joinToString("&") { (k, v) -> "$k=${Signer.encode(v)}" }
-        val url = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1?$queryStr"
-        val request = Request.Builder().url(url)
-            .header("User-Agent", STREAM_UA)
-            .header("Accept", "application/json; charset=utf-8,application/x-protobuf")
-            .header("Content-Type", "application/json; charset=utf-8")
-            .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
-            .build()
-        val data = JSONObject(RequestScope.execute(http.newCall(request)) { response ->
-            if (!response.isSuccessful) throw IOException("内容请求失败（HTTP ${response.code}）")
-            val body = response.body ?: throw IOException("内容响应为空")
-            if (body.contentLength() > 16 * 1024 * 1024) throw IOException("内容响应过大")
-            val input = body.byteStream(); val out = java.io.ByteArrayOutputStream(); val buffer = ByteArray(8192)
-            while (out.size() <= 16 * 1024 * 1024) { val n = input.read(buffer); if (n < 0) break; out.write(buffer, 0, n) }
-            val bytes = out.toByteArray()
-            if (bytes.size > 16 * 1024 * 1024) throw IOException("内容响应过大")
-            String(bytes, Charsets.UTF_8)
-        })
+        val values = VendorConstants.device.toMutableMap()
+        val signed = signer.sign("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/video_model/v1/", values, body.toByteArray())
+        val data = JSONObject(text(signed.url, signed))
         if (data.optInt("code", -1) != 0) throw IOException("播放接口暂不可用")
-        val item = data.optJSONObject("data")?.optJSONObject(id) ?: throw IOException("播放信息为空")
-        val model = item.optJSONObject("video_model") ?: JSONObject(item.str("video_model"))
+        val dataObj = data.optJSONObject("data") ?: throw IOException("播放信息为空")
+        // video_model/v1: data.video_model 直接是对象；兼容 preload: data.<vid>.video_model
+        val model = dataObj.optJSONObject("video_model")
+            ?: dataObj.optJSONObject(id)?.optJSONObject("video_model")
+            ?: dataObj.optJSONObject(id)?.let { JSONObject(it.str("video_model")) }
+            ?: throw IOException("播放信息为空")
         val rawList = model.opt("video_list")
         val variants = when (rawList) {
             is JSONArray -> (0 until rawList.length()).mapNotNull { rawList.optJSONObject(it) }
