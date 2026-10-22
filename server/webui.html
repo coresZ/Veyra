@@ -111,35 +111,55 @@ video{width:100%;border-radius:10px;background:#000}
 </div>
 <div class="toast" id="toast"></div>
 
+<div id="login-gate" style="position:fixed;inset:0;background:var(--bg);z-index:999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px">
+  <div style="font-size:28px;font-weight:800;color:var(--acc)">Veyra</div>
+  <input type="password" id="gate-pass" placeholder="管理员密码" style="width:280px;background:#0d0f13;border:1px solid var(--line);color:var(--fg);border-radius:10px;padding:12px 16px;font-size:15px;outline:center">
+  <button id="gate-btn" style="background:var(--acc);color:#1a1e26;border:none;border-radius:10px;padding:12px 40px;font-size:15px;font-weight:700;cursor:pointer">进入</button>
+  <div id="gate-err" style="color:var(--err);font-size:13px"></div>
+</div>
+
 <script>
 let mode='public', adminToken=localStorage.getItem('veyraAdmin')||'';
 const AUTH=()=>({Authorization:'Bearer '+adminToken});
 const grid=document.getElementById('grid');
+
+async function gateLogin(){
+  const p=document.getElementById('gate-pass').value;
+  try{
+    const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){document.getElementById('gate-err').textContent=d.error||'密码错误';return}
+    adminToken=d.token;localStorage.setItem('veyraAdmin',adminToken);
+    document.getElementById('login-gate').style.display='none';
+    loadHome();
+  }catch(e){document.getElementById('gate-err').textContent='网络错误'}
+}
+document.getElementById('gate-btn').onclick=gateLogin;
+document.getElementById('gate-pass').addEventListener('keydown',e=>{if(e.key==='Enter')gateLogin()});
+
+// 页面加载时校验已有 token
+(async()=>{
+  if(!adminToken){document.getElementById('gate-pass').focus();return}
+  try{
+    const r=await fetch('/api/admin/session',{headers:AUTH()});
+    if(r.ok){document.getElementById('login-gate').style.display='none';loadHome();return}
+  }catch(e){}
+  adminToken='';localStorage.removeItem('veyraAdmin');
+  document.getElementById('gate-pass').focus();
+})();
 
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',2500)}
 
 document.getElementById('mode-public').onclick=()=>setMode('public');
 document.getElementById('mode-private').onclick=()=>setMode('private');
 document.getElementById('search-input').addEventListener('keydown',e=>{if(e.key==='Enter')doSearch()});
-document.getElementById('btn-settings').onclick=async()=>{
+document.getElementById('btn-settings').onclick=()=>{
   document.getElementById('drawer').classList.toggle('open');
-  const open=document.getElementById('drawer').classList.contains('open');
-  if(!open)return;
-  // 打开抽屉时校验 token，过期则清掉并显示登录框
-  if(adminToken){
-    try{
-      const r=await fetch('/api/admin/session',{headers:AUTH()});
-      if(r.ok){
-        document.getElementById('login-area').style.display='none';
-        document.getElementById('admin-area').style.display='block';
-        loadAdmin();
-        return;
-      }
-    }catch(e){}
-    adminToken='';localStorage.removeItem('veyraAdmin');
+  if(document.getElementById('drawer').classList.contains('open')){
+    document.getElementById('login-area').style.display='none';
+    document.getElementById('admin-area').style.display='block';
+    loadAdmin();
   }
-  document.getElementById('login-area').style.display='block';
-  document.getElementById('admin-area').style.display='none';
 };
 document.getElementById('btn-close-detail').onclick=closeDetail;
 document.getElementById('detail-overlay').addEventListener('click',e=>{if(e.target.id==='detail-overlay')closeDetail()});
