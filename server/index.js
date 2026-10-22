@@ -258,11 +258,11 @@ function extractRouterData(html) {
 function parseSeriesCard(o) {
   return {
     id: String(o.series_id || o.id || ''),
-    title: o.series_title || o.title || o.name || '',
-    cover: o.cover || o.horizontal_cover || o.vertical_cover || '',
-    badge: o.badge || o.episode_count || '',
+    title: o.series_name || o.series_title || o.title || o.name || '',
+    cover: o.series_cover || o.cover || o.horizontal_cover || o.vertical_cover || '',
+    badge: o.episode_cnt != null ? o.episode_cnt + '集' : (o.badge || ''),
     tags: o.tags || o.category_list || [],
-    description: o.description || '',
+    description: o.series_intro || o.description || '',
   };
 }
 
