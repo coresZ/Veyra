@@ -21,7 +21,7 @@ object RelayPlayback {
 
     fun stream(seriesId: String, vid: String): StreamInfo {
         val ref = JSONObject()
-            .put("content_type", 1)
+            .put("content_type", 1004)
             .put("from_video_id", "")
             .put("series_id", seriesId)
             .put("vid", vid)
@@ -43,22 +43,43 @@ object RelayPlayback {
         }
         val jsonStr = decryptV2(body)
         val data = JSONObject(jsonStr)
-        val keyUrls = data.optJSONArray("key_urls") ?: throw IOException("中转未返回播放地址")
-        var best: StreamInfo? = null
-        var bestQuality = -1
-        for (i in 0 until keyUrls.length()) {
-            val item = keyUrls.getJSONObject(i)
-            val mediaUrl = item.optString("src").trim()
-            if (mediaUrl.isEmpty() || !mediaUrl.startsWith("http")) continue
-            val spadeA = item.optString("spade_a")
-            val name = item.optString("name", "")
-            val quality = Regex("[0-9]+").find(name)?.value ?: ""
-            val key = try { deriveKey(spadeA) } catch (e: Exception) { null }
-            val info = StreamInfo(mediaUrl, key, quality)
-            val qNum = quality.toIntOrNull() ?: 0
-            if (qNum > bestQuality) { best = info; bestQuality = qNum }
+        val keyUrls = data.optJSONArray("key_urls")
+        if (keyUrls != null && keyUrls.length() > 0) {
+            var best: StreamInfo? = null
+            var bestQuality = -1
+            for (i in 0 until keyUrls.length()) {
+                val item = keyUrls.getJSONObject(i)
+                val mediaUrl = item.optString("src").trim()
+                if (mediaUrl.isEmpty() || !mediaUrl.startsWith("http")) continue
+                val spadeA = item.optString("spade_a")
+                val name = item.optString("name", "")
+                val quality = Regex("[0-9]+").find(name)?.value ?: ""
+                val key = try { deriveKey(spadeA) } catch (e: Exception) { null }
+                val info = StreamInfo(mediaUrl, key, quality)
+                val qNum = quality.toIntOrNull() ?: 0
+                if (qNum > bestQuality) { best = info; bestQuality = qNum }
+            }
+            if (best != null) return best
         }
-        return best ?: throw IOException("中转未返回可用的媒体地址")
+        // 中转失败，回退到网页播放页抓 360p 预览流
+        return scrapeWebPlayer(seriesId, vid)
+    }
+
+    /** 网页播放页抓流（360p 预览） */
+    private fun scrapeWebPlayer(seriesId: String, vid: String): StreamInfo {
+        val url = "https://hongguoduanju.com/player/$seriesId/$vid"
+        val req = Request.Builder().url(url)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36")
+            .header("Referer", "https://hongguoduanju.com/")
+            .build()
+        val html = http.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw IOException("网页播放页 HTTP ${resp.code}")
+            resp.body?.string() ?: throw IOException("网页播放页为空")
+        }
+        // 提取 mp4 地址
+        val m = Regex("https?://[^\"'<>\\s]+\\.mp4[^\"'<>\\s]*").find(html)
+            ?: throw IOException("网页播放页未找到视频地址")
+        return StreamInfo(m.value, null, "360")
     }
 
     /** v2.<hex>.<base64> 解密 */
