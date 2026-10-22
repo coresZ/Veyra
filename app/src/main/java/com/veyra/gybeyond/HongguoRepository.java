@@ -64,7 +64,7 @@ final class HongguoRepository {
         Detail detail = details.get(id);
         if (detail == null) { detail = upstream.detail(id); details.put(id, detail); }
         if (number < 1 || number > detail.getEpisodes().size()) throw new IllegalArgumentException("无效集数");
-        StreamInfo info = upstream.stream(detail.getEpisodes().get(number - 1), 1080);
+        StreamInfo info = upstream.stream(id, detail.getEpisodes().get(number - 1), 1080);
         HongguoPlayback.register(info);
         JSONObject result = new JSONObject().put("id", id).put("episode", number)
                 .put("source", info.getUrl())

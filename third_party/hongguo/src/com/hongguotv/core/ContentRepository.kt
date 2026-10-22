@@ -138,46 +138,11 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         if(episodes.isEmpty() || episodes.any { !it.matches(Regex("[0-9]{1,30}")) } || episodes.distinct().size!=episodes.size) throw IOException("分集数据异常")
         return Detail(card(o).copy(id=id),episodes)
     }
-    fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
-        require(id.matches(Regex("[0-9]{1,30}")))
-        // 2026-10-22：preload/v1 也校验签名了，改用 GuoSigner（新版随机设备 + XOR Gorgon）打 video_model/v1。
-        val body = JSONObject()
-            .put("video_id", id)
-            .put("device_platform", "android")
-            .put("need_mp4_align", false)
-            .put("need_all_video_definition", true)
-            .put("video_platform", 1024)
-            .toString()
-        val signed = GuoSigner.sign("/novel/player/video_model/v1/", body.toByteArray())
-        val data = JSONObject(text(signed.url, signed))
-        if (data.optInt("code", -1) != 0) throw IOException("播放接口暂不可用")
-        val dataObj = data.optJSONObject("data") ?: throw IOException("播放信息为空")
-        // video_model/v1: data.video_model 直接是对象；兼容 preload: data.<vid>.video_model
-        val model = dataObj.optJSONObject("video_model")
-            ?: dataObj.optJSONObject(id)?.optJSONObject("video_model")
-            ?: dataObj.optJSONObject(id)?.let { JSONObject(it.str("video_model")) }
-            ?: throw IOException("播放信息为空")
-        val rawList = model.opt("video_list")
-        val variants = when (rawList) {
-            is JSONArray -> (0 until rawList.length()).mapNotNull { rawList.optJSONObject(it) }
-            is JSONObject -> rawList.keys().asSequence().mapNotNull { rawList.optJSONObject(it) }.toList()
-            else -> emptyList()
-        }
-        // ByteVC2 资源可能在 Android MP4 extractor 里只有音频没有视频轨，绝不选；只选有直链的清晰度。
-        val rows = variants.filter { o ->
-            o.str("main_url").isNotEmpty() && (o.optJSONObject("video_meta")?.str("codec_type") ?: "").lowercase() !in setOf("bytevc2", "bvc2")
-        }.map { o ->
-            val meta = o.optJSONObject("video_meta")
-            val label = meta?.str("definition").orEmpty().ifEmpty { meta?.str("vheight").orEmpty() }
-            Triple(qualityNumber(label), o, o.str("main_url"))
-        }.sortedByDescending { it.first }
-        if (rows.isEmpty()) throw IOException("没有可用清晰度")
-        val selected = rows.firstOrNull { it.first <= maxQuality } ?: rows.lastOrNull() ?: throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
-        val playUrl = cleanUrl(selected.third)
-        if (!playUrl.startsWith("https://") && !playUrl.startsWith("http://")) throw IOException("播放地址无效")
-        val key = selected.second.optJSONObject("encrypt_info")?.str("spade_a")?.takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
-        val quality = if (selected.first > 0) "${selected.first}P" else "自动"
-        return StreamInfo(playUrl, key, quality)
+    fun stream(seriesId: String, vid: String, maxQuality: Int = 1080): StreamInfo {
+        require(vid.matches(Regex("[0-9]{1,30}")))
+        // 2026-10-22：直连 fqnovel.com 两种签名方案都被风控（200 空 body），
+        // 改用 guoapp 同款中转 API（djapi.999888456.xyz），由中转处理签名。
+        return RelayPlayback.stream(seriesId, vid)
     }
     companion object {
         fun extractRouter(html: String): JSONObject {
