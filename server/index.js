@@ -604,6 +604,18 @@ function kindOf(type, body) {
   if (t.includes('mp2t') || t.includes('mp4') || t.includes('m4s') || t.includes('octet-stream')) return 'video';
   return 'other';
 }
+// 媒体资源（m3u8/ts/mp4/m4s/flv/key）放行任意公网域名（CDN 分片域名无法枚举），但拒绝内网地址防 SSRF
+const MEDIA_PATH_RE = /\.(m3u8|ts|mp4|m4s|flv|key)(\?|#|$)/i;
+function isPrivateHost(hostname) {
+  if (!hostname) return true;
+  const h = hostname.toLowerCase();
+  if (h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.lan')) return true;
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(h)) {
+    const [a, b] = h.split('.').map(Number);
+    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31);
+  }
+  return false;
+}
 app.get('/api/huangguo-proxy', (req, res) => {
   const target = String(req.query.url || '');
   console.log('[proxy]', new Date().toISOString(), 'REQ', (req.headers['user-agent'] || '').slice(0, 24), target.slice(0, 120));
@@ -611,8 +623,13 @@ app.get('/api/huangguo-proxy', (req, res) => {
   try { parsed = new URL(target); } catch { return res.status(400).json({ error: '无效地址' }); }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
     return res.status(400).json({ error: '仅支持 http/https' });
-  if (!HUANGGUO_HOST_RE.test(parsed.hostname))
+  const isMedia = MEDIA_PATH_RE.test(parsed.pathname + parsed.search);
+  if (isMedia) {
+    if (isPrivateHost(parsed.hostname))
+      return res.status(403).json({ error: '媒体代理拒绝内网地址' });
+  } else if (!HUANGGUO_HOST_RE.test(parsed.hostname)) {
     return res.status(403).json({ error: '仅允许黄果站点域名' });
+  }
   const cached = cacheGet(target);
   if (cached) {
     console.log('[proxy]', new Date().toISOString(), 'HIT', cached.type, target.slice(0, 90));

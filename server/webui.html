@@ -339,7 +339,7 @@ function parseHuangguoHtml(html){
   for(const seg of links){
     const href=(seg.match(/href="([^"]+)"/)||[])[1]||'';
     if(!href)continue;
-    const img=(seg.match(/<img[^>]+src="([^"]+)"/i)||[])[1]||'';
+    const img=(seg.match(/<img[^>]+(?:data-src|data-original|data-lazy|src)="([^"]+)"/i)||[])[1]||'';
     const t=(seg.match(/<(?:h\d|p|span|div)[^>]*>([\s\S]*?)<\/(?:h\d|p|span|div)>/i)||[])[1]||'';
     const t2=(seg.match(/\s(title|alt)="([^"]+)"/i)||[])[2]||'';
     const title=(t.replace(/<[^>]+>/g,'').trim())||t2;
@@ -347,7 +347,7 @@ function parseHuangguoHtml(html){
   }
   // 兜底：裸链接 + 相邻 img
   if(!items.length){
-    const re=/<a[^>]+href="([^"]+)"[^>]*>[\s\S]{0,400}?<img[^>]+src="([^"]+)"[^>]*>/gi;
+    const re=/<a[^>]+href="([^"]+)"[^>]*>[\s\S]{0,400}?<img[^>]+(?:data-src|data-original|data-lazy|src)="([^"]+)"[^>]*>/gi;
     let m;
     while((m=re.exec(html))!==null&&items.length<30){
       let href=m[1],cover=m[2];
@@ -507,6 +507,7 @@ function attachPlayer(url,onReady){
   if(_hls){_hls.destroy();_hls=null}
   player.removeAttribute('src');player.load();
   player.onloadedmetadata=()=>{if(onReady)onReady()};
+  player.onerror=()=>{toast('播放失败（错误码 '+(player.error?player.error.code:'?')+'），可在 ⚙ 里切换 直连/后端转发 通道再试');};
   if(/\.m3u8(\?|$)/i.test(url)&&window.Hls&&Hls.isSupported()){
     _hls=new Hls();
     _hls.loadSource(url);
@@ -550,9 +551,8 @@ function playEpisode(j,resumeSec){
   }else{
     if(ep.playUrl){attachPlayer(ep.playUrl,doResume);return}
     const u=ep.detailUrl||_detail.id;
-    fetch('/api/huangguo-proxy?url='+encodeURIComponent(u)).then(r=>r.text()).then(html=>{
-      const src=extractVideoSrc(html,u);
-      if(!src){toast('未解析到播放地址（'+u.slice(0,60)+'）');return}
+    fetch('/api/huangguo-proxy?url='+encodeURIComponent(u)).then(r=>r.text()).then(html=>extractVideoSrcAsync(html,u)).then(src=>{
+      if(!src){toast('未解析到播放地址（'+u.slice(0,60)+'），可尝试在 ⚙ 里切换 直连/后端转发 通道');return}
       const playUrl=proxyUrl(src);
       ep.playUrl=playUrl;
       attachPlayer(playUrl,doResume);
@@ -569,9 +569,33 @@ function extractVideoSrc(html,base){
   // 2) <video>/<source> src
   const vs=html.match(/<video[^>]*>[\s\S]*?<source[^>]+src="([^"]+)"[\s\S]*?<\/video>|<video[^>]+src="([^"]+)"/);
   if(vs){const u=vs[1]||vs[2];if(u)try{return new URL(u,base).toString()}catch{return u}}
-  // 3) iframe/script 里的 m3u8 或 mp4 直链
+  // 3) iframe 播放器：src 本身就是视频直链
+  const im=html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+  if(im){
+    try{const fu=new URL(im[1],base).toString();if(/\.(m3u8|mp4)(\?|$)/i.test(fu))return fu}catch{}
+  }
+  // 4) script/页面里的 m3u8 或 mp4 直链
   const ms=html.match(/https?[^"'\s<>]+\.(m3u8|mp4)(\?[^"'\s<>]*)?/g);
   if(ms&&ms.length)return ms[0];
+  return '';
+}
+
+// 异步取流：直接源失败时，iframe 播放页再抓一层（深度 1）
+async function extractVideoSrcAsync(html,base){
+  const direct=extractVideoSrc(html,base);
+  if(direct)return direct;
+  const im=html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+  if(im){
+    try{
+      const frameUrl=new URL(im[1],base).toString();
+      if(/\.(m3u8|mp4)(\?|$)/i.test(frameUrl))return frameUrl;
+      const r=await fetch('/api/huangguo-proxy?url='+encodeURIComponent(frameUrl));
+      if(!r.ok)return '';
+      const fhtml=await r.text();
+      const s=extractVideoSrc(fhtml,frameUrl);
+      if(s)return s;
+    }catch{}
+  }
   return '';
 }
 
