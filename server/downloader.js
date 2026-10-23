@@ -65,14 +65,14 @@ function loadTasks() {
 }
 /** 按 work 目录分集文件重建任务每集状态：文件在=成功保留，缺失=失败待补下。 */
 function rescanTaskFiles(t) {
-  const dir = safeJoin(DOWNLOAD_DIR, 'work_' + t.id);
+  const dir = taskDir(t);
   t.failedEpisodes = [];
   if (!fs.existsSync(dir)) {
     for (const ep of t.episodes) { ep._ok = false; ep.failed = false; }
     return;
   }
   t.episodes.forEach((ep, i) => {
-    const f = safeJoin(dir, `ep${String(i + 1).padStart(3, '0')}.mp4`);
+    const f = safeJoin(dir, epName(i + 1));
     let ok = false;
     try { ok = fs.existsSync(f) && fs.statSync(f).size > 0; } catch { ok = false; }
     ep._ok = ok;
@@ -99,6 +99,14 @@ function touch(task) { task.updatedAt = Date.now(); storeDirty = true; scheduleF
 function sanitizeName(name) {
   return String(name || '').replace(/[\\/:*?"<>|\r\n\t]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 80) || '未命名';
 }
+/** 任务目录：<下载目录>/<剧名>/，分集与合并产物都在剧名文件夹下（用户可见、好整理）。 */
+function taskDir(t) {
+  return safeJoin(DOWNLOAD_DIR, sanitizeName(t && t.title));
+}
+/** 分集文件名：第01集.mp4（与手机端命名一致） */
+function epName(i) { return `第${String(i).padStart(2, '0')}集.mp4`; }
+/** 分集密文文件名：第01集.enc（下载中间文件，解密后删除） */
+function epEncName(i) { return `第${String(i).padStart(2, '0')}集.enc`; }
 function safeJoin(base, name) {
   const target = path.resolve(base, name);
   if (!target.startsWith(path.resolve(base) + path.sep)) throw new Error('非法路径');
@@ -348,7 +356,7 @@ function startTask(task) {
 }
 
 async function runTask(task) {
-  const dir = safeJoin(DOWNLOAD_DIR, 'work_' + task.id);
+  const dir = taskDir(task);
   const workDir = safeJoin(dir, '.merge-work');
   fs.mkdirSync(workDir, { recursive: true });
   const outName = `${sanitizeName(task.title)}_全${task.episodes.length}集.mp4`;
@@ -420,7 +428,7 @@ async function runTask(task) {
           const item = queue[next++];
           if (!item) break;
           const { ep, idx } = item;
-          const plainFile = safeJoin(dir, `ep${String(idx + 1).padStart(3, '0')}.mp4`); // 明文分集
+          const plainFile = safeJoin(dir, epName(idx + 1)); // 明文分集
           task.progress.episode = idx + 1;
           task.progress.detail = `下载第 ${idx + 1}/${queue.length} 集`;
           touch(task);
@@ -456,7 +464,7 @@ async function runTask(task) {
               if (ep.key) {
                 // 红果 CENC-AES-CTR：完整下载密文后由 ffmpeg -decryption_key 本地解密（与 juku-backend 一致，
                 // ffmpeg mov demuxer 原生支持 CENC，产物为标准明文 MP4；避免对不支持 Range 的服务器直连拉流）
-                const rawFile = safeJoin(dir, `ep${String(idx + 1).padStart(3, '0')}.enc`);
+                const rawFile = safeJoin(dir, epEncName(idx + 1));
                 task.progress.detail = `下载第 ${idx + 1} 集`;
                 touch(task);
                 await downloadWithFallback([ep.url, ...(ep.altUrls || [])], rawFile, headersFor(ep), received => {
@@ -472,7 +480,7 @@ async function runTask(task) {
                   fs.rmSync(rawFile, { force: true });
                 }
               } else {
-                const rawFile = safeJoin(dir, `ep${String(idx + 1).padStart(3, '0')}.enc`);
+                const rawFile = safeJoin(dir, epEncName(idx + 1));
                 await downloadWithFallback([ep.url, ...(ep.altUrls || [])], rawFile, headersFor(ep), received => {
                   if (signal.aborted) return;
                   task.progress.percent = Math.min(98, Math.round((downloaded + Math.min(1, received / 1e8)) / task.episodes.length * 100));
@@ -489,7 +497,7 @@ async function runTask(task) {
               if (Date.now() - started > REDOWNLOAD_TIMEOUT_MS) throw new Error('播放地址超时失效，请重新提交');
               break;
             } catch (err) {
-              fs.rmSync(safeJoin(dir, `ep${String(idx + 1).padStart(3, '0')}.enc`), { force: true });
+              fs.rmSync(safeJoin(dir, epEncName(idx + 1)), { force: true });
               fs.rmSync(plainFile, { force: true });
               attempt++;
               if (attempt > RETRIES) {
@@ -536,13 +544,13 @@ async function mergeStage(task, dir, workDir) {
   const okEpisodes = task.episodes.filter(ep => !ep.failed);
   if (okEpisodes.length === 0) throw new Error('没有可合并的成功分集');
   const outName = `${sanitizeName(task.title)}_全${okEpisodes.length}集.mp4`;
-  const outputPath = safeJoin(DOWNLOAD_DIR, outName);
+  const outputPath = safeJoin(dir, outName);
   task.status = 'merging';
   task.progress.phase = 'merging';
   task.progress.percent = 98;
   task.progress.detail = `开始合并（成功 ${okEpisodes.length} 集${(task.failedEpisodes || []).length ? `，跳过失败 ${task.failedEpisodes.length} 集` : ''}）`;
   touch(task);
-  const files = task.episodes.map((_, i) => safeJoin(dir, `ep${String(i + 1).padStart(3, '0')}.mp4`))
+  const files = task.episodes.map((_, i) => safeJoin(dir, epName(i + 1)))
     .filter((f, i) => !task.episodes[i].failed);
   await mergeEpisodes(files, outputPath, workDir, (percent, detail) => {
     task.progress.percent = percent;
@@ -551,8 +559,17 @@ async function mergeStage(task, dir, workDir) {
   });
   if (task.status === 'canceled') return;
 
-  // 清理分集与中间文件
-  try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  // 清理分集与中间文件（保留合并产物 outputPath 与同剧目录其它产物）
+  try {
+    if (fs.existsSync(dir)) {
+      for (const k of fs.readdirSync(dir)) {
+        if (k === path.basename(outputPath)) continue;
+        if (k.endsWith('.mp4') || k.endsWith('.enc') || k === '.merge-work' || k.endsWith('.ffconcat')) {
+          fs.rmSync(safeJoin(dir, k), { recursive: true, force: true });
+        }
+      }
+    }
+  } catch { /* ignore */ }
   task.status = 'done';
   task.output = outputPath;
   task.progress = { phase: 'done', episode: okEpisodes.length, total: task.episodes.length, percent: 100, detail: '完成' };
@@ -566,7 +583,7 @@ function mergeTask(id, owner, isAdmin) {
   if (!t) return null;
   if (!isAdmin && t.owner && t.owner !== owner) return null;
   if (t.status !== 'ready' && t.status !== 'failed') throw new Error('当前状态不可合并（需先完成下载）');
-  const dir = safeJoin(DOWNLOAD_DIR, 'work_' + id);
+  const dir = taskDir(t);
   const workDir = safeJoin(dir, '.merge-work');
   fs.mkdirSync(workDir, { recursive: true });
   t.error = '';
@@ -671,7 +688,7 @@ function deleteTask(id, owner, isAdmin) {
   t.status = 'canceled';
   t.error = '已取消';
   touch(t);
-  const dir = safeJoin(DOWNLOAD_DIR, 'work_' + id);
+  const dir = taskDir(t);
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
   try {
     if (t.output && fs.existsSync(t.output)) fs.rmSync(t.output, { force: true });

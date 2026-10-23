@@ -29,6 +29,7 @@ const os = require('os');
 const http = require('http');
 const https = require('https');
 const downloader = require('./downloader');
+const hgApp = require('./hongguo-app');
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 // 数据目录：环境变量指定，默认 /data（docker-compose volume 挂载）。
@@ -303,16 +304,96 @@ function parseSearchCard(o) {
   };
 }
 
-app.get('/api/web/hongguo/detail', (req, res) => {
+app.get('/api/web/hongguo/detail', async (req, res) => {
   const id = String(req.query.id || '').trim();
   if (!id) return res.status(400).json({ error: '缺少 id' });
   curlGet('https://hongguoduanju.com/detail/' + id, 10000, (err, html) => {
     if (err) return res.status(502).json({ error: '抓取失败: ' + err.message });
+    let raw;
+    try { raw = extractRouterData(html).loaderData || {}; }
+    catch (e) { return res.status(502).json({ error: '解析失败: ' + e.message }); }
+    // 从详情页 episode_list 提取每集 vid（供 WebUI 播放 /api/web/hongguo/stream）
+    const eps = (raw.detail_page && raw.detail_page.episode_list) || (raw.episode_list) || [];
+    let vids = eps.map(e => String(e && (e.vid || e.id || '')).trim()).filter(v => v);
+    (async () => {
+      if (!vids.length) {
+        try {
+          const det = await hgApp.videoDetail(id);
+          vids = det.vids || [];
+        } catch (e) { console.log('[detail] videoDetail 兜底失败:', e.message); }
+      }
+      res.json({ raw, vids });
+    })();
+  });
+});
+
+// 红果分类页（tab=1 推荐 / 2..N 各题材），WebUI 分类条用
+app.get('/api/web/hongguo/category', (req, res) => {
+  const tab = String(req.query.tab || '1').replace(/[^0-9a-zA-Z]/g, '');
+  curlGet('https://hongguoduanju.com/category?tab=' + encodeURIComponent(tab) + '&sort_type=1', 10000, (err, html) => {
+    if (err) return res.status(502).json({ error: '抓取失败: ' + err.message });
     try {
       const router = extractRouterData(html).loaderData || {};
-      res.json({ raw: router });
+      const section = router.category_page || router.category_$ || {};
+      const cd = section.categoryData || {};
+      const list = section.recommendList || cd.recommendList || [];
+      // 分类 tab 清单：从页面 category_list 提取（含名称与 tab 编号）
+      const tabs = (cd.category_list || cd.categoryList || []).map(c => ({
+        tab: String(c.tab != null ? c.tab : (c.id != null ? c.id : '')),
+        name: String(c.name || c.category_name || ''),
+      })).filter(t => t.name);
+      res.json({ tabs, items: list.map(parseSeriesCard) });
     } catch (e) { res.status(502).json({ error: '解析失败: ' + e.message }); }
   });
+});
+
+// 红果单集播放：签名取流 -> ffmpeg 解密转封装（浏览器不能播 CENC 密文）-> 明文 MP4 直发（sendFile 支持 Range 拖动）
+const { spawn } = require('child_process');
+app.get('/api/web/hongguo/stream', async (req, res) => {
+  const vid = String(req.query.vid || '').trim();
+  if (!vid) return res.status(400).json({ error: '缺少 vid' });
+  const safeVid = vid.replace(/[^a-zA-Z0-9_-]/g, '');
+  const streamDir = path.join(os.tmpdir(), 'veyra-stream');
+  const outFile = path.join(streamDir, safeVid + '.mp4');
+  try { fs.mkdirSync(streamDir, { recursive: true }); } catch { /* ignore */ }
+  if (fs.existsSync(outFile) && fs.statSync(outFile).size > 100000) return res.sendFile(outFile);
+  console.log('[stream]', new Date().toISOString(), 'vid', vid);
+  try {
+    const r = await fetch('http://127.0.0.1:18099/play?vid=' + encodeURIComponent(vid), { timeout: 25000 });
+    const text = await r.text();
+    let raw;
+    try { raw = JSON.parse(text); } catch { return res.status(502).json({ error: '签名器返回非JSON: ' + text.slice(0, 200) }); }
+    if (raw.error) return res.status(502).json({ error: raw.error });
+    const vmStr = raw && raw.data && raw.data.video_model;
+    if (!vmStr) return res.status(502).json({ error: '无 video_model 字段' });
+    let vm;
+    try { vm = typeof vmStr === 'string' ? JSON.parse(vmStr) : vmStr; }
+    catch { return res.status(502).json({ error: 'video_model 解析失败' }); }
+    const list = vm.video_list || [];
+    if (!list.length) return res.status(502).json({ error: 'video_list 为空' });
+    const order = { '1080p': 5, '720p': 4, '540p': 3, '480p': 2, '360p': 1 };
+    list.sort((a, b) => (order[b.video_meta && b.video_meta.definition] || 0) - (order[a.video_meta && a.video_meta.definition] || 0));
+    const best = list[0];
+    const mainUrl = best.main_url || best.backup_url;
+    if (!mainUrl) return res.status(502).json({ error: '取流地址为空' });
+    const key = (best.encrypt_info && best.encrypt_info.key) || (vm.encrypt && vm.encrypt.key) || '';
+    const args = ['-hide_banner', '-loglevel', 'error', '-y'];
+    if (key && /^[0-9a-fA-F]{32}$/.test(key)) args.push('-decryption_key', key.toLowerCase());
+    args.push('-i', mainUrl, '-c', 'copy', '-movflags', '+faststart', '-f', 'mp4', outFile);
+    await new Promise((resolve, reject) => {
+      const p = spawn('ffmpeg', args, { timeout: 300000 });
+      let err = '';
+      p.stderr.on('data', d => { err += d.toString(); if (err.length > 4096) err = err.slice(-4096); });
+      p.on('close', code => code === 0 ? resolve() : reject(new Error('转封装失败: ' + err.slice(-300))));
+      p.on('error', reject);
+    });
+    if (!fs.existsSync(outFile) || fs.statSync(outFile).size < 100000) throw new Error('转封装无有效输出');
+    console.log('[stream] OK', vid, fs.statSync(outFile).size);
+    res.sendFile(outFile);
+  } catch (e) {
+    console.log('[stream] ERR', vid, e.message);
+    res.status(502).json({ error: '播放取流失败: ' + e.message });
+  }
 });
 
 // 红果中转取流代理：手机直连 djapi.999888456.xyz 被墙，由后端转发
