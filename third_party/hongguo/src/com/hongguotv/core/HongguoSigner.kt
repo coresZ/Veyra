@@ -242,7 +242,8 @@ object HongguoSigner {
         msg = appendVarintField(msg, 11, 0)
         msg = appendVarintField(msg, 12, stamp * 2)
         val bodyStub = md5(body)
-        msg = appendBytesField(msg, 13, bodyStub.copyOfRange(0, 6))
+        val bodyHash = sm3(bodyStub)
+        msg = appendBytesField(msg, 13, bodyHash.copyOfRange(0, 6))
         val queryHash = sm3(rawQuery.toByteArray())
         msg = appendBytesField(msg, 14, queryHash.copyOfRange(0, 6))
         // nested counters: field 1 = 1, field 2 = 1, field 3 = 1, field 7 = 3348294860
@@ -336,18 +337,21 @@ object HongguoSigner {
     private fun makeLadon(aid: String, stamp: Long, prefix: ByteArray): String {
         val digest = md5(prefix + aid.toByteArray())
         val hexStr = md5Hex(digest)
-        val digestBytes = hexDecode(hexStr)
+        // Go: digest = []byte(hex.EncodeToString(hash)) — ASCII bytes of hex string
+        val digestBytes = hexStr.toByteArray(Charsets.US_ASCII)
         var left = littleEndianLong(digestBytes, 0)
         var right = littleEndianLong(digestBytes, 8)
-        var q0 = littleEndianLong(digestBytes, 16)
-        var q1 = littleEndianLong(digestBytes, 24)
+        // FIFO queue: initial [digest[16:], digest[24:]]
+        val queue = ArrayDeque<Long>()
+        queue.addLast(littleEndianLong(digestBytes, 16))
+        queue.addLast(littleEndianLong(digestBytes, 24))
         val keys = LongArray(34)
         for (i in 0 until 34) {
             keys[i] = left
             val mixed = (rotL64(right, -8) + left) xor i.toLong()
-            q0 = q1; q1 = mixed
+            queue.addLast(mixed)
             left = mixed xor rotL64(left, 3)
-            right = q0
+            right = queue.removeFirst()
         }
         val plain = ("$stamp-1611921764-$aid").toByteArray()
         val padded = pkcs7Pad(plain, 16)
