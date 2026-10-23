@@ -69,9 +69,15 @@ object HongguoSigner {
             .build()
 
         http.newCall(req).execute().use { resp ->
-            val text = resp.body?.string() ?: throw IOException("空响应")
+            val text = resp.body?.string() ?: ""
+            val headers = resp.headers.joinToString("; ") { "${it.first}=${it.second}" }
+            if (text.isBlank()) {
+                throw IOException("空响应 HTTP ${resp.code} len=${text.length} headers=[$headers] gorgon=${gorgon.take(20)}...")
+            }
             if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}: ${text.take(300)}")
-            val json = JSONObject(text)
+            val json = try { JSONObject(text) } catch (e: Exception) {
+                throw IOException("JSON解析失败 HTTP ${resp.code} body=${text.take(200)}")
+            }
             val baseCode = json.optJSONObject("BaseResp")?.optInt("StatusCode", -1) ?: -1
             if (baseCode != 0) throw IOException("BaseResp=$baseCode ${json.optJSONObject("BaseResp")?.optString("StatusMessage","")}")
             val vmStr = json.optJSONObject("data")?.optString("video_model")
@@ -162,64 +168,14 @@ object HongguoSigner {
         return r
     }
 
-    // ---- SM3 ----
+    // ---- SM3 (BouncyCastle, 消除手写移植误差) ----
     private fun sm3(input: ByteArray): ByteArray {
-        val length = input.size * 8L
-        var data = input.toMutableList()
-        data.add(0x80.toByte())
-        while (data.size % 64 != 56) data.add(0)
-        // big endian length
-        for (i in 7 downTo 0) data.add(((length shr (i * 8)) and 0xFF).toByte())
-
-        var v0: Int = 0x7380166f.toInt()
-        var v1: Int = 0x4914b2b9.toInt()
-        var v2: Int = 0x172442d7
-        var v3: Int = 0xda8a0600.toInt()
-        var v4: Int = 0xa96f30bc.toInt()
-        var v5: Int = 0x163138aa
-        var v6: Int = 0xe38dee4d.toInt()
-        var v7: Int = 0xb0fb0e4e.toInt()
-
-        for (off in 0 until data.size step 64) {
-            val w = IntArray(68)
-            for (i in 0 until 16) {
-                w[i] = ((data[off + i * 4].toInt() and 0xFF) shl 24) or
-                       ((data[off + i * 4 + 1].toInt() and 0xFF) shl 16) or
-                       ((data[off + i * 4 + 2].toInt() and 0xFF) shl 8) or
-                       (data[off + i * 4 + 3].toInt() and 0xFF)
-            }
-            for (i in 16 until 68) {
-                val v = w[i - 16] xor w[i - 9] xor rotL32(w[i - 3], 15)
-                w[i] = v xor rotL32(v, 15) xor rotL32(v, 23) xor rotL32(w[i - 13], 7) xor w[i - 6]
-            }
-            var a: Int = v0; var b: Int = v1; var c: Int = v2; var d: Int = v3
-            var e: Int = v4; var f: Int = v5; var g: Int = v6; var h: Int = v7
-            for (i in 0 until 64) {
-                val t: Int = if (i < 16) 0x79cc4519 else 0x7a879d8a.toInt()
-                val ff: Int = if (i < 16) a xor b xor c else (a and b) or (a and c) or (b and c)
-                val gg: Int = if (i < 16) e xor f xor g else (e and f) or (e.inv() and g)
-                val ss1: Int = rotL32(rotL32(a, 12) + e + rotL32(t, i), 7)
-                val tt1: Int = ff + d + (ss1 xor rotL32(a, 12)) + (w[i] xor w[i + 4])
-                val tt2: Int = gg + h + ss1 + w[i]
-                d = c; c = rotL32(b, 9); b = a; a = tt1
-                h = g; g = rotL32(f, 19); f = e
-                e = tt2 xor rotL32(tt2, 9) xor rotL32(tt2, 17)
-            }
-            v0 = a xor v0; v1 = b xor v1; v2 = c xor v2; v3 = d xor v3
-            v4 = e xor v4; v5 = f xor v5; v6 = g xor v6; v7 = h xor v7
-        }
-        val result = ByteArray(32)
-        val vals = intArrayOf(v0, v1, v2, v3, v4, v5, v6, v7)
-        for (i in 0 until 8) {
-            result[i * 4] = ((vals[i] shr 24) and 0xFF).toByte()
-            result[i * 4 + 1] = ((vals[i] shr 16) and 0xFF).toByte()
-            result[i * 4 + 2] = ((vals[i] shr 8) and 0xFF).toByte()
-            result[i * 4 + 3] = (vals[i] and 0xFF).toByte()
-        }
-        return result
+        val digest = org.bouncycastle.crypto.digests.SM3Digest()
+        digest.update(input, 0, input.size)
+        val out = ByteArray(digest.digestSize)
+        digest.doFinal(out, 0)
+        return out
     }
-
-    private fun rotL32(v: Int, n: Int): Int = ((v shl n) or (v ushr (32 - n)))
 
     // ---- X-Argus ----
     private fun makeArgus(rawQuery: String, body: ByteArray, stamp: Long, deviceId: String, nonce: ByteArray): String {
