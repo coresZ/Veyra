@@ -4,7 +4,7 @@
 // POST /novel/player/video_model/v1/，最高 1080p。
 'use strict';
 
-const { execFile } = require('child_process');
+const { spawn } = require('child_process');
 const path = require('path');
 
 const BASE = 'https://api5-normal-sinfonlineb.fqnovel.com';
@@ -38,13 +38,16 @@ function qualityNumber(value) {
 function callSigner(rawQuery, bodyStr) {
   return new Promise((resolve, reject) => {
     const stamp = Math.floor(Date.now() / 1000);
-    const input = rawQuery + '\n' + bodyStr;
-    execFile(SIGNER_BIN, [String(stamp), DEVICE_ID], {
-      input, maxBuffer: 4 * 1024 * 1024, timeout: 10000,
-    }, (err, stdout) => {
-      if (err) return reject(new Error('签名器执行失败: ' + err.message));
+    const child = spawn(SIGNER_BIN, [String(stamp), DEVICE_ID], { timeout: 10000 });
+    const stdout = [], stderr = [];
+    child.stdout.on('data', c => { if (stdout.length < 128) stdout.push(c); });
+    child.stderr.on('data', c => stderr.push(c));
+    child.on('error', reject);
+    child.on('close', code => {
+      if (code !== 0) return reject(new Error('签名器执行失败 exit=' + code + ': ' + Buffer.concat(stderr).toString('utf8').slice(0, 300)));
+      const text = Buffer.concat(stdout).toString('utf8');
       const headers = {};
-      for (const line of stdout.trim().split('\n')) {
+      for (const line of text.trim().split('\n')) {
         const eq = line.indexOf('=');
         if (eq < 0) continue;
         const k = line.slice(0, eq).toLowerCase();
@@ -56,6 +59,7 @@ function callSigner(rawQuery, bodyStr) {
       }
       resolve(headers);
     });
+    child.stdin.end(rawQuery + '\n' + bodyStr);
   });
 }
 

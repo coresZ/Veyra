@@ -466,6 +466,8 @@ final class DownloadManager {
             if (mergedOk) {
                 task.status = "done"; task.percent = 100;
                 task.detail = "完成（已合并）";
+                // 合并成功：删除分集（app 私有 ep*.mp4/norm_* + 公共 Downloads 第XX集.mp4），只保留合并产物
+                deleteEpisodesAfterMerge(task, subDir);
             } else {
                 // 合并失败：状态置 failed → 下载列表显示「重试」按钮（分集已导出保留，
                 // 点重试会复用已下载分集直接合并，无需重新下载）。
@@ -957,6 +959,49 @@ final class DownloadManager {
     }
 
     // ---- 导出到公共 Download（MediaStore，API 29+；旧版回退 app 专属目录）----
+
+    /** 合并成功后清理分集：删除 app 私有分集（ep*.mp4 / norm_*.mp4）与公共 Downloads 分集（第XX集.mp4），
+     *  只保留合并产物。合并失败/未合并不动，保证可重试。 */
+    private void deleteEpisodesAfterMerge(Task t, String subDir) {
+        try {
+            File dir = new File(context.getFilesDir(), "downloads/" + t.id);
+            if (dir.exists()) {
+                File[] kids = dir.listFiles();
+                if (kids != null) for (File f : kids) {
+                    String n = f.getName();
+                    if (f.isFile() && (n.startsWith("ep") || n.startsWith("norm_"))) f.delete();
+                }
+            }
+            if (Build.VERSION.SDK_INT >= 29) {
+                String rel = Environment.DIRECTORY_DOWNLOADS + "/Veyra"
+                        + (subDir == null || subDir.isEmpty() ? "" : "/" + subDir);
+                try (android.database.Cursor c = context.getContentResolver().query(
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        new String[]{MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME},
+                        MediaStore.Downloads.RELATIVE_PATH + "=?", new String[]{rel}, null)) {
+                    if (c != null) {
+                        while (c.moveToNext()) {
+                            String name = c.getString(1);
+                            if (name != null && name.matches("第\\d+集\\.mp4")) {
+                                try {
+                                    context.getContentResolver().delete(
+                                            ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)),
+                                            null, null);
+                                } catch (Exception ignored) { }
+                            }
+                        }
+                    }
+                } catch (Exception ignored) { }
+            } else {
+                File pub = new File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "Veyra/" + subDir);
+                File[] kids = pub.listFiles();
+                if (kids != null) for (File f : kids) {
+                    if (f.isFile() && f.getName().matches("第\\d+集\\.mp4")) f.delete();
+                }
+            }
+        } catch (Exception ignored) { }
+    }
+
     private Uri exportToDownloads(File file, String subDir, String displayName) throws Exception {
         if (Build.VERSION.SDK_INT >= 29) {
             // 先清理同名旧条目：MediaStore insert 遇同名（残留/删除未及时完成）会自动追加 "_时间戳"
@@ -1036,6 +1081,7 @@ final class DownloadManager {
                             String name = c.getString(1);
                             if (name == null) continue;
                             boolean hit = name.equals(displayBase)
+                                    || name.matches("第\\d+集\\.mp4")   // 分集（下载后解密导出）
                                     || (!base.isEmpty() && name.length() > displayBase.length()
                                     && name.startsWith(displayBase) && name.charAt(displayBase.length()) == '_'
                                     && name.endsWith(".mp4"));
@@ -1060,7 +1106,7 @@ final class DownloadManager {
                 if (dir.exists() && dir.isDirectory()) {
                     File[] kids = dir.listFiles();
                     if (kids != null) for (File f : kids) {
-                        if (f.isFile() && f.getName().endsWith(".mp4")) f.delete();
+                        if (f.isFile() && (f.getName().endsWith(".mp4") || f.getName().matches("第\\d+集\\.mp4"))) f.delete();
                     }
                     String[] left = dir.list();
                     if (left == null || left.length == 0) dir.delete();
