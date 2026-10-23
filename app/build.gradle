@@ -7,7 +7,7 @@ android {
     compileSdk 37
 
     defaultConfig {
-        applicationId 'com.veyra.gybeyond'
+        applicationId 'com.veyra.gybeyond.test'
         minSdk 26
         targetSdk 36
         versionCode 176
