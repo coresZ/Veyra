@@ -300,12 +300,6 @@ final class DownloadManager {
                         else downloadPlain(task, url, out, dlBytes, totalBytes, n);
                         ep.put("dlv", "raw-v2");   // 标记新格式（随任务持久化，重试时据此判定可复用）
                         plainArr[idx] = out;
-                        // 每集下载完立即导出到公共 Downloads/Veyra/<剧名>/，文件管理器立即可见
-                        try {
-                            String subDir = task.title.replaceAll("[\\\\/:*?\"<>|]", "_");
-                            String epName = String.format(Locale.US, "第%02d集.mp4", idx + 1);
-                            exportToDownloads(out, subDir, epName);
-                        } catch (Exception ignored) {}
                         int f = finished.incrementAndGet();
                         task.doneCount = f;
                         task.detail = "下载中 " + f + "/" + n + " 集完成（并发 " + DL_CONCURRENCY + "）";
@@ -332,12 +326,40 @@ final class DownloadManager {
             for (File f : plainArr) if (f != null) plain.add(f);
             if (plain.size() != n) throw new java.io.IOException("部分分集下载失败（" + plain.size() + "/" + n + "）");
             if (task.canceled) return;
-            // 手动合并：下载完成只保存分集（app 私有目录），等待用户在下载管理里点「合并」再合并导出。
-            // 不再自动合并，避免"下完一批就自动合并，无法分批下载"的问题。
+            // 下载完成后：逐集 ffmpeg 解密归一化并导出到公共 Downloads（文件管理器立即可见可播）
+            String subDir = task.title.replaceAll("[\\\\/:*?\"<>|]", "_");
+            StringBuilder outList = new StringBuilder();
+            for (int i = 0; i < plain.size(); i++) {
+                if (task.canceled) return;
+                task.percent = 90 + Math.min(9, (int) ((i + 1) * 9.0 / Math.max(1, plain.size())));
+                task.detail = "解密导出 第" + (i + 1) + "/" + n + "集";
+                task.doneCount = i + 1;
+                JSONObject ep = task.episodes.optJSONObject(i);
+                String key = ep != null ? ep.optString("key", "") : "";
+                try {
+                    File norm = new File(dir, "norm_" + (i + 1) + ".mp4");
+                    if (!norm.exists() || norm.length() == 0) {
+                        List<File> single = new ArrayList<>();
+                        single.add(plain.get(i));
+                        List<String> singleKey = new ArrayList<>();
+                        singleKey.add(key);
+                        StringBuilder dbg = new StringBuilder();
+                        FFmpegConcat.concat(single, singleKey, norm, "hev1", dbg,
+                            new File(context.getFilesDir(), "native.log"));
+                    }
+                    String epName = String.format(Locale.US, "第%02d集.mp4", i + 1);
+                    Uri u = exportToDownloads(norm, subDir, epName);
+                    if (u != null) { if (outList.length() > 0) outList.append('|'); outList.append(u); }
+                    // 删除临时归一化文件（公共 Downloads 已有副本）
+                    norm.delete();
+                } catch (Exception ex) {
+                    // 单集导出失败不阻塞任务，原始密文仍在 app 私有目录供合并
+                }
+            }
             task.status = "ready";
             task.percent = 100;
             task.detail = "已下载 " + n + " 集，待合并";
-            task.output = "";
+            task.output = outList.toString();
             persist();
             return;
         } catch (Exception e) {
