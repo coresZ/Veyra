@@ -300,6 +300,12 @@ final class DownloadManager {
                         else downloadPlain(task, url, out, dlBytes, totalBytes, n);
                         ep.put("dlv", "raw-v2");   // 标记新格式（随任务持久化，重试时据此判定可复用）
                         plainArr[idx] = out;
+                        // 每集下载完立即导出到公共 Downloads/Veyra/<剧名>/，文件管理器立即可见
+                        try {
+                            String subDir = task.title.replaceAll("[\\\\/:*?\"<>|]", "_");
+                            String epName = String.format(Locale.US, "第%02d集.mp4", idx + 1);
+                            exportToDownloads(out, subDir, epName);
+                        } catch (Exception ignored) {}
                         int f = finished.incrementAndGet();
                         task.doneCount = f;
                         task.detail = "下载中 " + f + "/" + n + " 集完成（并发 " + DL_CONCURRENCY + "）";

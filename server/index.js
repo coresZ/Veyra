@@ -281,19 +281,27 @@ app.get('/api/web/hongguo/home', (req, res) => {
 app.get('/api/web/hongguo/search', (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.json({ items: [] });
-  curlGet('https://hongguoduanju.com/search/' + encodeURIComponent(q), 10000, (err, html) => {
+  curlGet('https://hongguoduanju.com/api/search/result?query=' + encodeURIComponent(q) + '&page=1&page_size=20', 10000, (err, html) => {
     if (err) return res.status(502).json({ error: '搜索失败: ' + err.message });
     try {
-      const router = extractRouterData(html).loaderData || {};
-      const keys = Object.keys(router);
-      let list = [];
-      for (const k of keys) {
-        if (k.startsWith('search')) { list = router[k].searchList || router[k].data || []; break; }
-      }
-      res.json({ items: list.map(parseSeriesCard) });
+      const json = JSON.parse(html);
+      const list = json.searchList || [];
+      res.json({ items: list.map(parseSearchCard) });
     } catch (e) { res.status(502).json({ error: '解析失败: ' + e.message }); }
   });
 });
+
+function parseSearchCard(o) {
+  const vd = o.video_data || {};
+  return {
+    id: String(vd.series_id || o.keyword || ''),
+    title: vd.series_title || o.name || '',
+    cover: vd.series_cover || '',
+    badge: vd.episode_right_text || (vd.episode_cnt ? vd.episode_cnt + '集' : ''),
+    tags: (vd.category_list || []).map(c => c.name).filter(Boolean),
+    description: vd.series_intro || '',
+  };
+}
 
 app.get('/api/web/hongguo/detail', (req, res) => {
   const id = String(req.query.id || '').trim();

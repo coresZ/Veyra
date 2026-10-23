@@ -1,27 +1,25 @@
 // 红果 App 官方接口取流（视频直链 + CENC 解密密钥）。
-// 2026-10-15 变更：video_model/v1 + 签名接口已被红果对第三方静默风控（HTTP 200 空 body）。
-// 改用 multi_video_model/preload/v1（无签名 + 固定设备参数，与 hongguo-dl 同款，实测正常）：
-//   - 固定设备 query（klink_egdi/iid/device_id/cdid…，对齐 hongguo-dl 客户端固定设备），无 X-Gorgon 等签名
-//   - video_detail/v1 拿全集 vid 列表；multi_video_model/preload/v1 单集取流，多清晰度选 ≤1080 最高档
-//   - spade_a → deriveKey → CENC 密钥（ffmpeg -decryption_key 原生解密）
+// 2026-10-23 变更：弃用无签名 multi_video_model/preload/v1（已被风控空响应），
+// 改为与 APK 完全一致的签名链路：调用本地 Go 二进制 hongguo_sign 生成 X-Gorgon/X-Argus/X-Ladon，
+// POST /novel/player/video_model/v1/，最高 1080p。
 'use strict';
 
+const { execFile } = require('child_process');
+const path = require('path');
+
 const BASE = 'https://api5-normal-sinfonlineb.fqnovel.com';
-const UA = 'com.phoenix.read/71532 (Linux; U; Android 9; SM-N9860; Build/PQ3A.190705.10241111;tt-ok/3.12.13.20)';
-// 固定设备参数（hongguo-dl 同款；无签名接口依赖这些参数取流）
-const COMMON_QUERY = {
-  klink_egdi: 'AAI29o4dI-eMiO73_SRSbZ_0By1v3fUSriNeu8-L951MoXhWT88pzj5B',
-  iid: '3788260546453235', device_id: '538083340353620', ac: 'wifi',
-  channel: 'oppo_8662_64', aid: '8662', app_name: 'novelread',
-  version_code: '71532', version_name: '7.1.5.32', device_platform: 'android',
-  os: 'android', ssmix: 'a', device_type: 'SM-N9860', device_brand: 'Samsung',
-  language: 'zh', os_api: '28', os_version: '9', manifest_version_code: '71532',
-  resolution: '900*1600', dpi: '320', update_version_code: '71532',
-  host_abi: 'arm64-v8a', dragon_device_type: 'pad', pv_player: '71532',
-  compliance_status: '0', need_personal_recommend: '1', player_so_load: '1',
-  is_android_pad_screen: '0', rom_version: 'PQ3A.190705.10241111+release-keys',
-  cdid: 'b4f93387-5319-4134-aab9-2cd4e9279b8f',
+const UA = 'com.phoenix.read/73532 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
+// 与 APK HongguoSigner 完全一致的固定设备参数
+const FIXED_DEVICE = {
+  ac: 'wifi', aid: '8662', app_name: 'novelread', channel: 'update_64',
+  device_brand: 'Redmi', device_id: '2720754845237044145', device_platform: 'android',
+  device_type: '25053RT47C', dpi: '520', iid: '2684923656717301508', language: 'zh',
+  manifest_version_code: '73532', os: 'android', os_api: '36', os_version: '16',
+  resolution: '1280*2772', ssmix: 'a', update_version_code: '73532',
+  version_code: '73532', version_name: '7.3.5.32',
 };
+const DEVICE_ID = FIXED_DEVICE.device_id;
+const SIGNER_BIN = path.join(__dirname, 'hongguo_sign');
 
 const QUALITY = {
   2160: 2160, 1440: 1440, 1080: 1080, 720: 720, 576: 576, 540: 540, 480: 480, 360: 360,
@@ -36,15 +34,50 @@ function qualityNumber(value) {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-/** 无签名 POST：固定设备 query + _rticket。path 如 /novel/player/multi_video_model/preload/v1 */
-function request(path, bodyBytes) {
-  const params = { ...COMMON_QUERY, _rticket: String(Date.now()) };
-  // 与 Kotlin qenc 一致：`*` 不编码（Java URLEncoder 会编成 %2A，红果按未编码 query 校验）
-  const qs = Object.keys(params).map(k => `${k}=${encodeURIComponent(params[k]).replace(/%2A/gi, '*').replace(/%7E/g, '~')}`).join('&');
-  const url = `${BASE}${path}?${qs}`;
+/** 调用本地 Go 签名器，返回 {gorgon, argusB64, ladonB64, nonce} */
+function callSigner(rawQuery, bodyStr) {
+  return new Promise((resolve, reject) => {
+    const stamp = Math.floor(Date.now() / 1000);
+    const input = rawQuery + '\n' + bodyStr;
+    execFile(SIGNER_BIN, [String(stamp), DEVICE_ID], {
+      input, maxBuffer: 4 * 1024 * 1024, timeout: 10000,
+    }, (err, stdout) => {
+      if (err) return reject(new Error('签名器执行失败: ' + err.message));
+      const headers = {};
+      for (const line of stdout.trim().split('\n')) {
+        const eq = line.indexOf('=');
+        if (eq < 0) continue;
+        const k = line.slice(0, eq).toLowerCase();
+        const v = line.slice(eq + 1);
+        if (k === 'gorgon') headers['X-Gorgon'] = v;
+        else if (k === 'argus') headers['X-Argus'] = Buffer.from(v, 'hex').toString('base64');
+        else if (k === 'ladon') headers['X-Ladon'] = Buffer.from(v, 'hex').toString('base64');
+        else if (k === 'nonce') headers['X-Khronos'] = v;
+      }
+      resolve(headers);
+    });
+  });
+}
+
+/** 构造与 APK 一致的 query string（不编码 * 和 ~） */
+function buildQuery() {
+  const params = { ...FIXED_DEVICE, _rticket: String(Date.now()) };
+  return Object.keys(params)
+    .map(k => `${k}=${encodeURIComponent(params[k]).replace(/%2A/gi, '*').replace(/%7E/gi, '~')}`)
+    .join('&');
+}
+
+/** 签名 POST：调用 Go 签名器生成 headers，POST 到 fqnovel */
+async function signedPost(path, bodyObj) {
+  const bodyStr = JSON.stringify(bodyObj);
+  const rawQuery = buildQuery();
+  const signHeaders = await callSigner(rawQuery, bodyStr);
+  const url = `${BASE}${path}?${rawQuery}`;
   const headers = {
-    'User-Agent': UA, Accept: 'application/json, application/x-protobuf',
-    'Content-Type': 'application/json; charset=utf-8',
+    ...signHeaders,
+    'User-Agent': UA,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
   };
   return new Promise((resolve, reject) => {
     const u = new URL(url);
@@ -53,28 +86,25 @@ function request(path, bodyBytes) {
       const chunks = [];
       res.on('data', c => chunks.push(c));
       res.on('end', () => {
-        try {
-          const json = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          if (json.Code !== undefined && json.Code !== 0 && json.Code !== '0') {
-            return reject(new Error(`红果接口错误 Code=${json.Code} ${json.msg || json.message || ''}`.trim()));
-          }
-          if (json.code !== undefined && json.code !== 0 && json.code !== '0' && json.code !== 101000) {
-            // 101000 服务异常在取流时由调用方降级；这里照常返回让上层判定
-          }
-          resolve(json);
-        } catch (e) { reject(new Error('红果接口响应解析失败')); }
+        const text = Buffer.concat(chunks).toString('utf8');
+        if (res.statusCode !== 200) {
+          return reject(new Error(`HTTP ${res.statusCode} len=${text.length}`));
+        }
+        if (!text.trim()) return reject(new Error('空响应（签名被风控）'));
+        try { resolve(JSON.parse(text)); }
+        catch { reject(new Error('响应解析失败: ' + text.slice(0, 200))); }
       });
     });
     req.on('error', reject);
-    req.setTimeout(20000, () => { req.destroy(new Error('红果接口超时')); });
-    req.end(bodyBytes);
+    req.setTimeout(20000, () => req.destroy(new Error('请求超时')));
+    req.write(bodyStr);
+    req.end();
   });
 }
 
 /** 详情：拿全集 vid 列表（与下载集序对齐：vids[i] = 第 i+1 集）。 */
 async function videoDetail(seriesId) {
-  const body = Buffer.from(JSON.stringify({ series_id: String(seriesId) }), 'utf8');
-  const json = await request('/novel/player/video_detail/v1/', body);
+  const json = await signedPost('/novel/player/video_detail/v1/', { series_id: String(seriesId) });
   const vd = (json.data || {}).video_data || {};
   const list = vd.video_list || [];
   if (!Array.isArray(list) || list.length === 0) throw new Error('红果详情未返回分集列表');
@@ -83,30 +113,20 @@ async function videoDetail(seriesId) {
   return { vids, title: vd.series_title || '' };
 }
 
-/** 单集取流：多清晰度选 ≤1080 最高档（与 Kotlin stream(maxQuality=1080) 一致），返回 { url, altUrls, key }。 */
+/** 单集取流：签名调用 video_model/v1，选 ≤1080 最高档非 bytevc2。 */
 async function videoModel(vid) {
-  const body = Buffer.from(JSON.stringify({
-    biz_param: {
-      detail_page_version: 0, device_level: 3, disable_digg_stat: false,
-      need_all_video_definition: true, need_mp4_align: false,
-      use_os_player: false, use_server_dns: false, video_platform: 1024,
-    },
-    dr_scene: 'preload',
-    mixed_video_id_map: { 1004: [String(vid)] },
-  }), 'utf8');
-  const json = await request('/novel/player/multi_video_model/preload/v1', body);
-  if (json.Code !== undefined && json.Code !== 0 && json.Code !== '0') throw new Error(`取流拒绝 Code=${json.Code}`);
-  // preload 返回结构：data[vid].video_model（JSON 字符串，内部才是多清晰度列表）
-  const entry = (json.data || {})[String(vid)] || {};
-  let model = entry.video_model || {};
-  // 红果返回的 video_model 是 JSON 字符串（内部才是多清晰度列表），需先 parse
-  if (typeof model === 'string') {
-    try { model = JSON.parse(model); } catch { model = {}; }
-  }
-  const rawList = model.video_list;
-  const variants = Array.isArray(rawList) ? rawList : Object.values(rawList || {});
-  // 收集变体全部播放地址（main_url + backup_url 系列，兼容 base64 编码）——与 guoapp/juku 一致，
-  // main CDN 域被拒/不可达时用备用 CDN 域，避免整集降级网页源
+  const json = await signedPost('/novel/player/video_model/v1/', {
+    biz_param: { need_all_video_definition: true, video_platform: 3 },
+    content_type: 1,
+    video_id: String(vid),
+  });
+  const vmStr = (json.data || {}).video_model;
+  if (!vmStr) throw new Error('无 video_model 字段');
+  let vm;
+  try { vm = typeof vmStr === 'string' ? JSON.parse(vmStr) : vmStr; }
+  catch { throw new Error('video_model 解析失败'); }
+  const variants = vm.video_list || [];
+  if (!variants.length) throw new Error('video_list 为空');
   const collectUrls = o => {
     const out = [], seen = new Set();
     const add = value => {
@@ -123,15 +143,10 @@ async function videoModel(vid) {
     }
     return out;
   };
-  // ByteVC2 资源在 Android extractor 只有音频没视频轨，绝不选
   const rows = variants
-    .map(o => {
-      const urls = collectUrls(o);
-      const meta = o.video_meta || {};
-      const label = meta.definition || meta.vheight || '';
-      return { q: qualityNumber(label), urls, meta, o };
-    })
-    .filter(r => r.urls.length > 0 && !/bytevc2|bvc2/i.test(((r.meta || {}).codec_type) || ''))
+    .map(o => ({ urls: collectUrls(o), meta: o.video_meta || {}, o }))
+    .map(r => ({ ...r, q: qualityNumber(r.meta.definition || r.meta.vheight || '') }))
+    .filter(r => r.urls.length > 0 && !/bytevc2|bvc2/i.test((r.meta.codec_type || '')))
     .sort((a, b) => b.q - a.q);
   if (rows.length === 0) throw new Error('没有可用清晰度');
   const selected = rows.find(r => r.q <= 1080) || rows[rows.length - 1];

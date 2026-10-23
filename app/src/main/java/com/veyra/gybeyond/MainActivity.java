@@ -132,6 +132,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        com.hongguotv.core.AppContext.init(this);
         installCrashLogger();
         ContentMode.get(this).startPublic();
         hotUpdates = HotUpdateManager.get(this);

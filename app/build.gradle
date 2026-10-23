@@ -49,7 +49,7 @@ android {
     // 压缩 native libs（minSdk 26 ≥ 23 支持从 APK 直接加载压缩 .so）：减小 APK 体积
     packagingOptions {
         jniLibs {
-            useLegacyPackaging = false
+            useLegacyPackaging = true
         }
     }
 }

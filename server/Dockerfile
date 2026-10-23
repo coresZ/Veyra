@@ -16,13 +16,9 @@ COPY hongguo-app.js ./
 COPY hongguo-decrypt.js ./
 COPY proxy-fetch.js ./
 
-# Go 签名器（红果直连取流，全清晰度 1080p）
-COPY hongguo-signer/hongguo-signer ./hongguo-signer/hongguo-signer
-RUN chmod +x ./hongguo-signer/hongguo-signer
-
-# 启动脚本：先起 Go 签名器，再起 Node
-COPY start.sh ./
-RUN chmod +x start.sh
+# Go 签名器（红果直连取流，全清晰度 1080p，hongguo-app.js 通过 child_process 调用）
+COPY hongguo_sign ./hongguo_sign
+RUN chmod +x ./hongguo_sign
 
 ENV PORT=8080
 EXPOSE 8080
@@ -31,4 +27,4 @@ VOLUME /data
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD wget -qO- http://127.0.0.1:8080/api/health || exit 1
 
-CMD ["./start.sh"]
+CMD ["node", "index.js"]
