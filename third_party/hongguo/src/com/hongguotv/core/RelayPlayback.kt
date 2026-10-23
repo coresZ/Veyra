@@ -21,10 +21,12 @@ object RelayPlayback {
 
     fun stream(seriesId: String, vid: String): StreamInfo {
         // 优先 APK 内置签名器直连 fqnovel.com（1080p 全清晰度）
+        var signerError: String? = null
         try {
             return HongguoSigner.resolve(vid)
         } catch (e: Exception) {
-            // 直连失败，继续回退
+            signerError = e.message
+            android.util.Log.e("Veyra", "HongguoSigner 直连失败: $signerError", e)
         }
         // 回退中转 API
         try {
@@ -71,11 +73,11 @@ object RelayPlayback {
         } catch (e: Exception) {
             // 中转失败，继续网页抓流
         }
-        return scrapeWebPlayer(seriesId, vid)
+        return scrapeWebPlayer(seriesId, vid, signerError)
     }
 
     /** 网页播放页抓流（360p 预览） */
-    private fun scrapeWebPlayer(seriesId: String, vid: String): StreamInfo {
+    private fun scrapeWebPlayer(seriesId: String, vid: String, signerError: String? = null): StreamInfo {
         val url = "https://hongguoduanju.com/player/$seriesId/$vid"
         val req = Request.Builder().url(url)
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36")
@@ -87,7 +89,7 @@ object RelayPlayback {
         }
         // 提取 mp4 地址
         val m = Regex("https?://[^\"'<>\\s]+\\.mp4[^\"'<>\\s]*").find(html)
-            ?: throw IOException("网页播放页未找到视频地址")
+            ?: throw IOException("网页播放页未找到视频地址${if (signerError != null) "（直连错误: $signerError）" else ""}")
         return StreamInfo(m.value, null, "360")
     }
 

@@ -37,9 +37,7 @@ object HongguoSigner {
             "device_id" to deviceId, "iid" to installId,
             "_rticket" to System.currentTimeMillis().toString(),
         )
-        val rawQuery = queryParams.entries.joinToString("&") { (k, v) ->
-            "$k=" + java.net.URLEncoder.encode(v, "UTF-8")
-        }
+        val rawQuery = queryParams.entries.joinToString("&") { (k, v) -> "$k=$v" }
 
         val payload = JSONObject()
             .put("video_id", vid)
@@ -63,12 +61,8 @@ object HongguoSigner {
             .url("$BASE/novel/player/video_model/v1/?$rawQuery")
             .header("User-Agent", UA)
             .header("Content-Type", "application/json; charset=utf-8")
-            .header("Accept", "application/json")
-            .header("X-XS-From-Web", "0")
-            .header("Sdk-Version", "2")
             .header("X-Khronos", khronos)
             .header("X-Gorgon", gorgon)
-            .header("X-SS-Req-Ticket", System.currentTimeMillis().toString())
             .header("X-Argus", argus)
             .header("X-Ladon", ladon)
             .post(okhttp3.RequestBody.create(null, body))
@@ -76,10 +70,12 @@ object HongguoSigner {
 
         http.newCall(req).execute().use { resp ->
             val text = resp.body?.string() ?: throw IOException("空响应")
-            if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}: ${text.take(200)}")
+            if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}: ${text.take(300)}")
             val json = JSONObject(text)
+            val baseCode = json.optJSONObject("BaseResp")?.optInt("StatusCode", -1) ?: -1
+            if (baseCode != 0) throw IOException("BaseResp=$baseCode ${json.optJSONObject("BaseResp")?.optString("StatusMessage","")}")
             val vmStr = json.optJSONObject("data")?.optString("video_model")
-                ?: throw IOException("无 video_model")
+                ?: throw IOException("无 video_model: ${text.take(300)}")
             val vm = JSONObject(vmStr)
             val list = vm.optJSONArray("video_list")
                 ?: throw IOException("无 video_list")
