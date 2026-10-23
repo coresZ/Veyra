@@ -163,7 +163,10 @@ object HongguoSigner {
         return gorgon.joinToString("") { "%02x".format(it) }
     }
 
-    private fun rotL8(v: Int, n: Int): Int = ((v shl n) or (v ushr (8 - n))) and 0xFF
+    private fun rotL8(v: Int, n: Int): Int {
+        val vv = v and 0xFF  // 关键：先 mask 到 8 bit，避免 Kotlin 有符号 Byte 符号扩展破坏 ushr
+        return ((vv shl n) or (vv ushr (8 - n))) and 0xFF
+    }
     private fun reverse8(v: Int): Int {
         var r = 0
         for (i in 0 until 8) r = (r shl 1) or ((v shr i) and 1)
