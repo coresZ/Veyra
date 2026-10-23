@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.os.Build;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
@@ -18,9 +19,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
 
+/**
+ * 更新检测：直连 GitHub Releases API（gybeyond1/Veyra），
+ * 读取 latest release 的 tag_name / body / assets[0].browser_download_url 作为新版 APK。
+ * 版本比较用语义化版本号（v0.16.0 vs 本地 versionName 0.16.0）。
+ */
 final class UpdateManager {
-    private static final String RELEASE_BASE = "https://github.com/MrSsg/HuangguoAPP-for-Andriod/releases/";
-    private static final String MANIFEST_URL = RELEASE_BASE + "latest/download/android-update.json";
+    private static final String RELEASE_API = "https://api.github.com/repos/gybeyond1/Veyra/releases/latest";
+    private static final String RELEASE_BASE = "https://github.com/gybeyond1/Veyra/releases/download/";
     private static final Pattern VERSION = Pattern.compile("\\d+\\.\\d+\\.\\d+");
     private static final long AUTO_INTERVAL_MS = 12 * 60 * 60 * 1000L;
     private static final long MANUAL_WINDOW_MS = 60 * 60 * 1000L;
@@ -52,13 +58,12 @@ final class UpdateManager {
         try {
             JSONObject manifest = new JSONObject(saved);
             PackageInfo installed = context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
-            long installedCode = Build.VERSION.SDK_INT >= 28 ? installed.getLongVersionCode() : installed.versionCode;
-            if (manifest.optLong("versionCode") <= installedCode) {
-                clearCandidate();
-                return status("none");
+            if (isNewer(manifest.optString("versionName"), installed.versionName)) {
+                candidate = candidateFrom(manifest);
+                return availableStatus(candidate, installed.versionName);
             }
-            candidate = candidateFrom(manifest);
-            return availableStatus(candidate, installed.versionName);
+            clearCandidate();
+            return status("none");
         } catch (Exception error) {
             clearCandidate();
             return status("none");
@@ -70,20 +75,46 @@ final class UpdateManager {
         preferences.edit().remove("available_manifest").apply();
     }
 
-    private static Candidate candidateFrom(JSONObject manifest) {
+    /** 语义化版本比较：remote 比 local 新返回 true。 */
+    private static boolean isNewer(String remote, String local) {
+        int[] r = parseVersion(remote), l = parseVersion(local);
+        if (r == null || l == null) return false;
+        for (int i = 0; i < 3; i++) {
+            if (r[i] != l[i]) return r[i] > l[i];
+        }
+        return false;
+    }
+
+    private static int[] parseVersion(String v) {
+        if (v == null) return null;
+        String s = v.trim().replaceFirst("^[vV]", "");
+        String[] parts = s.split("\\.");
+        if (parts.length < 3) return null;
+        try {
+            return new int[]{
+                    Integer.parseInt(parts[0]),
+                    Integer.parseInt(parts[1]),
+                    Integer.parseInt(parts[2])
+            };
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private static Candidate candidateFrom(JSONObject manifest) throws Exception {
         String version = manifest.optString("versionName");
         String tag = manifest.optString("tag");
         String apk = manifest.optString("apk");
         String sha256 = manifest.optString("sha256");
         if (!VERSION.matcher(version).matches() || !tag.equals("v" + version)
-                || !apk.equals("ChengZi-Android-v" + version + "-release.apk")
-                || !sha256.matches("[0-9a-fA-F]{64}") || manifest.optLong("size") <= 0) {
+                || !apk.endsWith(".apk")) {
             throw new IllegalStateException("发布信息格式有误");
         }
         Candidate result = new Candidate();
         result.version = version;
-        result.url = RELEASE_BASE + "download/" + tag + "/" + apk;
-        result.digest = "sha256:" + sha256;
+        // 直连 GitHub 下载（跟随 302 到 objects CDN）
+        result.url = RELEASE_BASE + tag + "/" + apk;
+        result.digest = sha256.matches("[0-9a-fA-F]{64}") ? "sha256:" + sha256 : "";
         result.size = manifest.optLong("size");
         result.notes = manifest.optString("notes");
         return result;
@@ -126,8 +157,7 @@ final class UpdateManager {
             clearCandidate();
             return status("unpublished");
         }
-        long installedCode = Build.VERSION.SDK_INT >= 28 ? installed.getLongVersionCode() : installed.versionCode;
-        if (manifest.optLong("versionCode") <= installedCode) {
+        if (!isNewer(manifest.optString("versionName"), localVersion)) {
             clearCandidate();
             return status("current").put("version", localVersion);
         }
@@ -139,20 +169,21 @@ final class UpdateManager {
     synchronized File download(Progress progress) throws Exception {
         if (downloading) throw new IllegalStateException("更新包正在下载");
         if (candidate == null) throw new IllegalStateException("请先检查更新");
-        if (!candidate.digest.matches("sha256:[0-9a-fA-F]{64}")) throw new IllegalStateException("发布包缺少 SHA-256 校验值");
-        if (!candidate.url.startsWith(RELEASE_BASE + "download/")) {
+        if (!candidate.url.startsWith(RELEASE_BASE + "download/")
+                && !candidate.url.startsWith(RELEASE_BASE)) {
             throw new IllegalStateException("更新包地址无效");
         }
         downloading = true;
         try {
             File directory = new File(context.getCacheDir(), "updates");
             if (!directory.exists() && !directory.mkdirs()) throw new IllegalStateException("无法创建下载目录");
-            File apk = new File(directory, "ChengZi-Android-v" + candidate.version + "-release.apk");
-            if (apk.isFile() && matchesDigest(apk, candidate.digest)) {
+            String name = candidate.url.substring(candidate.url.lastIndexOf('/') + 1);
+            File apk = new File(directory, name);
+            if (apk.isFile() && (!candidate.digest.isEmpty() && matchesDigest(apk, candidate.digest))) {
                 progress.onPercent(100);
                 return apk;
             }
-            File partial = new File(directory, apk.getName() + ".part");
+            File partial = new File(directory, name + ".part");
             HttpURLConnection connection = open(candidate.url);
             try {
                 long downloaded = 0;
@@ -169,7 +200,7 @@ final class UpdateManager {
                     }
                 }
                 if (candidate.size > 0 && downloaded != candidate.size) throw new IllegalStateException("更新包下载不完整，请重试");
-                if (!matchesDigest(partial, candidate.digest)) throw new IllegalStateException("更新包校验失败，请重试");
+                if (!candidate.digest.isEmpty() && !matchesDigest(partial, candidate.digest)) throw new IllegalStateException("更新包校验失败，请重试");
                 if (apk.exists() && !apk.delete()) throw new IllegalStateException("无法替换旧下载包");
                 if (!partial.renameTo(apk)) throw new IllegalStateException("无法保存更新包");
                 progress.onPercent(100);
@@ -199,11 +230,13 @@ final class UpdateManager {
         return connection;
     }
 
+    /** 拉取 GitHub Releases API latest：tag_name / body / 第一个 APK asset。 */
     private static JSONObject fetchManifest() throws Exception {
-        HttpURLConnection connection = (HttpURLConnection) new URL(MANIFEST_URL).openConnection();
+        HttpURLConnection connection = (HttpURLConnection) new URL(RELEASE_API).openConnection();
         connection.setConnectTimeout(15_000);
         connection.setReadTimeout(30_000);
         connection.setRequestProperty("User-Agent", "ChengZi-Android-Updater");
+        connection.setRequestProperty("Accept", "application/vnd.github+json");
         int code = connection.getResponseCode();
         if (code == 404) { connection.disconnect(); return null; }
         if (code < 200 || code >= 300) {
@@ -211,7 +244,7 @@ final class UpdateManager {
             throw new IllegalStateException("GitHub 请求失败（" + code + "）");
         }
         try (InputStream stream = connection.getInputStream()) {
-            byte[] bytes = new byte[64 * 1024];
+            byte[] bytes = new byte[256 * 1024];
             int length = 0;
             while (true) {
                 int count = stream.read(bytes, length, bytes.length - length);
@@ -219,7 +252,25 @@ final class UpdateManager {
                 length += count;
                 if (length == bytes.length) throw new IllegalStateException("发布列表过大");
             }
-            return new JSONObject(new String(bytes, 0, length, java.nio.charset.StandardCharsets.UTF_8));
+            JSONObject release = new JSONObject(new String(bytes, 0, length, java.nio.charset.StandardCharsets.UTF_8));
+            String tag = release.optString("tag_name", "");
+            String version = tag.replaceFirst("^[vV]", "");
+            String notes = release.optString("body", "");
+            JSONArray assets = release.optJSONArray("assets");
+            if (assets == null || assets.length() == 0) throw new IllegalStateException("Release 无 APK 附件");
+            JSONObject asset = assets.optJSONObject(0);
+            JSONObject manifest = new JSONObject();
+            manifest.put("versionName", version);
+            manifest.put("tag", tag);
+            manifest.put("apk", asset.optString("name", ""));
+            manifest.put("browser_download_url", asset.optString("browser_download_url", ""));
+            manifest.put("size", asset.optLong("size", 0));
+            manifest.put("notes", notes);
+            // GitHub API 返回 digest（如 sha256:...），去掉前缀只留 hex
+            String digest = asset.optString("digest", "");
+            digest = digest.replaceFirst("^sha256:", "").trim();
+            manifest.put("sha256", digest);
+            return manifest;
         } finally {
             connection.disconnect();
         }
