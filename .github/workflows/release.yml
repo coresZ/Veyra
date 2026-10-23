@@ -90,9 +90,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cp app/build/outputs/apk/release/app-release.apk Veyra-$VER-release.apk
-          ASSETS="Veyra-$VER-release.apk"
-          if [ -f veyra-backend.tar ]; then ASSETS="$ASSETS veyra-backend.tar"; fi
-          gh release create v$VER $ASSETS \
+          # 删除已存在的 release（可能上次跑挂了残留）
+          gh release delete v$VER --yes --cleanup-tag=false 2>/dev/null || true
+          gh release create v$VER \
+            Veyra-$VER-release.apk \
             --title "Veyra $VER" \
-            --notes "v$VER: Go签名器直连取流，1080p全清晰度，不再依赖被风控的中转API" || \
-            gh release upload v$VER $ASSETS --clobber
+            --notes "v$VER: Go签名器直连取流，1080p全清晰度，不再依赖被风控的中转API"
+          ls -la Veyra-$VER-release.apk
