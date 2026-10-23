@@ -70,13 +70,14 @@ class RemoteVideo(val info: StreamInfo) : Closeable {
         if (closed) throw IOException("播放请求已取消")
         require(start >= 0 && end >= start && end - start < 8 * 1024 * 1024)
         var lastErr: IOException? = null
-        for (attempt in 0 until 3) {
+        for (attempt in 0 until 5) {
             try {
                 return rangeOnce(start, end)
             } catch (e: IOException) {
                 lastErr = e
                 if (closed) throw e
-                try { Thread.sleep(300L * (attempt + 1)) } catch (_: InterruptedException) {}
+                // Exponential backoff: 200ms, 400ms, 800ms, 1600ms, 3200ms
+                try { Thread.sleep(200L * (1 shl attempt)) } catch (_: InterruptedException) {}
             }
         }
         throw lastErr ?: IOException("分段读取失败")
@@ -98,7 +99,7 @@ class RemoteVideo(val info: StreamInfo) : Closeable {
     }
 
     @Synchronized fun warm(): RemoteVideo {
-        val size = minOf(total, 2 * 1024 * 1024L).toInt()
+        val size = minOf(total, 4 * 1024 * 1024L).toInt()
         if (prefix.size < size) {
             try {
                 prefix = prefix + range(prefix.size.toLong(), size - 1L).bytes
