@@ -113,7 +113,6 @@ video{width:100%;border-radius:10px;background:#000}
     <div class="ep-toolbar" id="ep-toolbar" style="display:none">
       <label class="chk-all"><input type="checkbox" id="chk-all" checked> 全选</label>
       <span id="ep-selected" class="ep-count"></span>
-      <button class="ghost" id="btn-select-all" style="margin:0 0 0 auto">全选 / 全不选</button>
     </div>
     <div class="ep-list" id="ep-list"></div>
   </div>
@@ -384,19 +383,19 @@ function openDetail(i){
   }
 }
 
-// 选集渲染：每集一个勾选框（下载选择）+ 集号按钮（点击播放），顶部全选工具条
+// 选集渲染：每集一个勾选框（下载选择）+ 集号按钮（点击播放），顶部全选（单个复选框，不重复）
 let _selected = new Set();
 function renderEpisodes(){
   const eps=_detail.eps||[];
   const list=document.getElementById('ep-list');
   const bar=document.getElementById('ep-toolbar');
-  const count=document.getElementById('ep-selected');
   if(!eps.length){list.innerHTML='<div class="loading">暂无选集</div>';bar.style.display='none';return}
   _selected=new Set(eps.map(e=>e.number));
+  // 用 div 而非 label：避免点击集号播放时误触发勾选切换
   list.innerHTML=eps.map((ep,j)=>
-    '<label class="ep-item" data-j="'+j+'">'+
+    '<div class="ep-item" data-j="'+j+'">'+
     '<input type="checkbox" class="ep-check" data-j="'+j+'" checked>'+
-    '<button class="ep-btn" data-j="'+j+'">'+ep.number+'</button></label>').join('');
+    '<button class="ep-btn" data-j="'+j+'">'+ep.number+'</button></div>').join('');
   const checkAll=document.getElementById('chk-all');
   checkAll.checked=true;checkAll.onchange=()=>{
     const on=checkAll.checked;
@@ -404,11 +403,10 @@ function renderEpisodes(){
     _selected.clear();eps.forEach((e,j)=>{if(on)_selected.add(e.number);});
     updateEpCount();
   };
-  document.getElementById('btn-select-all').onclick=()=>{
-    const all=eps.every(e=>_selected.has(e.number));
-    checkAll.checked=!all;checkAll.onchange();
-  };
-  list.querySelectorAll('.ep-btn').forEach(b=>b.onclick=()=>playEpisode(+b.dataset.j));
+  list.querySelectorAll('.ep-btn').forEach(b=>b.onclick=e=>{
+    e.stopPropagation();
+    playEpisode(+b.dataset.j);
+  });
   list.querySelectorAll('.ep-check').forEach(c=>c.onchange=()=>{
     const n=eps[+c.dataset.j].number;
     if(c.checked)_selected.add(n);else _selected.delete(n);
