@@ -329,6 +329,50 @@ app.get('/api/hongguo/relay-play', (req, res) => {
   });
 });
 
+// 直连取流：调用本地 Go 签名器，返回全清晰度 CDN 直链
+app.get('/api/hongguo/play-direct', async (req, res) => {
+  const vid = String(req.query.vid || '').trim();
+  if (!vid) return res.status(400).json({ error: '缺少 vid' });
+  console.log('[play-direct]', new Date().toISOString(), 'vid', vid);
+  try {
+    const r = await fetch('http://127.0.0.1:18099/play?vid=' + encodeURIComponent(vid), { timeout: 20000 });
+    const text = await r.text();
+    let raw;
+    try { raw = JSON.parse(text); } catch { return res.status(502).json({ error: '签名器返回非JSON: ' + text.slice(0,200) }); }
+    if (raw.error) return res.status(502).json({ error: raw.error });
+    // 解析 video_model
+    const vmStr = raw && raw.data && raw.data.video_model;
+    if (!vmStr) return res.status(502).json({ error: '无 video_model 字段', raw: text.slice(0,300) });
+    let vm;
+    try { vm = typeof vmStr === 'string' ? JSON.parse(vmStr) : vmStr; }
+    catch { return res.status(502).json({ error: 'video_model 解析失败' }); }
+    const list = vm.video_list || [];
+    if (!list.length) return res.status(502).json({ error: 'video_list 为空' });
+    // 按清晰度排序：1080p > 720p > 540p > 480p > 360p
+    const order = { '1080p': 5, '720p': 4, '540p': 3, '480p': 2, '360p': 1 };
+    list.sort((a, b) => (order[b.video_meta && b.video_meta.definition] || 0) - (order[a.video_meta && a.video_meta.definition] || 0));
+    const best = list[0];
+    const result = {
+      vid,
+      definition: best.video_meta && best.video_meta.definition,
+      main_url: best.main_url,
+      backup_url: best.backup_url,
+      encrypt: best.encrypt_info || null,
+      duration: vm.video_duration || 0,
+      all_qualities: list.map(v => ({
+        definition: v.video_meta && v.video_meta.definition,
+        main_url: v.main_url,
+        backup_url: v.backup_url,
+      })),
+    };
+    console.log('[play-direct] OK', result.definition, 'url len', (result.main_url||'').length);
+    res.json(result);
+  } catch (e) {
+    console.log('[play-direct] ERR', e.message);
+    res.status(502).json({ error: '直连取流失败: ' + e.message });
+  }
+});
+
 // ---- WebUI 管理接口（需管理员密码登录）----
 
 // 管理员登录：签发 8 小时会话 token

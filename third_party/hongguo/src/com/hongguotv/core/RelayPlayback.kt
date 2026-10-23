@@ -20,7 +20,34 @@ object RelayPlayback {
     private val http = OkHttpClient.Builder().build()
 
     fun stream(seriesId: String, vid: String): StreamInfo {
-        // 先试中转 API，任何失败都回退网页抓流
+        // 优先直连取流（Go 签名器，全清晰度 1080p）
+        try {
+            if (proxyBaseUrl.isNotEmpty()) {
+                val url = "${proxyBaseUrl.trimEnd('/')}/api/hongguo/play-direct?vid=$vid"
+                val req = Request.Builder().url(url)
+                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 16; 25053RT47C) AppleWebKit/537.36")
+                    .build()
+                val body = http.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) throw IOException("直连 HTTP ${resp.code}")
+                    resp.body?.string() ?: throw IOException("直连响应为空")
+                }
+                val data = JSONObject(body)
+                if (data.optString("main_url").startsWith("http")) {
+                    val mainUrl = data.getString("main_url")
+                    val encrypt = data.optJSONObject("encrypt")
+                    val spadeA = encrypt?.optString("spade_a") ?: ""
+                    val key = if (spadeA.isNotEmpty()) {
+                        try { deriveKey(spadeA) } catch (e: Exception) { null }
+                    } else null
+                    val def = data.optString("definition", "")
+                    val qNum = Regex("[0-9]+").find(def)?.value ?: ""
+                    return StreamInfo(mainUrl, key, qNum)
+                }
+            }
+        } catch (e: Exception) {
+            // 直连失败，继续中转
+        }
+        // 回退中转 API
         try {
             val ref = JSONObject()
                 .put("content_type", 1004)
