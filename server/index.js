@@ -680,46 +680,40 @@ function isAdminRequest(req) {
   const match = String(req.headers.authorization || '').match(/^Bearer\s+([a-f0-9]{64})$/i);
   return !!match && (adminSessions[match[1]] || 0) > Date.now();
 }
-app.post('/api/download/tasks', auth, (req, res) => {
-  if (!needUser(req, res)) return;
-  // NAS 下载仅用户管理员（role=admin）可用；普通用户只能下载到手机
-  if (req.user.role !== 'admin') return res.status(403).json({ error: '仅管理员可下载到 NAS' });
+// NAS 下载任务：管理员鉴权（WebUI 使用管理员 token，勿用用户注册会话 auth）
+const ADMIN_OWNER = 'admin';
+app.post('/api/download/tasks', requireAdmin, (req, res) => {
   try {
     const task = downloader.createTask({
       source: req.body.source, title: req.body.title, seriesId: req.body.seriesId,
-      episodes: req.body.episodes, owner: req.user.id,
+      episodes: req.body.episodes, owner: ADMIN_OWNER,
     });
     res.json({ task });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
-app.get('/api/download/tasks', auth, (req, res) => {
-  if (!needUser(req, res)) return;
-  res.json({ tasks: downloader.listTasks(req.user.id, isAdminRequest(req)) });
+app.get('/api/download/tasks', requireAdmin, (_req, res) => {
+  res.json({ tasks: downloader.listTasks(ADMIN_OWNER, true) });
 });
-app.get('/api/download/tasks/:id', auth, (req, res) => {
-  if (!needUser(req, res)) return;
-  const task = downloader.getTask(req.params.id, req.user.id, isAdminRequest(req));
+app.get('/api/download/tasks/:id', requireAdmin, (req, res) => {
+  const task = downloader.getTask(req.params.id, ADMIN_OWNER, true);
   if (!task) return res.status(404).json({ error: '任务不存在' });
   res.json({ task });
 });
-app.delete('/api/download/tasks/:id', auth, (req, res) => {
-  if (!needUser(req, res)) return;
-  if (!downloader.deleteTask(req.params.id, req.user.id, isAdminRequest(req)))
+app.delete('/api/download/tasks/:id', requireAdmin, (req, res) => {
+  if (!downloader.deleteTask(req.params.id, ADMIN_OWNER, true))
     return res.status(404).json({ error: '任务不存在' });
   res.json({ ok: true });
 });
-app.post('/api/download/merge', auth, (req, res) => {
-  if (!needUser(req, res)) return;
+app.post('/api/download/merge', requireAdmin, (req, res) => {
   try {
-    const task = downloader.mergeTask(String(req.body.id || ''), req.user.id, isAdminRequest(req));
+    const task = downloader.mergeTask(String(req.body.id || ''), ADMIN_OWNER, true);
     if (!task) return res.status(404).json({ error: '任务不存在' });
     res.json(task);
   } catch (e) { res.status(400).json({ error: e && e.message ? e.message : '合并失败' }); }
 });
-app.post('/api/download/retry-failed', auth, (req, res) => {
-  if (!needUser(req, res)) return;
+app.post('/api/download/retry-failed', requireAdmin, (req, res) => {
   try {
-    const task = downloader.retryFailedEpisodes(String(req.body.id || ''), req.user.id, isAdminRequest(req));
+    const task = downloader.retryFailedEpisodes(String(req.body.id || ''), ADMIN_OWNER, true);
     if (!task) return res.status(404).json({ error: '任务不存在' });
     res.json(task);
   } catch (e) { res.status(400).json({ error: e && e.message ? e.message : '重试失败' }); }

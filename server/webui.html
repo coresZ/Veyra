@@ -51,7 +51,8 @@ body{background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,"PingFang 
 .ep-btn:hover{border-color:var(--acc2)}
 .ep-btn.playing{background:var(--acc);color:#1a1e26;font-weight:700}
 .ep-item.off .ep-btn{opacity:.45}
-.player-wrap{margin-top:16px;display:none}
+.player-wrap{margin-top:16px;display:none;position:relative}
+.player-close{position:absolute;top:-14px;right:-14px;z-index:5;width:34px;height:34px;border-radius:50%;background:rgba(0,0,0,.75);border:1px solid var(--line);color:#fff;font-size:16px;cursor:pointer}
 .player-wrap.open{display:block}
 video{width:100%;border-radius:10px;background:#000}
 .drawer-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:290;display:none}
@@ -109,6 +110,7 @@ video{width:100%;border-radius:10px;background:#000}
       </div>
     </div>
     <div class="player-wrap" id="player-wrap">
+      <button class="player-close" id="btn-player-close" title="关闭播放">✕</button>
       <video id="player" controls autoplay></video>
     </div>
     <div class="ep-list" id="ep-list"></div>
@@ -126,7 +128,6 @@ video{width:100%;border-radius:10px;background:#000}
     </div>
     <div class="ep-list" id="dl-ep-list"></div>
     <div class="modal-actions" style="margin-top:16px">
-      <button class="ghost" id="btn-dl-cancel">取消</button>
       <button class="btn-main" id="btn-dl-confirm">开始下载（N集）</button>
     </div>
   </div>
@@ -343,13 +344,22 @@ function coverSrc(cover){
   if(/^https?:\/\//i.test(cover))return cover;
   return '/api/huangguo-proxy?url='+encodeURIComponent(cover);
 }
+// 封面加载兜底：后端代理转发失败时降级直连原始 URL，仍失败则灰底占位
+function fallbackCover(img){
+  const cur=img.getAttribute('src')||'';
+  if(cur.indexOf('/api/huangguo-proxy?')===0){
+    const m=cur.match(/[?&]url=([^&]+)/);
+    if(m){img.onerror=null;img.src=decodeURIComponent(m[1]);return}
+  }
+  img.style.background='#1a1e26';
+}
 function renderGrid(items){
   _items=items||[];
   if(!_items.length){grid.innerHTML='<div class="loading">暂无内容</div>';return}
   grid.innerHTML=_items.map((it,i)=>{
-    const src=mode==='public'?coverSrc(it.cover):proxyUrl(it.cover);
+    const src=it.cover?(mode==='public'?coverSrc(it.cover):proxyUrl(it.cover)):'';
     return '<div class="card-poster" data-i="'+i+'">'+
-      '<img class="poster-img" src="'+src+'" loading="lazy" onerror="this.style.background=\'#1a1e26\'">'+
+      '<img class="poster-img" src="'+src+'" loading="lazy" onerror="fallbackCover(this)"'+(src?'':' style="background:#1a1e26"')+'>'+
       '<div class="poster-title">'+escapeHtml(it.title)+'</div>'+
       (it.badge?'<div class="poster-badge">'+escapeHtml(it.badge)+'</div>':'')+'</div>';
   }).join('');
@@ -373,38 +383,53 @@ async function doSearch(){
 
 function openDetail(i){
   const it=_items[i];if(!it)return;
+  currentItem=it;
   _detail={id:it.id,title:it.title,seriesId:it.seriesId||it.id,eps:[],vids:[]};
   document.getElementById('d-title').textContent=it.title;
   document.getElementById('d-desc').textContent=it.description||'';
   document.getElementById('d-badge').textContent=it.badge||'';
   const img=document.getElementById('d-poster');
+  img.onerror=()=>fallbackCover(img);
   img.src=it.cover?(mode==='public'?coverSrc(it.cover):proxyUrl(it.cover)):'';
   document.getElementById('ep-list').innerHTML='<div class="loading" style="padding:20px">正在获取选集…</div>';
   document.getElementById('player-wrap').classList.remove('open');
   document.getElementById('dl-status').textContent='';
   document.getElementById('btn-download').disabled=false;
+  updatePlayButton();
   document.getElementById('detail-overlay').classList.add('open');
   if(mode==='public'){
-    fetch('/api/web/hongguo/detail?id='+encodeURIComponent(it.id)).then(x=>x.json()).then(d=>{
-      const rawEps=(d.raw&&(d.raw.detail_page&&d.raw.detail_page.episode_list))||(d.raw&&d.raw.episode_list)||[];
-      let eps;
-      if(rawEps.length) eps=rawEps.map((ep,j)=>({number:Number(ep.number||ep.index||(j+1)),vid:(d.vids&&d.vids[j])||ep.vid||ep.id||''}));
-      else eps=(d.vids||[]).map((v,j)=>({number:j+1,vid:String(v)}));
-      _detail.eps=eps;
-      renderEpisodes();
-    }).catch(()=>{document.getElementById('ep-list').innerHTML='<div class="loading">选集获取失败</div>'});
+    loadPublicDetail(it,0);
   }else{
     loadHuangguoDetail(it);
   }
 }
 
+// 公开模式选集：失败自动重试一次，仍失败则显示具体原因 + 手动重试
+function loadPublicDetail(it,tries){
+  fetch('/api/web/hongguo/detail?id='+encodeURIComponent(it.id)).then(x=>{
+    if(!x.ok)throw new Error('HTTP '+x.status);
+    return x.json();
+  }).then(d=>{
+    const rawEps=(d.raw&&(d.raw.detail_page&&d.raw.detail_page.episode_list))||(d.raw&&d.raw.episode_list)||[];
+    let eps;
+    if(rawEps.length) eps=rawEps.map((ep,j)=>({number:Number(ep.number||ep.index||(j+1)),vid:(d.vids&&d.vids[j])||ep.vid||ep.id||''}));
+    else eps=(d.vids||[]).map((v,j)=>({number:j+1,vid:String(v)}));
+    if(!eps.length)throw new Error('接口未返回选集数据');
+    _detail.eps=eps;
+    renderEpisodes();
+  }).catch(e=>{
+    if(tries<1){document.getElementById('ep-list').innerHTML='<div class="loading">正在重试…</div>';loadPublicDetail(it,tries+1);return}
+    document.getElementById('ep-list').innerHTML='<div class="loading">选集获取失败：'+e.message+
+      '<br><button class="ghost" style="margin-top:8px" onclick="loadPublicDetail(currentItem,'+tries+')">重试</button></div>';
+  });
+}
+let currentItem=null;
+
 // 选集渲染：纯集号按钮，点击即播放该集（不做勾选，勾选移入下载弹层）
 function renderEpisodes(){
   const eps=_detail.eps||[];
   const list=document.getElementById('ep-list');
-  const bar=document.getElementById('ep-toolbar');
-  if(!eps.length){list.innerHTML='<div class="loading">暂无选集</div>';bar.style.display='none';return}
-  bar.style.display='none';
+  if(!eps.length){list.innerHTML='<div class="loading">暂无选集</div>';return}
   list.innerHTML=eps.map((ep,j)=>
     '<button class="ep-btn" data-j="'+j+'">'+ep.number+'</button>').join('');
   list.querySelectorAll('.ep-btn').forEach(b=>b.onclick=()=>playEpisode(+b.dataset.j));
@@ -559,6 +584,17 @@ function loadHuangguoDetail(it){
   }).catch(e=>{document.getElementById('ep-list').innerHTML='<div class="loading">详情获取失败: '+e.message+'</div>'});
 }
 
+// 关闭播放画面：只关播放器，详情弹窗保留
+function closePlayer(){
+  saveProgress();
+  const v=document.getElementById('player');if(v){v.pause();v.removeAttribute('src');v.removeAttribute('data-src')}
+  if(_hls){_hls.destroy();_hls=null}
+  _playingEp=-1;
+  document.getElementById('player-wrap').classList.remove('open');
+  updatePlayButton();
+}
+document.getElementById('btn-player-close').onclick=closePlayer;
+
 function closeDetail(){
   saveProgress();
   document.getElementById('detail-overlay').classList.remove('open');
@@ -613,7 +649,6 @@ function updateDlCount(eps){
 }
 function closeDownloadLayer(){document.getElementById('download-overlay').classList.remove('open')}
 document.getElementById('btn-close-dl').onclick=closeDownloadLayer;
-document.getElementById('btn-dl-cancel').onclick=closeDownloadLayer;
 document.getElementById('download-overlay').addEventListener('click',e=>{if(e.target.id==='download-overlay')closeDownloadLayer()});
 
 document.getElementById('btn-dl-confirm').onclick=async()=>{
