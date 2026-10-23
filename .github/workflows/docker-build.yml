@@ -30,5 +30,6 @@ jobs:
           context: ./server
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/veyra-backend:latest
-          # 不用层缓存，避免旧代码被 Buildx 复用进镜像
-          no-cache: true
+          # 层缓存：base/apk/ffmpeg 等不常变层复用，NAS 增量拉取，避免每次全量 113MB
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/veyra-backend:cache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/veyra-backend:cache,mode=max
