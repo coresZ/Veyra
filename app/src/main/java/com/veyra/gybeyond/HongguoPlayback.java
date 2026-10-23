@@ -7,14 +7,12 @@ import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.DataSpec;
 import com.hongguotv.core.RemoteVideo;
 import com.hongguotv.core.StreamInfo;
-import okhttp3.OkHttpClient;
 import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 @androidx.annotation.OptIn(markerClass = androidx.media3.common.util.UnstableApi.class)
 final class HongguoPlayback {
-    private static final OkHttpClient HTTP = new OkHttpClient();
     private static final Map<String, StreamInfo> STREAMS = new LinkedHashMap<String, StreamInfo>() {
         @Override protected boolean removeEldestEntry(Map.Entry<String, StreamInfo> entry) { return size() > 48; }
     };
@@ -35,7 +33,7 @@ final class HongguoPlayback {
             StreamInfo info = info(uri.toString());
             if (info == null) throw new IOException("播放地址已失效，请重新选集");
             try {
-                video = new RemoteVideo(HTTP, info).prepare();
+                video = new RemoteVideo(info).prepare();
                 position = spec.position;
                 if (position > video.getTotal()) throw new IOException("读取位置超出视频长度");
                 remaining = spec.length == C.LENGTH_UNSET ? video.getTotal() - position : Math.min(spec.length, video.getTotal() - position);
