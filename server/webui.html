@@ -51,8 +51,7 @@ body{background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,"PingFang 
 .ep-btn:hover{border-color:var(--acc2)}
 .ep-btn.playing{background:var(--acc);color:#1a1e26;font-weight:700}
 .ep-item.off .ep-btn{opacity:.45}
-.player-wrap{margin-top:16px;display:none;position:relative}
-.player-close{position:absolute;top:-14px;right:-14px;z-index:5;width:34px;height:34px;border-radius:50%;background:rgba(0,0,0,.75);border:1px solid var(--line);color:#fff;font-size:16px;cursor:pointer}
+.player-wrap{margin-top:16px;display:none}
 .player-wrap.open{display:block}
 video{width:100%;border-radius:10px;background:#000}
 .drawer-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:290;display:none}
@@ -76,6 +75,23 @@ video{width:100%;border-radius:10px;background:#000}
 .radio-group label{background:#0d0f13;border:1px solid var(--line);border-radius:8px;padding:8px 14px;cursor:pointer;font-size:13px;color:var(--mut)}
 .radio-group label.active{background:var(--acc);color:#1a1e26;font-weight:700;border-color:var(--acc)}
 .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--card);border:1px solid var(--line);padding:10px 20px;border-radius:10px;font-size:13px;z-index:400;display:none}
+.modal-wide{position:relative;width:min(560px,92vw);max-height:82vh;display:flex;flex-direction:column}
+.modal-wide .modal-close{position:absolute;top:14px;right:14px}
+.dlmgr-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding:2px 0}
+.dlmgr-item{background:#0d0f13;border:1px solid var(--line);border-radius:10px;padding:12px}
+.dlmgr-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.dlmgr-title{font-size:14px;font-weight:600;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dlmgr-badge{font-size:11px;padding:2px 8px;border-radius:20px;background:#1a1e26;border:1px solid var(--line);color:var(--mut);white-space:nowrap}
+.dlmgr-badge.ok{color:#3ddc97;border-color:#3ddc9755}
+.dlmgr-badge.err{color:#ff6b6b;border-color:#ff6b6b55}
+.dlmgr-badge.run{color:#f6c343;border-color:#f6c34355}
+.dlmgr-bar{height:6px;border-radius:3px;background:#1a1e26;overflow:hidden;margin:6px 0}
+.dlmgr-bar>i{display:block;height:100%;background:var(--acc);border-radius:3px;transition:width .4s}
+.dlmgr-detail{font-size:12px;color:var(--mut);margin-bottom:8px;word-break:break-all}
+.dlmgr-ops{display:flex;gap:8px;flex-wrap:wrap}
+.dlmgr-ops .ghost{font-size:12px;padding:6px 12px;margin:0}
+.dlmgr-empty{color:var(--mut);font-size:13px;text-align:center;padding:30px 0}
+.dlmgr-output{font-size:11px;color:var(--acc);word-break:break-all;margin-top:6px}
 </style>
 </head>
 <body>
@@ -86,6 +102,7 @@ video{width:100%;border-radius:10px;background:#000}
     <button id="mode-public" class="active">公开</button>
     <button id="mode-private">私密</button>
   </div>
+  <button class="gear" id="btn-downloads" title="NAS 下载管理">⬇</button>
   <button class="gear" id="btn-settings">⚙</button>
 </div>
 <div class="cat-bar" id="cat-bar" style="display:none"></div>
@@ -110,7 +127,6 @@ video{width:100%;border-radius:10px;background:#000}
       </div>
     </div>
     <div class="player-wrap" id="player-wrap">
-      <button class="player-close" id="btn-player-close" title="关闭播放">✕</button>
       <video id="player" controls autoplay></video>
     </div>
     <div class="ep-list" id="ep-list"></div>
@@ -130,6 +146,14 @@ video{width:100%;border-radius:10px;background:#000}
     <div class="modal-actions" style="margin-top:16px">
       <button class="btn-main" id="btn-dl-confirm">开始下载（N集）</button>
     </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="dlmgr-overlay">
+  <div class="modal modal-wide">
+    <button class="modal-close" id="btn-close-dlmgr">✕</button>
+    <h3 style="margin-bottom:12px">NAS 下载管理</h3>
+    <div class="dlmgr-list" id="dlmgr-list"><div class="loading">加载中…</div></div>
   </div>
 </div>
 
@@ -556,27 +580,11 @@ function loadHuangguoDetail(it){
     if(!r.ok)throw new Error('详情页 '+r.status+'（检查后端代理 backendProxy 是否配置且可访问黄果源）');
     return r.text();
   }).then(html=>{
-    const eps=[];
-    const base=it.detailUrl||it.id;
-    // 1) a/button 链接型选集（含 onclick/data-* 播放链接）
-    const re=/(?:<a[^>]+|<button[^>]+)(?:href="([^"]*)"|onclick="([^"]*)"|data-(?:id|url|vid|ep)="([^"]*)")[^>]*>[\s\S]*?([0-9]{1,3})[\s\S]*?(?:<\/a>|<\/button>)/gi;
-    let m,seen=new Set();
-    while((m=re.exec(html))!==null&&eps.length<300){
-      const n=parseInt(m[4],10);if(!n||seen.has(n))continue;seen.add(n);
-      let u=m[1]||m[2]||m[3]||'';
-      if(!u){ // onclick="...play(123)..." 里抓 id
-        const idm=m[2].match(/[0-9]{6,}/);
-        if(idm)u=idm[0];
-      }
-      if(!u){const idm=(m[2]||'').match(/'([^']+)'/);if(idm)u=idm[1];}
-      let href='';
-      try{href=new URL(u,base).toString()}catch{href=u}
-      eps.push({number:n,detailUrl:href||base,vid:'',playUrl:''});
-    }
-    // 2) 视频源在详情页直接内嵌（单集站）
+    const eps=parseHuangguoEpisodes(html, it.detailUrl||it.id);
     if(!eps.length){
-      const src=extractVideoSrc(html,base);
-      if(src)eps.push({number:1,detailUrl:base,vid:'',playUrl:''});
+      // 单集站兜底：详情页直接内嵌播放器
+      const src=extractVideoSrc(html, it.detailUrl||it.id);
+      if(src)eps.push({number:1,detailUrl:it.detailUrl||it.id,vid:'',playUrl:''});
     }
     _detail.eps=eps.sort((a,b)=>a.number-b.number);
     renderEpisodes();
@@ -584,16 +592,46 @@ function loadHuangguoDetail(it){
   }).catch(e=>{document.getElementById('ep-list').innerHTML='<div class="loading">详情获取失败: '+e.message+'</div>'});
 }
 
-// 关闭播放画面：只关播放器，详情弹窗保留
-function closePlayer(){
-  saveProgress();
-  const v=document.getElementById('player');if(v){v.pause();v.removeAttribute('src');v.removeAttribute('data-src')}
-  if(_hls){_hls.destroy();_hls=null}
-  _playingEp=-1;
-  document.getElementById('player-wrap').classList.remove('open');
-  updatePlayButton();
+// 私密源选集解析：只认"选集容器"里的集号链接，排除页面推荐位/导航，避免串剧
+function parseHuangguoEpisodes(html, base){
+  const eps=[], seen=new Set();
+  const boxRe=/<(?:div|ul)[^>]*(?:class|id)=["'][^"']*(?:play|list|episode|juji|drama|series|bf|tab)[^"']*["'][^>]*>([\s\S]*?)<\/(?:div|ul)>/gi;
+  const containers=[];let cm;
+  while((cm=boxRe.exec(html))!==null&&containers.length<30){containers.push(cm[1])}
+  // 找不到容器则整页作为候选段（仍走严格过滤）
+  const segs=containers.length?containers:[html];
+  for(const seg of segs){
+    const re=/<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    let m;
+    while((m=re.exec(seg))!==null&&eps.length<300){
+      const href=m[1].trim();
+      const txt=(m[2]||'').replace(/<[^>]+>/g,'').trim();
+      const n=parseInt(txt.replace(/[^\d]/g,''),10);
+      if(!n||n<1||n>999||seen.has(n))continue;
+      // 播放特征过滤：href 须为播放/详情路径或含数字路径；推荐位链接（纯文字/图片链接）排除
+      if(!/(?:play|video|vod|show|detail|watch|ep|ju|info|drama)/i.test(href)&&!/\/\d+(-\d+)?(\.html?)?(\?|$)/.test(href))continue;
+      let u;
+      try{u=new URL(href,base).toString()}catch{continue}
+      seen.add(n);
+      eps.push({number:n,detailUrl:u,vid:'',playUrl:''});
+    }
+    if(eps.length>=2)break; // 首个有效容器解析到选集即停止
+  }
+  // 按钮 onclick 形式（play(123) / data-id）
+  if(eps.length<2){
+    const re2=/<button[^>]+onclick=["']([^"']+)["'][^>]*>\s*([0-9]{1,3})\s*<\/button>/gi;
+    let m;
+    while((m=re2.exec(html))!==null&&eps.length<300){
+      const n=parseInt(m[2],10);
+      if(!n||seen.has(n))continue;
+      const idm=(m[1]||'').match(/[0-9]{6,}/);
+      if(!idm)continue;
+      seen.add(n);
+      eps.push({number:n,detailUrl:base+'/'+idm[0],vid:'',playUrl:''});
+    }
+  }
+  return eps;
 }
-document.getElementById('btn-player-close').onclick=closePlayer;
 
 function closeDetail(){
   saveProgress();
@@ -668,6 +706,84 @@ document.getElementById('btn-dl-confirm').onclick=async()=>{
   }catch(e){st.textContent=e.message;toast('提交失败: '+e.message)}
   btn.disabled=false;btn.textContent='开始下载（'+_dlSelected.size+'集）';
 };
+
+// ---- NAS 下载管理页：任务列表 / 进度 / 合并 / 重试 / 删除 ----
+let _dlmgrTimer=null;
+const DL_STATUS={queued:['排队中',''],downloading:['下载中','run'],ready:['待合并','ok'],merging:['合并中','run'],done:['已完成','ok'],failed:['失败','err'],canceled:['已取消','']};
+document.getElementById('btn-downloads').onclick=()=>{
+  const ov=document.getElementById('dlmgr-overlay');
+  const isOpen=ov.classList.contains('open');
+  if(isOpen){closeDlmgr();return}
+  ov.classList.add('open');
+  loadDlmgr();
+  _dlmgrTimer=setInterval(loadDlmgr,10000);
+};
+function closeDlmgr(){
+  document.getElementById('dlmgr-overlay').classList.remove('open');
+  if(_dlmgrTimer){clearInterval(_dlmgrTimer);_dlmgrTimer=null}
+}
+document.getElementById('btn-close-dlmgr').onclick=closeDlmgr;
+document.getElementById('dlmgr-overlay').addEventListener('click',e=>{if(e.target.id==='dlmgr-overlay')closeDlmgr()});
+
+async function loadDlmgr(){
+  const list=document.getElementById('dlmgr-list');
+  try{
+    const r=await fetch('/api/download/tasks',{headers:AUTH()});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const d=await r.json().catch(()=>({}));
+    const tasks=d.tasks||[];
+    if(!tasks.length){list.innerHTML='<div class="dlmgr-empty">暂无下载任务<br><span style="font-size:12px">在剧集详情里点"下载到NAS"创建任务</span></div>';return}
+    list.innerHTML=tasks.map(t=>{
+      const st=DL_STATUS[t.status]||[t.status,''];
+      const pct=Math.max(0,Math.min(100,Math.round(t.percent||0)));
+      const failed=(t.failedEpisodes||[]).map(f=>f.index).join('、');
+      const detail=t.detail||'';
+      const canMerge=(t.status==='ready'||t.status==='failed')&&failed&&t.status==='ready'?'（可先合并成功集）':(t.status==='ready'?'（可合并成单文件）':'');
+      const canRetry=(t.status==='ready'||t.status==='failed')&&(t.failedEpisodes||[]).length>0;
+      const isDone=t.status==='done';
+      const srcLabel=t.source==='hongguo'?'红果':'黄果';
+      const time=new Date(t.createdAt).toLocaleString();
+      return '<div class="dlmgr-item">'+
+        '<div class="dlmgr-top"><span class="dlmgr-title">'+escapeHtml(t.title)+'</span>'+
+        '<span class="dlmgr-badge '+st[1]+'">'+st[0]+'</span></div>'+
+        '<div class="dlmgr-bar"><i style="width:'+pct+'%"></i></div>'+
+        '<div class="dlmgr-detail">'+escapeHtml(detail)+'<br>'+t.doneCount+'/'+t.totalCount+' 集 · '+srcLabel+' · '+time+
+        (failed?' · 失败集: '+escapeHtml(failed):'')+(isDone&&t.output?'<br><span class="dlmgr-output">合并文件: '+escapeHtml(String(t.output).split('/').pop())+'</span>':'')+'</div>'+
+        '<div class="dlmgr-ops">'+
+        (canMerge&&!isDone?'<button class="ghost" data-op="merge" data-id="'+t.id+'">合并</button>':'')+
+        (canRetry?'<button class="ghost" data-op="retry" data-id="'+t.id+'">重试失败集</button>':'')+
+        '<button class="ghost" data-op="del" data-id="'+t.id+'">删除</button></div>'+
+        '</div>';
+    }).join('');
+    list.querySelectorAll('[data-op]').forEach(btn=>{
+      btn.onclick=async()=>{
+        const op=btn.dataset.op,id=btn.dataset.id;
+        if(op==='del'&&!confirm('删除任务「'+titleOf(id)+'」？将同时删除已下载的分集文件和合并文件')){return}
+        btn.disabled=true;
+        try{
+          const isDel=op==='del';
+          const r=await fetch(isDel?('/api/download/tasks/'+id):('/api/download/'+(op==='merge'?'merge':'retry-failed')),{
+            method:isDel?'DELETE':'POST',
+            headers:Object.assign({'Content-Type':'application/json'},AUTH()),
+            body:isDel?undefined:JSON.stringify({id})});
+          const d=await r.json().catch(()=>({}));
+          if(!r.ok)throw new Error(d.error||('HTTP '+r.status));
+          toast(op==='del'?'任务已删除':(op==='merge'?'已开始合并':'已开始重试失败集'));
+          loadDlmgr();
+        }catch(e){toast((op==='del'?'删除失败':'操作失败')+': '+e.message);btn.disabled=false}
+      };
+    });
+  }catch(e){
+    if(String(e.message).includes('401'))list.innerHTML='<div class="dlmgr-empty">管理员未登录或会话已过期，请先在上方 ⚙ 里登录</div>';
+    else list.innerHTML='<div class="dlmgr-empty">加载失败: '+e.message+'</div>';
+  }
+}
+function titleOf(id){
+  const el=document.querySelector('#dlmgr-list [data-op="del"][data-id="'+id+'"]');
+  const item=el&&el.closest('.dlmgr-item');
+  const t=item&&item.querySelector('.dlmgr-title');
+  return t?t.textContent:id;
+}
 
 /* admin */
 document.getElementById('btn-admin-login').onclick=async()=>{
