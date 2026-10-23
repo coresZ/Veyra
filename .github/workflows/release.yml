@@ -47,22 +47,30 @@ jobs:
           CHENGZI_KEY_ALIAS: ${{ secrets.Veyra_KEY_ALIAS }}
         run: ./gradlew :app:assembleRelease --no-daemon
 
-      - name: Verify APK
+      - name: Prepare release assets
         run: |
-          ls -la app/build/outputs/apk/release/app-release.apk
-          file app/build/outputs/apk/release/app-release.apk
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          # APK 改名：Veyra-<tag>.apk（CI 正式签名 keystore 构建）
+          cp app/build/outputs/apk/release/app-release.apk Veyra-$TAG.apk
+          # 后端最新镜像同步进 release：NAS 可 docker load 离线部署
+          docker pull gybeyond/veyra-backend:latest
+          docker save gybeyond/veyra-backend:latest -o veyra-backend-latest.tar
+          ls -la Veyra-$TAG.apk veyra-backend-latest.tar
+          sha256sum Veyra-$TAG.apk
 
       - name: Create Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$TAG"
           echo "Creating release for $TAG"
           # 删除已存在的 release（tag push 会自动创建空 release）
           gh release delete "$TAG" --yes --cleanup-tag=false 2>/dev/null || true
-          # 创建新 release 并上传 APK
+          # 创建新 release 并上传 APK + 后端镜像 tar
           gh release create "$TAG" \
-            app/build/outputs/apk/release/app-release.apk \
+            "Veyra-$TAG.apk" \
+            veyra-backend-latest.tar \
             --title "Veyra $TAG" \
-            --notes "$TAG: Go签名器直连取流，1080p全清晰度" \
+            --notes "$TAG: 红果直连签名取流1080p + NAS按剧名目录 + WebUI分类/播放/下载 + 自动检测更新" \
             --latest
