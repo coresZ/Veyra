@@ -20,48 +20,51 @@ object RelayPlayback {
     private val http = OkHttpClient.Builder().build()
 
     fun stream(seriesId: String, vid: String): StreamInfo {
-        val ref = JSONObject()
-            .put("content_type", 1004)
-            .put("from_video_id", "")
-            .put("series_id", seriesId)
-            .put("vid", vid)
-            .put("video_platform", 3)
-        val b64 = android.util.Base64.encodeToString(ref.toString().toByteArray(), android.util.Base64.NO_WRAP)
-        val url = if (proxyBaseUrl.isNotEmpty()) {
-            // 走 Veyra 后端代理（NAS 能访问 djapi）
-            "${proxyBaseUrl.trimEnd('/')}/api/hongguo/relay-play?series_id=$seriesId&vid=$vid"
-        } else {
-            DIRECT_API + "?id=" + URLEncoder.encode(b64, "UTF-8")
-        }
-        val req = Request.Builder().url(url)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 16; 25053RT47C) AppleWebKit/537.36")
-            .header("Referer", "https://hongguoduanju.com/")
-            .build()
-        val body = http.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) throw IOException("中转请求失败 HTTP ${resp.code}")
-            resp.body?.string() ?: throw IOException("中转响应为空")
-        }
-        val jsonStr = decryptV2(body)
-        val data = JSONObject(jsonStr)
-        val keyUrls = data.optJSONArray("key_urls")
-        if (keyUrls != null && keyUrls.length() > 0) {
-            var best: StreamInfo? = null
-            var bestQuality = -1
-            for (i in 0 until keyUrls.length()) {
-                val item = keyUrls.getJSONObject(i)
-                val mediaUrl = item.optString("src").trim()
-                if (mediaUrl.isEmpty() || !mediaUrl.startsWith("http")) continue
-                val spadeA = item.optString("spade_a")
-                val name = item.optString("name", "")
-                val quality = Regex("[0-9]+").find(name)?.value ?: ""
-                val key = try { deriveKey(spadeA) } catch (e: Exception) { null }
-                val info = StreamInfo(mediaUrl, key, quality)
-                val qNum = quality.toIntOrNull() ?: 0
-                if (qNum > bestQuality) { best = info; bestQuality = qNum }
+        // 先试中转 API，任何失败都回退网页抓流
+        try {
+            val ref = JSONObject()
+                .put("content_type", 1004)
+                .put("from_video_id", "")
+                .put("series_id", seriesId)
+                .put("vid", vid)
+                .put("video_platform", 3)
+            val b64 = android.util.Base64.encodeToString(ref.toString().toByteArray(), android.util.Base64.NO_WRAP)
+            val url = if (proxyBaseUrl.isNotEmpty()) {
+                "${proxyBaseUrl.trimEnd('/')}/api/hongguo/relay-play?series_id=$seriesId&vid=$vid"
+            } else {
+                DIRECT_API + "?id=" + URLEncoder.encode(b64, "UTF-8")
             }
-            if (best != null) return best
+            val req = Request.Builder().url(url)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 16; 25053RT47C) AppleWebKit/537.36")
+                .header("Referer", "https://hongguoduanju.com/")
+                .build()
+            val body = http.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) throw IOException("中转 HTTP ${resp.code}")
+                resp.body?.string() ?: throw IOException("中转响应为空")
+            }
+            val jsonStr = decryptV2(body)
+            val data = JSONObject(jsonStr)
+            val keyUrls = data.optJSONArray("key_urls")
+            if (keyUrls != null && keyUrls.length() > 0) {
+                var best: StreamInfo? = null
+                var bestQuality = -1
+                for (i in 0 until keyUrls.length()) {
+                    val item = keyUrls.getJSONObject(i)
+                    val mediaUrl = item.optString("src").trim()
+                    if (mediaUrl.isEmpty() || !mediaUrl.startsWith("http")) continue
+                    val spadeA = item.optString("spade_a")
+                    val name = item.optString("name", "")
+                    val quality = Regex("[0-9]+").find(name)?.value ?: ""
+                    val key = try { deriveKey(spadeA) } catch (e: Exception) { null }
+                    val info = StreamInfo(mediaUrl, key, quality)
+                    val qNum = quality.toIntOrNull() ?: 0
+                    if (qNum > bestQuality) { best = info; bestQuality = qNum }
+                }
+                if (best != null) return best
+            }
+        } catch (e: Exception) {
+            // 中转失败，继续网页抓流
         }
-        // 中转失败，回退到网页播放页抓 360p 预览流
         return scrapeWebPlayer(seriesId, vid)
     }
 
