@@ -53,8 +53,8 @@ final class HongguoSearch {
                     seen.putIfAbsent(it.optString("id"), it);
             }
         } catch (Exception ignored) { }
-        // 网页按季穷举 base+第N季(N=1..10)：网页搜索确定性，实测"持械入宋第三季"必出 341 集版。
-        // 并行查询，把每季的网页全量版本并入（这是全集版出现的确定性通道）。
+        // 按季穷举 base+第N季(N=1..10)：JSON 搜索接口确定性，实测"持械入宋第三季"必出 341 集版。
+        // 并行查询，把每季的全量版本并入（这是全集版出现的确定性通道）。
         java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
         for (final String n : CN_NUM) {
             if (baseQuery.length() + n.length() + 3 > 12) continue;
@@ -62,54 +62,45 @@ final class HongguoSearch {
             futures.add(POOL.submit(new Runnable() {
                 @Override public void run() {
                     try {
-                        Request rq = new Request.Builder().url("https://hongguoduanju.com/search/" + Signer.Companion.encode(variant))
-                                .header("User-Agent", "Mozilla/5.0").build();
-                        try (Response resp = http.newCall(rq).execute()) {
-                            if (!resp.isSuccessful() || resp.body() == null) return;
-                            JSONObject loader = ContentRepository.Companion.extractRouter(resp.body().string()).getJSONObject("loaderData");
-                            for (java.util.Iterator<String> keys = loader.keys(); keys.hasNext();) {
-                                JSONObject section = loader.optJSONObject(keys.next());
-                                if (section == null || !section.has("searchList")) continue;
-                                JSONObject web = parse(section, variant, false);
-                                JSONArray items = web.optJSONArray("items");
-                                synchronized (seen) {
-                                    for (int i = 0; items != null && i < items.length(); i++) {
-                                        JSONObject it = items.optJSONObject(i);
-                                        if (it != null && normalize(it.optString("title")).contains(normalize(baseQuery)))
-                                            seen.putIfAbsent(it.optString("id"), it);
-                                    }
-                                }
+                        JSONObject web = apiSearch(variant, sequelLookup);
+                        JSONArray items = web.optJSONArray("items");
+                        synchronized (seen) {
+                            for (int i = 0; items != null && i < items.length(); i++) {
+                                JSONObject it = items.optJSONObject(i);
+                                if (it != null && normalize(it.optString("title")).contains(normalize(baseQuery)))
+                                    seen.putIfAbsent(it.optString("id"), it);
                             }
-                        } catch (Exception ignored) { }
+                        }
                     } catch (Exception ignored) { }
                 }
             }));
         }
-        Request request = new Request.Builder().url("https://hongguoduanju.com/search/" + Signer.Companion.encode(keyword))
-                .header("User-Agent", "Mozilla/5.0").build();
-        try (Response response = http.newCall(request).execute()) {
-            if (!response.isSuccessful() || response.body() == null) throw new IOException("搜索暂时无法连接，请重试");
-            JSONObject loader = ContentRepository.Companion.extractRouter(response.body().string()).getJSONObject("loaderData");
-            for (java.util.Iterator<String> keys = loader.keys(); keys.hasNext();) {
-                JSONObject section = loader.optJSONObject(keys.next());
-                if (section != null && section.has("searchList")) {
-                    JSONObject web = parse(section, keyword, sequelLookup);
-                    JSONArray webItems = web.optJSONArray("items");
-                    int webCount = webItems == null ? 0 : webItems.length();
-                    for (int i = 0; webItems != null && i < webItems.length(); i++) {
-                        JSONObject it = webItems.optJSONObject(i);
-                        if (it != null) seen.putIfAbsent(it.optString("id"), it);
-                    }
-                    for (java.util.concurrent.Future<?> f : futures) { try { f.get(); } catch (Exception ignored) { } }
-                    if (seen.size() > webCount) {
-                        JSONArray merged = new JSONArray();
-                        for (JSONObject it : seen.values()) merged.put(it);
-                        return decorate(new JSONObject().put("items", merged).put("nextPage", JSONObject.NULL));
-                    }
-                    return decorate(web);
-                }
-            }
-            throw new IOException("搜索页面数据结构已变化");
+        JSONObject web = apiSearch(keyword, sequelLookup);
+        JSONArray webItems = web.optJSONArray("items");
+        int webCount = webItems == null ? 0 : webItems.length();
+        for (int i = 0; webItems != null && i < webItems.length(); i++) {
+            JSONObject it = webItems.optJSONObject(i);
+            if (it != null) seen.putIfAbsent(it.optString("id"), it);
+        }
+        for (java.util.concurrent.Future<?> f : futures) { try { f.get(); } catch (Exception ignored) { } }
+        if (seen.size() > webCount) {
+            JSONArray merged = new JSONArray();
+            for (JSONObject it : seen.values()) merged.put(it);
+            return decorate(new JSONObject().put("items", merged).put("nextPage", JSONObject.NULL));
+        }
+        return decorate(web);
+    }
+
+    /** 红果搜索 JSON API（hongguoduanju.com/api/search/result，网站搜索页实际接口，无签名要求）。 */
+    private JSONObject apiSearch(String query, boolean sequelLookup) throws Exception {
+        Request rq = new Request.Builder()
+                .url("https://hongguoduanju.com/api/search/result?query=" + Signer.Companion.encode(query) + "&page=1&page_size=20")
+                .header("User-Agent", "Mozilla/5.0")
+                .header("Referer", "https://hongguoduanju.com/")
+                .header("Accept", "application/json").build();
+        try (Response resp = http.newCall(rq).execute()) {
+            if (!resp.isSuccessful() || resp.body() == null) throw new IOException("搜索暂时无法连接，请重试");
+            return parse(new JSONObject(resp.body().string()), query, sequelLookup);
         }
     }
     private static final String[] CN_NUM = { "一", "二", "三", "四", "五", "六", "七", "八", "九", "十" };
@@ -133,8 +124,9 @@ final class HongguoSearch {
         return queries;
     }
 
-    /** 红果联想接口（hongguoduanju.com，juku 验证可用）：按 suggestionQueries 穷举并行合并，
-     *  suggest_list 过滤短剧名类型。覆盖网页搜索漏掉的全集版（341 集版第三季、100 集版第二季）。 */
+    /** 红果联想接口（hongguoduanju.com/api/search/suggestion，搜索框实时联想实际接口）：
+     *  按 suggestionQueries 穷举并行合并，suggestionList 过滤短剧名类型。
+     *  覆盖搜索接口漏掉的全集版（341 集版第三季、100 集版第二季）。 */
     private JSONArray suggestionItems(String base) throws Exception {
         java.util.LinkedHashSet<String> queries = suggestionQueries(base);
         final java.util.LinkedHashMap<String, JSONObject> seen = new java.util.LinkedHashMap<>();
@@ -143,7 +135,7 @@ final class HongguoSearch {
             futures.add(POOL.submit(new Runnable() {
                 @Override public void run() {
                     Request request = new Request.Builder()
-                            .url("https://hongguoduanju.com/incent_resource/suggestion?app_id=8662&query="
+                            .url("https://hongguoduanju.com/api/search/suggestion?query="
                                     + Signer.Companion.encode(q) + "&count=50")
                             .header("User-Agent", "Mozilla/5.0")
                             .header("Referer", "https://hongguoduanju.com/")
@@ -151,7 +143,7 @@ final class HongguoSearch {
                     try (Response response = http.newCall(request).execute()) {
                         if (!response.isSuccessful() || response.body() == null) return;
                         JSONObject json = new JSONObject(response.body().string());
-                        JSONArray list = json.optJSONArray("suggest_list");
+                        JSONArray list = json.optJSONArray("suggestionList");
                         synchronized (seen) {
                             for (int i = 0; list != null && i < list.length(); i++) {
                                 JSONObject record = list.optJSONObject(i);
