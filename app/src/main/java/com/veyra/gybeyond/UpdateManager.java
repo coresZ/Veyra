@@ -258,7 +258,13 @@ final class UpdateManager {
             String notes = release.optString("body", "");
             JSONArray assets = release.optJSONArray("assets");
             if (assets == null || assets.length() == 0) throw new IllegalStateException("Release 无 APK 附件");
-            JSONObject asset = assets.optJSONObject(0);
+            // 在 assets 里找 APK 文件（release 可能同时带镜像 tar，按名字区分）
+            JSONObject asset = null;
+            for (int i = 0; i < assets.length(); i++) {
+                JSONObject a = assets.optJSONObject(i);
+                if (a != null && a.optString("name", "").endsWith(".apk")) { asset = a; break; }
+            }
+            if (asset == null) throw new IllegalStateException("Release 无 APK 附件");
             JSONObject manifest = new JSONObject();
             manifest.put("versionName", version);
             manifest.put("tag", tag);

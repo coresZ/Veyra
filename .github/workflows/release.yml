@@ -53,10 +53,10 @@ jobs:
           echo "TAG=$TAG" >> $GITHUB_ENV
           # APK 改名：Veyra-<tag>.apk（CI 正式签名 keystore 构建）
           cp app/build/outputs/apk/release/app-release.apk Veyra-$TAG.apk
-          # 后端最新镜像同步进 release：NAS 可 docker load 离线部署
+          # 后端最新镜像同步进 release（gzip 压缩，NAS 可 docker load 离线部署）
           docker pull gybeyond/veyra-backend:latest
-          docker save gybeyond/veyra-backend:latest -o veyra-backend-latest.tar
-          ls -la Veyra-$TAG.apk veyra-backend-latest.tar
+          docker save gybeyond/veyra-backend:latest | gzip -9 > veyra-backend-latest.tar.gz
+          ls -la Veyra-$TAG.apk veyra-backend-latest.tar.gz
           sha256sum Veyra-$TAG.apk
 
       - name: Create Release
@@ -67,10 +67,10 @@ jobs:
           echo "Creating release for $TAG"
           # 删除已存在的 release（tag push 会自动创建空 release）
           gh release delete "$TAG" --yes --cleanup-tag=false 2>/dev/null || true
-          # 创建新 release 并上传 APK + 后端镜像 tar
+          # 创建新 release 并上传 APK + 后端镜像 tar.gz
           gh release create "$TAG" \
             "Veyra-$TAG.apk" \
-            veyra-backend-latest.tar \
+            veyra-backend-latest.tar.gz \
             --title "Veyra $TAG" \
             --notes "$TAG: 红果直连签名取流1080p + NAS按剧名目录 + WebUI分类/播放/下载 + 自动检测更新" \
             --latest
