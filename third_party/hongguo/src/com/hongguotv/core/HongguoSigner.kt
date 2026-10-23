@@ -39,13 +39,8 @@ object HongguoSigner {
         )
         val rawQuery = queryParams.entries.joinToString("&") { (k, v) -> "$k=$v" }
 
-        val payload = JSONObject()
-            .put("video_id", vid)
-            .put("content_type", 1)
-            .put("biz_param", JSONObject()
-                .put("need_all_video_definition", true)
-                .put("video_platform", 3))
-        val body = payload.toString().toByteArray()
+        // 手动构造和 Python json.dumps 完全一致的 body（带空格）
+        val body = "{\"video_id\": \"$vid\", \"content_type\": 1, \"biz_param\": {\"need_all_video_definition\": true, \"video_platform\": 3}}".toByteArray()
 
         // X-Gorgon
         val gorgon = makeGorgon(rawQuery, body, stamp)
@@ -57,8 +52,15 @@ object HongguoSigner {
         val argus = makeArgus(rawQuery, body, stamp.toLong(), deviceId, nonce)
         val ladon = makeLadon("8662", stamp.toLong(), nonce.copyOfRange(2, 6))
 
+        // 用 encodedQuery 阻止 OkHttp 对 * 等字符做二次编码
+        val httpUrl = okhttp3.HttpUrl.Builder()
+            .scheme("https")
+            .host("api5-normal-sinfonlineb.fqnovel.com")
+            .addPathSegments("novel/player/video_model/v1/")
+            .encodedQuery(rawQuery)
+            .build()
         val req = Request.Builder()
-            .url("$BASE/novel/player/video_model/v1/?$rawQuery")
+            .url(httpUrl)
             .header("User-Agent", UA)
             .header("Content-Type", "application/json; charset=utf-8")
             .header("X-Khronos", khronos)
