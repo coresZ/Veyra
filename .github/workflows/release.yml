@@ -67,6 +67,7 @@ jobs:
           $ANDROID_HOME/build-tools/*/aapt2 dump badging app/build/outputs/apk/release/app-release.apk | grep versionName || true
 
       - name: Save Docker image tar
+        continue-on-error: true
         run: |
           docker build -t gybeyond/veyra-backend:$VER server
           docker tag gybeyond/veyra-backend:$VER gybeyond/veyra-backend:latest
@@ -75,6 +76,7 @@ jobs:
 
       - name: Push image to Docker Hub (if credentials configured)
         if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        continue-on-error: true
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -88,10 +90,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cp app/build/outputs/apk/release/app-release.apk Veyra-$VER-release.apk
-          gh release create v$VER \
-            Veyra-$VER-release.apk \
-            veyra-backend.tar \
+          ASSETS="Veyra-$VER-release.apk"
+          if [ -f veyra-backend.tar ]; then ASSETS="$ASSETS veyra-backend.tar"; fi
+          gh release create v$VER $ASSETS \
             --title "Veyra $VER" \
-            --notes "APK（自签名） + Docker 镜像 tar（NAS 离线 docker load 用）" || \
-            gh release upload v$VER \
-            Veyra-$VER-release.apk veyra-backend.tar --clobber
+            --notes "v$VER: Go签名器直连取流，1080p全清晰度，不再依赖被风控的中转API" || \
+            gh release upload v$VER $ASSETS --clobber
