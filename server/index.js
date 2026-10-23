@@ -327,27 +327,30 @@ app.get('/api/web/hongguo/detail', async (req, res) => {
   });
 });
 
-// 红果分类页（tab=1 推荐 / 2..N 各题材），WebUI 分类条用
+// 红果分类页：tab=1 推荐，其余为题材 slug（romance/period/legend…，与 APK 一致），返回题材分类条 + 列表
 app.get('/api/web/hongguo/category', (req, res) => {
-  const tab = String(req.query.tab || '1').replace(/[^0-9a-zA-Z]/g, '');
-  curlGet('https://hongguoduanju.com/category?tab=' + encodeURIComponent(tab) + '&sort_type=1', 10000, (err, html) => {
+  const tab = String(req.query.tab || '1').replace(/[^0-9a-zA-Z-]/g, '');
+  const url = tab === '1'
+    ? 'https://hongguoduanju.com/category/real-drama'
+    : 'https://hongguoduanju.com/category/real-drama/' + encodeURIComponent(tab);
+  curlGet(url, 10000, (err, html) => {
     if (err) return res.status(502).json({ error: '抓取失败: ' + err.message });
     try {
       const router = extractRouterData(html).loaderData || {};
       const section = router.category_page || router.category_$ || {};
-      const cd = section.categoryData || {};
-      const list = section.recommendList || cd.recommendList || [];
-      // 分类 tab 清单：从页面 category_list 提取（含名称与 tab 编号）
-      const tabs = (cd.category_list || cd.categoryList || []).map(c => ({
-        tab: String(c.tab != null ? c.tab : (c.id != null ? c.id : '')),
-        name: String(c.name || c.category_name || ''),
-      })).filter(t => t.name);
+      // 题材分类条：selectorList 第一行 items（selector_item_id + show_name）
+      const tabs = (section.selectorList || [])
+        .filter(r => String(r.row_id) === '1')
+        .flatMap(r => (r.items || []))
+        .map(c => ({ tab: String(c.selector_item_id || ''), name: String(c.show_name || '') }))
+        .filter(t => t.tab && t.name);
+      const list = section.recommendList || [];
       res.json({ tabs, items: list.map(parseSeriesCard) });
     } catch (e) { res.status(502).json({ error: '解析失败: ' + e.message }); }
   });
 });
 
-// 红果单集播放：签名取流 -> ffmpeg 解密转封装（浏览器不能播 CENC 密文）-> 明文 MP4 直发（sendFile 支持 Range 拖动）
+// 红果单集播放：签名取流（内置 videoModel）-> ffmpeg 解密转封装（浏览器不能播 CENC 密文）-> 明文 MP4 直发（sendFile 支持 Range 拖动）
 const { spawn } = require('child_process');
 app.get('/api/web/hongguo/stream', async (req, res) => {
   const vid = String(req.query.vid || '').trim();
@@ -359,24 +362,7 @@ app.get('/api/web/hongguo/stream', async (req, res) => {
   if (fs.existsSync(outFile) && fs.statSync(outFile).size > 100000) return res.sendFile(outFile);
   console.log('[stream]', new Date().toISOString(), 'vid', vid);
   try {
-    const r = await fetch('http://127.0.0.1:18099/play?vid=' + encodeURIComponent(vid), { timeout: 25000 });
-    const text = await r.text();
-    let raw;
-    try { raw = JSON.parse(text); } catch { return res.status(502).json({ error: '签名器返回非JSON: ' + text.slice(0, 200) }); }
-    if (raw.error) return res.status(502).json({ error: raw.error });
-    const vmStr = raw && raw.data && raw.data.video_model;
-    if (!vmStr) return res.status(502).json({ error: '无 video_model 字段' });
-    let vm;
-    try { vm = typeof vmStr === 'string' ? JSON.parse(vmStr) : vmStr; }
-    catch { return res.status(502).json({ error: 'video_model 解析失败' }); }
-    const list = vm.video_list || [];
-    if (!list.length) return res.status(502).json({ error: 'video_list 为空' });
-    const order = { '1080p': 5, '720p': 4, '540p': 3, '480p': 2, '360p': 1 };
-    list.sort((a, b) => (order[b.video_meta && b.video_meta.definition] || 0) - (order[a.video_meta && a.video_meta.definition] || 0));
-    const best = list[0];
-    const mainUrl = best.main_url || best.backup_url;
-    if (!mainUrl) return res.status(502).json({ error: '取流地址为空' });
-    const key = (best.encrypt_info && best.encrypt_info.key) || (vm.encrypt && vm.encrypt.key) || '';
+    const { url: mainUrl, key } = await hgApp.videoModel(vid);
     const args = ['-hide_banner', '-loglevel', 'error', '-y'];
     if (key && /^[0-9a-fA-F]{32}$/.test(key)) args.push('-decryption_key', key.toLowerCase());
     args.push('-i', mainUrl, '-c', 'copy', '-movflags', '+faststart', '-f', 'mp4', outFile);
@@ -418,36 +404,22 @@ app.get('/api/hongguo/relay-play', (req, res) => {
   });
 });
 
-// 直连取流：调用本地 Go 签名器，返回全清晰度 CDN 直链（APK 本地解密）
+// 直连取流：调用本地签名链路（videoModel），返回全清晰度 CDN 直链（APK 本地解密）
 app.get('/api/hongguo/play-direct', async (req, res) => {
   const vid = String(req.query.vid || '').trim();
   if (!vid) return res.status(400).json({ error: '缺少 vid' });
   console.log('[play-direct]', new Date().toISOString(), 'vid', vid);
   try {
-    const r = await fetch('http://127.0.0.1:18099/play?vid=' + encodeURIComponent(vid), { timeout: 20000 });
-    const text = await r.text();
-    let raw;
-    try { raw = JSON.parse(text); } catch { return res.status(502).json({ error: '签名器返回非JSON: ' + text.slice(0,200) }); }
-    if (raw.error) return res.status(502).json({ error: raw.error });
-    const vmStr = raw && raw.data && raw.data.video_model;
-    if (!vmStr) return res.status(502).json({ error: '无 video_model 字段', raw: text.slice(0,300) });
-    let vm;
-    try { vm = typeof vmStr === 'string' ? JSON.parse(vmStr) : vmStr; }
-    catch { return res.status(502).json({ error: 'video_model 解析失败' }); }
-    const list = vm.video_list || [];
-    if (!list.length) return res.status(502).json({ error: 'video_list 为空' });
-    const order = { '1080p': 5, '720p': 4, '540p': 3, '480p': 2, '360p': 1 };
-    list.sort((a, b) => (order[b.video_meta && b.video_meta.definition] || 0) - (order[a.video_meta && a.video_meta.definition] || 0));
-    const best = list[0];
+    const { url: mainUrl, altUrls, key, quality } = await hgApp.videoModel(vid);
     const result = {
       vid,
-      definition: best.video_meta && best.video_meta.definition,
-      main_url: best.main_url,
-      backup_url: best.backup_url,
-      encrypt: best.encrypt_info || null,
-      duration: vm.video_duration || 0,
+      definition: quality || '',
+      main_url: mainUrl,
+      backup_url: altUrls[0] || '',
+      encrypt: key ? { key, spade_a: '' } : null,
+      duration: 0,
     };
-    console.log('[play-direct] OK', result.definition, 'url len', (result.main_url||'').length);
+    console.log('[play-direct] OK', result.definition, 'url len', (mainUrl || '').length);
     res.json(result);
   } catch (e) {
     console.log('[play-direct] ERR', e.message);

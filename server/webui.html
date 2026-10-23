@@ -41,9 +41,16 @@ body{background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,"PingFang 
 .btn-ghost{background:transparent;color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:10px 18px;font-size:14px;cursor:pointer}
 .btn-ghost:hover{border-color:var(--mut)}
 .ep-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(60px,1fr));gap:8px;margin-top:16px}
-.ep-btn{background:#0d0f13;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:10px 0;text-align:center;cursor:pointer;font-size:13px}
+.ep-toolbar{display:flex;align-items:center;gap:12px;margin-top:16px;flex-wrap:wrap}
+.ep-toolbar .chk-all{font-size:13px;color:var(--mut);display:flex;align-items:center;gap:6px}
+.ep-toolbar .chk-all input{width:auto}
+.ep-toolbar .ep-count{font-size:12px;color:var(--mut)}
+.ep-item{position:relative;display:flex;align-items:center;justify-content:center}
+.ep-item .ep-check{position:absolute;left:-2px;top:-2px;width:auto;accent-color:var(--acc);z-index:2}
+.ep-btn{background:#0d0f13;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:10px 0;text-align:center;cursor:pointer;font-size:13px;width:100%}
 .ep-btn:hover{border-color:var(--acc2)}
 .ep-btn.playing{background:var(--acc);color:#1a1e26;font-weight:700}
+.ep-item.off .ep-btn{opacity:.45}
 .player-wrap{margin-top:16px;display:none}
 .player-wrap.open{display:block}
 video{width:100%;border-radius:10px;background:#000}
@@ -102,6 +109,11 @@ video{width:100%;border-radius:10px;background:#000}
     </div>
     <div class="player-wrap" id="player-wrap">
       <video id="player" controls autoplay></video>
+    </div>
+    <div class="ep-toolbar" id="ep-toolbar" style="display:none">
+      <label class="chk-all"><input type="checkbox" id="chk-all" checked> 全选</label>
+      <span id="ep-selected" class="ep-count"></span>
+      <button class="ghost" id="btn-select-all" style="margin:0 0 0 auto">全选 / 全不选</button>
     </div>
     <div class="ep-list" id="ep-list"></div>
   </div>
@@ -233,8 +245,11 @@ async function loadHome(){
       loadCategories();
     }else{
       const r=await fetch('/api/huangguo-proxy?url='+encodeURIComponent(HUANGGUO_BASE));
+      if(!r.ok)throw new Error('黄果源 '+r.status+'：请在管理抽屉配置可用的 backendProxy 后端代理');
       const html=await r.text();
-      renderGrid(parseHuangguoHtml(html));
+      const items=parseHuangguoHtml(html);
+      if(!items.length)grid.innerHTML='<div class="loading">私密源解析为空：可能页面结构变化或需配置后端代理</div>';
+      else renderGrid(items);
     }
   }catch(e){grid.innerHTML='<div class="loading">加载失败: '+e.message+'</div>'}
 }
@@ -265,24 +280,41 @@ async function loadCategory(tab){
 }
 
 function parseHuangguoHtml(html){
-  const items=[];
+  const items=[], seen=new Set();
   const base=HUANGGUO_BASE;
-  const re=/<a[^>]+href="([^"]*(?:detail|video|play)[^"]*)"[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"[^>]*>[\s\S]*?<(?:h\d|p|span)[^>]*>([^<]+)/gi;
-  let m;
-  while((m=re.exec(html))!==null&&items.length<30){
-    let href=m[1];
-    try{href=new URL(href,base).toString()}catch{}
-    let cover=m[2];
-    try{cover=new URL(cover,base).toString()}catch{}
-    items.push({id:href,title:(m[3]||'').trim(),cover,badge:'',detailUrl:href});
+  // 收集所有 a 链接：href 或 onclick 里带播放/详情关键字
+  const links=[];
+  const reA=/<a[^>]*>[\s\S]*?<\/a>|<a[^>]*\/\s*>/gi;
+  let am;
+  while((am=reA.exec(html))!==null&&links.length<300){
+    links.push(am[0]);
   }
-  // 兜底：找不到上面的结构时，直接扫 img + 链接对
+  const pushItem=(href,cover,title)=>{
+    if(!href)return;
+    let u=href;try{u=new URL(href,base).toString()}catch{return}
+    if(!/detail|video|play|show|vod|info|series|drama/i.test(u))return;
+    if(seen.has(u))return;seen.add(u);
+    let c=cover||'';try{if(c)c=new URL(c,base).toString()}catch{}
+    items.push({id:u,title:(title||'').trim(),cover:c,badge:'',detailUrl:u});
+  };
+  for(const seg of links){
+    const href=(seg.match(/href="([^"]+)"/)||[])[1]||'';
+    if(!href)continue;
+    const img=(seg.match(/<img[^>]+src="([^"]+)"/i)||[])[1]||'';
+    const t=(seg.match(/<(?:h\d|p|span|div)[^>]*>([\s\S]*?)<\/(?:h\d|p|span|div)>/i)||[])[1]||'';
+    const t2=(seg.match(/\s(title|alt)="([^"]+)"/i)||[])[2]||'';
+    const title=(t.replace(/<[^>]+>/g,'').trim())||t2;
+    pushItem(href,img,title);
+  }
+  // 兜底：裸链接 + 相邻 img
   if(!items.length){
-    const imgRe=/<a[^>]+href="([^"]+)"[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"[^>]*>/gi;
-    while((m=imgRe.exec(html))!==null&&items.length<30){
-      if(!/detail|video|play/i.test(m[1]))continue;
+    const re=/<a[^>]+href="([^"]+)"[^>]*>[\s\S]{0,400}?<img[^>]+src="([^"]+)"[^>]*>/gi;
+    let m;
+    while((m=re.exec(html))!==null&&items.length<30){
       let href=m[1],cover=m[2];
-      try{href=new URL(href,base).toString()}catch{}
+      try{href=new URL(href,base).toString()}catch{continue}
+      if(!/detail|video|play|show|vod|info|series|drama/i.test(href)||seen.has(href))continue;
+      seen.add(href);
       try{cover=new URL(cover,base).toString()}catch{}
       items.push({id:href,title:'',cover,badge:'',detailUrl:href});
     }
@@ -340,8 +372,11 @@ function openDetail(i){
   document.getElementById('detail-overlay').classList.add('open');
   if(mode==='public'){
     fetch('/api/web/hongguo/detail?id='+encodeURIComponent(it.id)).then(x=>x.json()).then(d=>{
-      const eps=(d.raw&&(d.raw.detail_page&&d.raw.detail_page.episode_list))||(d.raw&&d.raw.episode_list)||[];
-      _detail.eps=eps.map((ep,j)=>({number:Number(ep.number||ep.index||(j+1)),vid:(d.vids&&d.vids[j])||ep.vid||ep.id||''}));
+      const rawEps=(d.raw&&(d.raw.detail_page&&d.raw.detail_page.episode_list))||(d.raw&&d.raw.episode_list)||[];
+      let eps;
+      if(rawEps.length) eps=rawEps.map((ep,j)=>({number:Number(ep.number||ep.index||(j+1)),vid:(d.vids&&d.vids[j])||ep.vid||ep.id||''}));
+      else eps=(d.vids||[]).map((v,j)=>({number:j+1,vid:String(v)}));
+      _detail.eps=eps;
       renderEpisodes();
     }).catch(()=>{document.getElementById('ep-list').innerHTML='<div class="loading">选集获取失败</div>'});
   }else{
@@ -349,12 +384,46 @@ function openDetail(i){
   }
 }
 
+// 选集渲染：每集一个勾选框（下载选择）+ 集号按钮（点击播放），顶部全选工具条
+let _selected = new Set();
 function renderEpisodes(){
   const eps=_detail.eps||[];
-  if(!eps.length){document.getElementById('ep-list').innerHTML='<div class="loading">暂无选集</div>';return}
-  document.getElementById('ep-list').innerHTML=eps.map((ep,j)=>
-    '<button class="ep-btn" data-j="'+j+'">'+ep.number+'</button>').join('');
-  document.getElementById('ep-list').querySelectorAll('.ep-btn').forEach(b=>b.onclick=()=>playEpisode(+b.dataset.j));
+  const list=document.getElementById('ep-list');
+  const bar=document.getElementById('ep-toolbar');
+  const count=document.getElementById('ep-selected');
+  if(!eps.length){list.innerHTML='<div class="loading">暂无选集</div>';bar.style.display='none';return}
+  _selected=new Set(eps.map(e=>e.number));
+  list.innerHTML=eps.map((ep,j)=>
+    '<label class="ep-item" data-j="'+j+'">'+
+    '<input type="checkbox" class="ep-check" data-j="'+j+'" checked>'+
+    '<button class="ep-btn" data-j="'+j+'">'+ep.number+'</button></label>').join('');
+  const checkAll=document.getElementById('chk-all');
+  checkAll.checked=true;checkAll.onchange=()=>{
+    const on=checkAll.checked;
+    list.querySelectorAll('.ep-check').forEach(c=>{c.checked=on;c.closest('.ep-item').classList.toggle('off',!on);});
+    _selected.clear();eps.forEach((e,j)=>{if(on)_selected.add(e.number);});
+    updateEpCount();
+  };
+  document.getElementById('btn-select-all').onclick=()=>{
+    const all=eps.every(e=>_selected.has(e.number));
+    checkAll.checked=!all;checkAll.onchange();
+  };
+  list.querySelectorAll('.ep-btn').forEach(b=>b.onclick=()=>playEpisode(+b.dataset.j));
+  list.querySelectorAll('.ep-check').forEach(c=>c.onchange=()=>{
+    const n=eps[+c.dataset.j].number;
+    if(c.checked)_selected.add(n);else _selected.delete(n);
+    c.closest('.ep-item').classList.toggle('off',!c.checked);
+    const on=eps.every(e=>_selected.has(e.number));
+    document.getElementById('chk-all').checked=on&&eps.length>0;
+    updateEpCount();
+  });
+  bar.style.display='flex';
+  updateEpCount();
+}
+function updateEpCount(){
+  const el=document.getElementById('ep-selected');
+  const eps=_detail.eps||[];
+  el.textContent='已选 '+_selected.size+' / '+eps.length+' 集';
 }
 
 // hls.js 播放器统一入口：m3u8 走 Hls（Chrome 原生不支持），mp4 直放
@@ -416,25 +485,36 @@ function extractVideoSrc(html,base){
 }
 
 function loadHuangguoDetail(it){
-  fetch('/api/huangguo-proxy?url='+encodeURIComponent(it.detailUrl||it.id)).then(r=>r.text()).then(html=>{
+  fetch('/api/huangguo-proxy?url='+encodeURIComponent(it.detailUrl||it.id)).then(r=>{
+    if(!r.ok)throw new Error('详情页 '+r.status+'（检查后端代理 backendProxy 是否配置且可访问黄果源）');
+    return r.text();
+  }).then(html=>{
     const eps=[];
-    // 列表页集数按钮 a/button href 指向播放页
-    const re=/<a[^>]+href="([^"]*(?:video|play|detail)[^"]*)"[^>]*>[\s\S]*?([0-9]{1,3})[\s\S]*?<\/a>/gi;
+    const base=it.detailUrl||it.id;
+    // 1) a/button 链接型选集（含 onclick/data-* 播放链接）
+    const re=/(?:<a[^>]+|<button[^>]+)(?:href="([^"]*)"|onclick="([^"]*)"|data-(?:id|url|vid|ep)="([^"]*)")[^>]*>[\s\S]*?([0-9]{1,3})[\s\S]*?(?:<\/a>|<\/button>)/gi;
     let m,seen=new Set();
-    while((m=re.exec(html))!==null&&eps.length<200){
-      const n=parseInt(m[2],10);if(!n||seen.has(n))continue;seen.add(n);
-      let u=m[1];try{u=new URL(u,it.detailUrl||it.id).toString()}catch{}
-      eps.push({number:n,detailUrl:u,vid:'',playUrl:''});
+    while((m=re.exec(html))!==null&&eps.length<300){
+      const n=parseInt(m[4],10);if(!n||seen.has(n))continue;seen.add(n);
+      let u=m[1]||m[2]||m[3]||'';
+      if(!u){ // onclick="...play(123)..." 里抓 id
+        const idm=m[2].match(/[0-9]{6,}/);
+        if(idm)u=idm[0];
+      }
+      if(!u){const idm=(m[2]||'').match(/'([^']+)'/);if(idm)u=idm[1];}
+      let href='';
+      try{href=new URL(u,base).toString()}catch{href=u}
+      eps.push({number:n,detailUrl:href||base,vid:'',playUrl:''});
     }
+    // 2) 视频源在详情页直接内嵌（单集站）
     if(!eps.length){
-      const title=(html.match(/<title>([\s\S]*?)<\/title>/i)||[])[1]||it.title||'';
-      const src=extractVideoSrc(html,it.detailUrl||it.id);
-      if(src)eps.push({number:1,detailUrl:it.detailUrl||it.id,vid:'',playUrl:''});
+      const src=extractVideoSrc(html,base);
+      if(src)eps.push({number:1,detailUrl:base,vid:'',playUrl:''});
     }
     _detail.eps=eps.sort((a,b)=>a.number-b.number);
     renderEpisodes();
     if(!eps.length)document.getElementById('ep-list').innerHTML='<div class="loading">未能解析出选集（页面结构可能变化）</div>';
-  }).catch(()=>{document.getElementById('ep-list').innerHTML='<div class="loading">详情获取失败</div>'});
+  }).catch(e=>{document.getElementById('ep-list').innerHTML='<div class="loading">详情获取失败: '+e.message+'</div>'});
 }
 
 function closeDetail(){
@@ -451,10 +531,11 @@ document.getElementById('btn-download').onclick=async()=>{
   if(!_detail||!_detail.seriesId){st.textContent='缺少 seriesId';return}
   const eps=_detail.eps||[];
   if(!eps.length){st.textContent='选集未就绪';return}
-  st.textContent='提交中…';
+  const episodes=[..._selected].filter(n=>n>0).sort((a,b)=>a-b);
+  if(!episodes.length){st.textContent='请先勾选要下载的集数';return}
+  st.textContent='提交中…（'+episodes.length+'集）';
   document.getElementById('btn-download').disabled=true;
   try{
-    const episodes=eps.map(e=>Number(e.number)||0).filter(n=>n>0);
     const r=await fetch('/api/download/tasks',{method:'POST',headers:Object.assign({'Content-Type':'application/json'},AUTH()),
       body:JSON.stringify({source:'hongguo',title:_detail.title,seriesId:String(_detail.seriesId),episodes})});
     const d=await r.json().catch(()=>({}));
