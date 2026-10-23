@@ -1,4 +1,4 @@
-name: Release (APK + Docker Image)
+name: Release
 
 on:
   push:
@@ -20,21 +20,14 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK (preinstalled)
+      - name: Set up Android SDK
         run: |
           SDK=/usr/local/lib/android/sdk
           echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
           echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
           yes | $SDK/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
           yes | $SDK/cmdline-tools/latest/bin/sdkmanager --channel=0 "platforms;android-37" > /dev/null 2>&1 || true
-          yes | $SDK/cmdline-tools/latest/bin/sdkmanager --channel=0 "platforms;android-37.0" > /dev/null 2>&1 || true
           yes | $SDK/cmdline-tools/latest/bin/sdkmanager --channel=0 "build-tools;37.0.0" > /dev/null 2>&1 || true
-          ls $SDK/platforms $SDK/build-tools
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
 
       - name: Set up Kotlin compiler
         run: |
@@ -42,16 +35,9 @@ jobs:
           unzip -q /tmp/kotlin.zip -d /opt/kotlin/
           echo "KOTLIN_HOME=/opt/kotlin/kotlinc" >> $GITHUB_ENV
 
-      - name: Compute version
-        run: |
-          VER=$(grep "versionName" app/build.gradle | sed -E "s/.*versionName '([^']+)'.*/\1/")
-          echo "VER=$VER" >> $GITHUB_ENV
-          echo "Veyra version: $VER"
-
       - name: Restore signing keystore
         run: |
           echo "${{ secrets.Veyra_KEYSTORE_B64 }}" | base64 -d > $RUNNER_TEMP/veyra-release.keystore
-          ls -la $RUNNER_TEMP/veyra-release.keystore
 
       - name: Build release APK
         env:
@@ -61,39 +47,22 @@ jobs:
           CHENGZI_KEY_ALIAS: ${{ secrets.Veyra_KEY_ALIAS }}
         run: ./gradlew :app:assembleRelease --no-daemon
 
-      - name: Verify APK signature & version
+      - name: Verify APK
         run: |
           ls -la app/build/outputs/apk/release/app-release.apk
-          $ANDROID_HOME/build-tools/*/aapt2 dump badging app/build/outputs/apk/release/app-release.apk | grep versionName || true
+          file app/build/outputs/apk/release/app-release.apk
 
-      - name: Save Docker image tar
-        continue-on-error: true
-        run: |
-          docker build -t gybeyond/veyra-backend:$VER server
-          docker tag gybeyond/veyra-backend:$VER gybeyond/veyra-backend:latest
-          docker save -o veyra-backend.tar gybeyond/veyra-backend:latest
-          ls -la veyra-backend.tar
-
-      - name: Push image to Docker Hub (if credentials configured)
-        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
-        continue-on-error: true
+      - name: Create Release
         env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
-          docker push gybeyond/veyra-backend:$VER
-          docker push gybeyond/veyra-backend:latest
-
-      - name: Create Release with APK
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ env.VER }}
-          name: Veyra ${{ env.VER }}
-          body: |
-            v${{ env.VER }}: Go签名器直连取流，1080p全清晰度，不再依赖被风控的中转API
-          files: |
-            app/build/outputs/apk/release/app-release.apk
-          fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "Creating release for $TAG"
+          # 删除已存在的 release（tag push 会自动创建空 release）
+          gh release delete "$TAG" --yes --cleanup-tag=false 2>/dev/null || true
+          # 创建新 release 并上传 APK
+          gh release create "$TAG" \
+            app/build/outputs/apk/release/app-release.apk \
+            --title "Veyra $TAG" \
+            --notes "$TAG: Go签名器直连取流，1080p全清晰度" \
+            --latest
