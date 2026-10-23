@@ -85,12 +85,15 @@ jobs:
           docker push gybeyond/veyra-backend:$VER
           docker push gybeyond/veyra-backend:latest
 
-      - name: Upload APK to Release
+      - name: Create Release with APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VER }}
+          name: Veyra ${{ env.VER }}
+          body: |
+            v${{ env.VER }}: Go签名器直连取流，1080p全清晰度，不再依赖被风控的中转API
+          files: |
+            app/build/outputs/apk/release/app-release.apk
+          fail_on_unmatched_files: true
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cp app/build/outputs/apk/release/app-release.apk Veyra-$VER-release.apk
-          ls -la Veyra-$VER-release.apk
-          # tag push 已自动创建 release，直接 upload 附件
-          gh release upload v$VER Veyra-$VER-release.apk --clobber
-          gh release edit v$VER --title "Veyra $VER" --notes "v$VER: Go签名器直连取流，1080p全清晰度，不再依赖被风控的中转API"
+          GITHUB_TOKEN: ${{ github.token }}
