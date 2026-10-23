@@ -85,15 +85,12 @@ jobs:
           docker push gybeyond/veyra-backend:$VER
           docker push gybeyond/veyra-backend:latest
 
-      - name: Create GitHub Release
+      - name: Upload APK to Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cp app/build/outputs/apk/release/app-release.apk Veyra-$VER-release.apk
-          # 删除已存在的 release（可能上次跑挂了残留）
-          gh release delete v$VER --yes --cleanup-tag=false 2>/dev/null || true
-          gh release create v$VER \
-            Veyra-$VER-release.apk \
-            --title "Veyra $VER" \
-            --notes "v$VER: Go签名器直连取流，1080p全清晰度，不再依赖被风控的中转API"
           ls -la Veyra-$VER-release.apk
+          # tag push 已自动创建 release，直接 upload 附件
+          gh release upload v$VER Veyra-$VER-release.apk --clobber
+          gh release edit v$VER --title "Veyra $VER" --notes "v$VER: Go签名器直连取流，1080p全清晰度，不再依赖被风控的中转API"
