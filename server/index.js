@@ -231,6 +231,13 @@ app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'webui.html'));
 });
 
+// hls.js 本地托管：不依赖 cdn.jsdelivr.net（国内网络不稳定会导致 m3u8 播放直接失败）
+app.get('/hls.min.js', (_req, res) => {
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.sendFile(path.join(__dirname, 'hls.min.js'));
+});
+
 // ---- Web 端红果内容代理（hongguoduanju.com 公开页，无需签名）----
 const { execFile } = require('child_process');
 

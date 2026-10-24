@@ -10,7 +10,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund --prefer-offline
 
 # 业务代码（.dockerignore 排除 node_modules/test/data/旧签名器）
-COPY index.js webui.html downloader.js hongguo-app.js hongguo-decrypt.js proxy-fetch.js ./
+COPY index.js webui.html downloader.js hongguo-app.js hongguo-decrypt.js proxy-fetch.js hls.min.js ./
 
 # Go 签名器（红果直连取流，全清晰度 1080p，hongguo-app.js 通过 child_process 调用）
 COPY hongguo_sign ./hongguo_sign
