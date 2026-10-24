@@ -265,18 +265,19 @@ async function searchSeries(title, expectEpisodes) {
   throw new Error('未匹配到对应红果剧集');
 }
 
-/** 网页源保底：镜像站播放页 #videoInitialData → videoSrc（网页源直链）。 */
+/** 网页源保底：镜像站播放页 #videoInitialData → videoSrc（网页源直链）。返回 { url, referer }，referer 供下载时防盗链校验。 */
 async function fetchWebUrl(id, episode) {
   for (const origin of MIRROR_ORIGINS) {
     try {
       const path = episode === 1 ? `/video/${id}/` : `/video/${id}/ep-${episode}/`;
-      const { status, body } = await httpGet(origin + path);
+      // 抓播放页带镜像站自身 Referer（部分镜像站校验同站来源）
+      const { status, body } = await httpGet(origin + path, { Referer: origin + '/' });
       if (status !== 200) continue;
       const m = body.match(/<script[^>]*id="videoInitialData"[^>]*>([\s\S]*?)<\/script>/);
       if (!m) continue;
       const data = JSON.parse(m[1]);
       const src = data.videoSrc;
-      if (typeof src === 'string' && /^https?:\/\//.test(src)) return src;
+      if (typeof src === 'string' && /^https?:\/\//.test(src)) return { url: src, referer: origin };
     } catch { /* 换下一个 origin */ }
   }
   throw new Error('网页源播放地址获取失败');

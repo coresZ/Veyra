@@ -558,9 +558,14 @@ async function runTask(task) {
   //  - 每轮只下载未成功的分集；失败集自动进入下一轮，下一轮重新取流换新 URL（解决 403/地址过期）
   //  - 全部成功或达到自动重试轮数后结束；仍失败的集保留在 failedEpisodes，可手动重试失败集
   // 红果 CDN 校验 Referer：带 Referer 反而 403，必须不带（实测 5 种域无 Referer 均 200）
-  const headersFor = ep => ep.key
-    ? { 'User-Agent': HONGGUO_VIDEO_UA, 'Accept-Encoding': 'identity' }
-    : { 'User-Agent': BROWSER_UA, 'Accept-Encoding': 'identity' };
+  const headersFor = ep => {
+    const h = ep.key
+      ? { 'User-Agent': HONGGUO_VIDEO_UA, 'Accept-Encoding': 'identity' }
+      : { 'User-Agent': BROWSER_UA, 'Accept-Encoding': 'identity' };
+    // 网页源直链（镜像站）防盗链：下载必须带镜像站 Referer，否则源站 403
+    if (ep._webReferer) h['Referer'] = ep._webReferer;
+    return h;
+  };
   const signal = { aborted: false };
   const AUTO_RETRY_ROUNDS = 2; // 初始 1 轮 + 自动补 2 轮（每轮重新取流）
   let downloaded = 0;
@@ -605,8 +610,10 @@ async function runTask(task) {
               // 仍无播放地址（手机端未推 URL 且 App 源不可用）：NAS 自抓镜像站网页源保底
               if (!ep.url && attempt === 0) {
                 try {
-                  ep.url = await hgApp.fetchWebUrl(task._webId || task.seriesId, idx + 1);
+                  const web = await hgApp.fetchWebUrl(task._webId || task.seriesId, idx + 1);
+                  ep.url = web.url;
                   ep.key = '';
+                  ep._webReferer = web.referer || ''; // 镜像站直链防盗链：下载时带 Referer，否则 403
                   console.log(`[hongguo-app] 第 ${idx + 1} 集网页源保底获取成功`);
                 } catch (e) {
                   throw new Error(`第 ${idx + 1} 集网页源解析失败: ${e.message}`);
