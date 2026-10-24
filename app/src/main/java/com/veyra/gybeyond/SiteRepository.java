@@ -710,7 +710,8 @@ final class SiteRepository {
         if (decoded == null) {
             decoded = fetch(value);
             String mode = profile.object("cover").optString("mode");
-            if ("aes-cbc".equals(mode) || "auto".equals(mode) && !validImage(decoded)) {
+            // 后端通道若已解密返回真图则直接使用；仅当数据仍非有效图片时才本地 AES-CBC 解密（兼容旧后端/直连通道）
+            if (!validImage(decoded) && ("aes-cbc".equals(mode) || "auto".equals(mode))) {
                 Cipher cipher = Cipher.getInstance(profile.object("cover").getString("transformation"));
                 cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(profile.keyBytes("key"), "AES"),
                         new IvParameterSpec(profile.keyBytes("iv")));
