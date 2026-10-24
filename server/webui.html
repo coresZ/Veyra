@@ -187,7 +187,18 @@ video{width:100%;border-radius:10px;background:#000}
     <button class="ghost" id="btn-reset-otp">重置动态码</button>
     <h2>用户管理</h2>
     <table><thead><tr><th>用户</th><th>角色</th><th>操作</th></tr></thead><tbody id="user-rows"></tbody></table>
-    <div class="row" style="margin-top:16px"><button class="ghost" id="btn-admin-logout">退出登录</button></div>
+    <div class="row" style="margin-top:16px">
+      <button class="ghost" id="btn-admin-diagnose">私密源诊断</button>
+      <button class="ghost" id="btn-admin-logout">退出登录</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="diag-overlay">
+  <div class="modal modal-wide">
+    <button class="modal-close" id="btn-close-diag">✕</button>
+    <h3 style="margin-bottom:12px">私密源诊断</h3>
+    <div id="diag-body" style="font-size:12px;line-height:1.8;color:var(--mut);white-space:pre-wrap;word-break:break-all;overflow-y:auto;max-height:62vh"></div>
   </div>
 </div>
 
@@ -274,9 +285,14 @@ document.querySelectorAll('#drawer [data-ch]').forEach(l=>l.onclick=()=>{
   privateChannel=l.dataset.ch;localStorage.setItem(channelKey,privateChannel);loadChannelUi();toast('私密通道：'+(privateChannel==='relay'?'后端转发':'直连'));
 });
 function proxyUrl(u){
-  if(privateChannel==='relay')return '/api/huangguo-proxy?url='+encodeURIComponent(u);
+  if(privateChannel==='relay')return hgProxy(u);
   // 直连模式：https 页面加载 http 资源会被浏览器拦（混合内容），统一升 https 尝试
   return u.replace(/^http:\/\//i,'https://');
+}
+// 私密源代理 URL：统一附加源站 Referer，防盗链校验按播放页域名放行
+function hgProxy(u){
+  const ref=encodeURIComponent(HUANGGUO_BASE.replace(/\/$/,''));
+  return '/api/huangguo-proxy?url='+encodeURIComponent(u)+'&ref='+ref;
 }
 
 async function loadHome(){
@@ -287,7 +303,7 @@ async function loadHome(){
       renderGrid(r.items||[]);
       loadCategories();
     }else{
-      const r=await fetch('/api/huangguo-proxy?url='+encodeURIComponent(HUANGGUO_BASE));
+      const r=await fetch(hgProxy(HUANGGUO_BASE));
       if(!r.ok)throw new Error('黄果源 '+r.status+'：请在管理抽屉配置可用的 backendProxy 后端代理');
       const html=await r.text();
       const items=parseHuangguoHtml(html);
@@ -403,7 +419,7 @@ async function doSearch(){
       const r=await fetch('/api/web/hongguo/search?q='+encodeURIComponent(q)).then(x=>x.json());
       renderGrid(r.items||[]);
     }else{
-      const r=await fetch('/api/huangguo-proxy?url='+encodeURIComponent(HUANGGUO_BASE+'search?keyword='+encodeURIComponent(q)));
+      const r=await fetch(hgProxy(HUANGGUO_BASE+'search?keyword='+encodeURIComponent(q)));
       renderGrid(parseHuangguoHtml(await r.text()));
     }
   }catch(e){grid.innerHTML='<div class="loading">搜索失败: '+e.message+'</div>'}
@@ -555,8 +571,9 @@ function playEpisode(j,resumeSec){
   }else{
     if(ep.playUrl){attachPlayer(ep.playUrl,doResume);return}
     const u=ep.detailUrl||_detail.id;
-    fetch('/api/huangguo-proxy?url='+encodeURIComponent(u)).then(r=>r.text()).then(html=>extractVideoSrcAsync(html,u)).then(src=>{
+    fetch(hgProxy(u)).then(r=>r.text()).then(html=>extractVideoSrcAsync(html,u)).then(src=>{
       if(!src){toast('未解析到播放地址（'+u.slice(0,60)+'），可尝试在 ⚙ 里切换 直连/后端转发 通道');return}
+      _lastPrivatePlayUrl=src;
       const playUrl=proxyUrl(src);
       ep.playUrl=playUrl;
       attachPlayer(playUrl,doResume);
@@ -593,7 +610,7 @@ async function extractVideoSrcAsync(html,base){
     try{
       const frameUrl=new URL(im[1],base).toString();
       if(/\.(m3u8|mp4)(\?|$)/i.test(frameUrl))return frameUrl;
-      const r=await fetch('/api/huangguo-proxy?url='+encodeURIComponent(frameUrl));
+      const r=await fetch(hgProxy(frameUrl));
       if(!r.ok)return '';
       const fhtml=await r.text();
       const s=extractVideoSrc(fhtml,frameUrl);
@@ -604,7 +621,7 @@ async function extractVideoSrcAsync(html,base){
 }
 
 function loadHuangguoDetail(it){
-  fetch('/api/huangguo-proxy?url='+encodeURIComponent(it.detailUrl||it.id)).then(r=>{
+  fetch(hgProxy(it.detailUrl||it.id)).then(r=>{
     if(!r.ok)throw new Error('详情页 '+r.status+'（检查后端代理 backendProxy 是否配置且可访问黄果源）');
     return r.text();
   }).then(html=>{
@@ -869,6 +886,45 @@ document.getElementById('btn-reset-otp').onclick=async()=>{
 };
 
 document.getElementById('btn-admin-logout').onclick=()=>{adminToken='';localStorage.removeItem('veyraAdmin');location.reload()};
+
+// ---- 私密源诊断面板 ----
+let _lastPrivatePlayUrl=''; // 最近一次私密播放地址（原始源 URL）
+document.getElementById('btn-admin-diagnose').onclick=async()=>{
+  document.getElementById('diag-overlay').classList.add('open');
+  const body=document.getElementById('diag-body');
+  body.textContent='诊断中…\n';
+  const lines=['== Veyra 私密源诊断 ==','私密站点: '+HUANGGUO_BASE,'转发通道: '+(privateChannel==='relay'?'后端转发':'直连')+'\n'];
+  const debug=(label,url)=>fetch('/api/debug/proxy?url='+encodeURIComponent(url),{headers:AUTH()}).then(r=>r.json()).then(d=>{
+    lines.push('['+label+']');
+    lines.push('  URL: '+String(d.target||url).slice(0,140));
+    lines.push('  判定: '+(d.verdict||'?')+' → '+(d.ok?'OK':'失败'));
+    if(d.status)lines.push('  上游HTTP: '+d.status+' 类型: '+(d.contentType||'').slice(0,40)+' 大小: '+d.bytes+'B');
+    if(d.error)lines.push('  错误: '+d.error);
+    lines.push('');
+  }).catch(e=>lines.push('['+label+'] 诊断失败: '+e.message+'\n'));
+  // 1) 首页代理
+  try{
+    const r=await fetch(hgProxy(HUANGGUO_BASE));
+    const html=await r.text();
+    lines.push('[私密首页] HTTP '+r.status+' 字节 '+(html.length||0));
+    const items=parseHuangguoHtml(html);
+    lines.push('  解析条目: '+items.length);
+    const cover=items[0]&&items[0].cover;
+    if(cover)lines.push('  示例封面: '+cover.slice(0,140));
+    else lines.push('  !! 未解析到封面 URL（解析层问题）');
+    lines.push('');
+    if(cover)await debug('封面',cover);
+  }catch(e){lines.push('[私密首页] 失败: '+e.message+'\n')}
+  // 2) 最近播放源
+  if(_lastPrivatePlayUrl){
+    await debug('最近播放源',_lastPrivatePlayUrl);
+  }else{
+    lines.push('[最近播放源] 暂无（去私密模式点一集播放后再诊断）\n');
+  }
+  body.textContent=lines.join('\n');
+};
+document.getElementById('btn-close-diag').onclick=()=>document.getElementById('diag-overlay').classList.remove('open');
+document.getElementById('diag-overlay').addEventListener('click',e=>{if(e.target.id==='diag-overlay')document.getElementById('diag-overlay').classList.remove('open')});
 
 async function loadUsers(){
   try{

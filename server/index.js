@@ -638,7 +638,7 @@ app.get('/api/huangguo-proxy', (req, res) => {
     'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36',
     'Accept': '*/*',
   };
-  headers['Referer'] = `${parsed.protocol}//${parsed.hostname}/`;
+  headers['Referer'] = req.query.ref ? String(req.query.ref) : `${parsed.protocol}//${parsed.hostname}/`;
   proxyFetch.requestThroughProxy(target, backendProxy, {
     headers, timeout: 25_000, maxBytes: 50 * 1024 * 1024, redirects: 5,
   }, (err, result) => {
@@ -660,19 +660,21 @@ app.get('/api/huangguo-proxy', (req, res) => {
       // 重写 m3u8：普通 URI 行 + #EXT-X-KEY/#EXT-X-MAP 的 URI="..." 全部包一层后端代理
       // 协议跟随访问方式：公网经反代 TLS 终止后本服务收到的是 HTTP（req.protocol 不可靠），
       // 故公网域名固定 https、局域网/本机保持 http；host 用请求真实 Host（反代透传）。
+      // 附加 ref=<源站>：分片/CDN 防盗链校验 Referer 需为播放页域名（此前传 CDN 自身域名会 403）
       const proxyHost = String(req.headers.host || '');
       const proxyHostOnly = proxyHost.split(':')[0].toLowerCase();
       const privateHostRe = /^(localhost|127\.0\.0\.1|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
       const base = `${privateHostRe.test(proxyHostOnly) ? 'http' : 'https'}://${proxyHost}/api/huangguo-proxy?url=`;
+      const ref = req.query.ref ? '&ref=' + encodeURIComponent(String(req.query.ref)) : '';
       let text = body.toString('utf8');
       text = text.replace(/(URI=")([^"]+)(")/g, (_m, a, u, c) => {
-        try { return a + base + encodeURIComponent(new URL(u, target).toString()) + c; }
+        try { return a + base + encodeURIComponent(new URL(u, target).toString()) + ref + c; }
         catch { return _m; }
       });
       text = text.replace(/^(?!#)(.+)$/gm, (line) => {
         const uri = line.trim();
         if (!uri) return line;
-        try { return base + encodeURIComponent(new URL(uri, target).toString()); }
+        try { return base + encodeURIComponent(new URL(uri, target).toString()) + ref; }
         catch { return line; }
       });
       body = Buffer.from(text, 'utf8');
