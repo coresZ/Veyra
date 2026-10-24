@@ -941,6 +941,10 @@ function showDownloadSheet() {
   downloadParsing = false;
   downloadOverlay.hidden = false;
   updateBackEnabled();
+  // 先强制拉服务端最新角色（管理员/NAS 下载鉴权），再渲染弹层
+  if (state.account.loggedIn) {
+    api('refresh-account').then(fresh => { if (fresh && fresh.role) setAccount(fresh); }).catch(() => {});
+  }
   renderDownloadSheet();
 }
 
@@ -1006,6 +1010,8 @@ async function submitDownloadTo(target) {
   if (downloadParsing) return;
   if (target === 'nas') {
     if (!state.account.loggedIn) { toast('请先登录账号', true); return; }
+    // 提交前再强制拉一次最新角色，避免本地缓存陈旧误判非管理员
+    try { const fresh = await api('refresh-account'); if (fresh && fresh.role) setAccount(fresh); } catch (ignore) {}
     if (state.account.role !== 'admin') { toast('仅管理员可下载到 NAS', true); return; }
   }
   const episodes = asArray(state.detail.episodes).map(ep => Number(ep.number) || 0).filter(n => downloadSelection.has(n));

@@ -179,6 +179,7 @@ final class AccountService {
         if (token.isEmpty() || !user.has("id")) throw new IllegalStateException("后端返回数据异常，请稍后重试");
         prefs.edit().putString("token", token).putString("userId", user.getString("id"))
                 .putString("username", user.optString("username", ""))
+                .putString("role", user.optString("role", "user"))
                 .putBoolean("huangguoUnlocked", user.optBoolean("huangguoUnlocked", false)).apply();
         store.activateUser(user.getString("id"));
     }

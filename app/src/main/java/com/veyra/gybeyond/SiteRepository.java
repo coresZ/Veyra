@@ -644,6 +644,15 @@ final class SiteRepository {
             } catch (Exception ignored) { }
         }
         if (episodes.length() == 0) throw new IllegalStateException("未找到选集列表");
+        // 黄果详情页选集链接顺序偶有错乱（如第 2 集排在最前），统一按集号升序
+        {
+            java.util.List<JSONObject> ordered = new java.util.ArrayList<>();
+            for (int i = 0; i < episodes.length(); i++) ordered.add(episodes.optJSONObject(i));
+            ordered.sort((a, b) -> Integer.compare(a.optInt("number"), b.optInt("number")));
+            JSONArray sortedEpisodes = new JSONArray();
+            for (JSONObject o : ordered) sortedEpisodes.put(o);
+            episodes = sortedEpisodes;
+        }
         result.put("episodeLabel", "共 " + episodes.length() + " 集");
         result.put("episodes", episodes);
         // 提取红果官方系列键（网页版 JSON 里可能带 App series_id/album_id 等），供 NAS 任务走红果 App 取流
