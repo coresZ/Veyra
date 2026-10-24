@@ -486,7 +486,13 @@ async function huangguoDownloadEpisode(seriesId, number, dir, plainFile) {
   if (!masterUrl) throw new Error('解析播放地址失败（' + errors.join(' | ') + '）');
   // Referer 用解析出 m3u8 的站点（CDN 防盗链校验 Referer 需为播放页域名；硬编码 www 在 thu/m 站点解析时会 403）
   const referer = `${masterSite}/video/${seriesId}/` + (first ? '' : `ep-${number}/`);
-  const plan = await expandHuangguoM3u8(masterUrl, referer, 0);
+  let plan;
+  try {
+    plan = await expandHuangguoM3u8(masterUrl, referer, 0);
+  } catch (e) {
+    console.log(`[huangguo] 第 ${number} 集 m3u8 展开失败 master=${String(masterUrl).slice(0, 130)} 原因: ${e.message}`);
+    throw e;
+  }
   if (!plan.segments.length) throw new Error('m3u8 无分片');
   console.log(`[huangguo] 第 ${number} 集 m3u8 展开成功 分片=${plan.segments.length} keys=${plan.keys.length}`);
 
@@ -724,6 +730,7 @@ async function runTask(task) {
                 // 单集失败不中断整剧：标记失败集进入下一轮自动重试，其余分集继续
                 ep.failed = true;
                 ep.error = err.message;
+                console.log(`[download] ${task.title} 第 ${idx + 1} 集失败(已重试 ${RETRIES} 次): ${err.message}`);
                 if (!task.failedEpisodes) task.failedEpisodes = [];
                 if (!task.failedEpisodes.some(f => f.index === idx + 1)) task.failedEpisodes.push({ index: idx + 1, error: err.message });
                 task.progress.detail = `第 ${idx + 1} 集失败（将自动重试）`;
