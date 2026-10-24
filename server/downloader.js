@@ -503,8 +503,9 @@ async function huangguoDownloadEpisode(seriesId, number, dir, plainFile) {
     }
   }
   if (!masterUrl) throw new Error('解析播放地址失败（' + errors.join(' | ') + '）');
-  // Referer 用解析出 m3u8 的站点（CDN 防盗链校验 Referer 需为播放页域名；硬编码 www 在 thu/m 站点解析时会 403）
-  const referer = `${masterSite}/video/${seriesId}/` + (first ? '' : `ep-${number}/`);
+  // Referer 与 APK 播放链路一致（m.pqhybuxo.cc）：源站/CDN 防盗链校验播放页域名，
+  // www/thu 站域名作为 Referer 会被 302 到 CDN 后返回风控二进制（600KB 垃圾）导致 m3u8 展开失败
+  const referer = `https://m.pqhybuxo.cc/video/${seriesId}/` + (first ? '' : `ep-${number}/`);
   let plan;
   try {
     plan = await expandHuangguoM3u8(masterUrl, referer, 0);
@@ -532,7 +533,7 @@ async function huangguoDownloadEpisode(seriesId, number, dir, plainFile) {
   // 下载失败自动重试：403/瞬时限流换 Referer 变体（www/thu/m 站点域名各试一次），仍失败才报错
   const segFiles = new Array(plan.segments.length);
   let nextSeg = 0;
-  const segReferers = [referer, ...HUANGGUO_SITES.map(s => `${s}/video/${seriesId}/` + (first ? '' : `ep-${number}/`))];
+  const segReferers = [referer, `https://www.pqhybuxo.cc/video/${seriesId}/` + (first ? '' : `ep-${number}/`), `https://thu.pqhybuxo.cc/video/${seriesId}/` + (first ? '' : `ep-${number}/`)];
   await Promise.all(Array.from({ length: Math.min(6, plan.segments.length) }, async () => {
     while (nextSeg < plan.segments.length) {
       const i = nextSeg++;
