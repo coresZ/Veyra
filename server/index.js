@@ -1069,6 +1069,45 @@ app.put('/api/library', auth, (req, res) => {
   if (changed) flush();
 })();
 
+// 最新 APK 下载：WebUI 一键获取（手机弱网/国内访问 GitHub 不稳定时，经 NAS 后端中转拉取再转发）
+app.get('/api/update/apk', (req, res) => {
+  const fetchLatest = () => new Promise((resolve, reject) => {
+    proxyFetch.requestThroughProxy('https://api.github.com/repos/gybeyond1/Veyra/releases/latest', backendProxy, {
+      headers: { 'User-Agent': 'Veyra-Backend', 'Accept': 'application/vnd.github+json' },
+      timeout: 20_000, maxBytes: 1024 * 1024, redirects: 3,
+    }, (err, result) => {
+      if (err) return reject(new Error('查询最新版本失败: ' + (err.message || '')));
+      if (!result || result.status < 200 || result.status >= 300) return reject(new Error('查询最新版本失败（HTTP ' + (result && result.status) + '）'));
+      try {
+        const release = JSON.parse(result.body.toString('utf8'));
+        const apk = (release.assets || []).find(a => String(a.name || '').endsWith('.apk'));
+        if (!apk) return reject(new Error('发布中没有 APK 资产'));
+        resolve({ tag: release.tag_name, url: apk.browser_download_url, name: apk.name, size: apk.size });
+      } catch (e) { reject(new Error('查询最新版本响应异常')); }
+    });
+  });
+  const streamApk = (url, name, size, tag) => {
+    proxyFetch.requestThroughProxy(url, backendProxy, {
+      headers: { 'User-Agent': 'Veyra-Backend', 'Accept': '*/*' },
+      timeout: 60_000, maxBytes: 60 * 1024 * 1024, redirects: 5,
+    }, (err, result) => {
+      if (err || !result || result.status < 200 || result.status >= 300) {
+        if (!res.headersSent) return res.status(502).json({ error: '下载 APK 失败: ' + ((err && err.message) || 'HTTP ' + (result && result.status)) });
+        return res.end();
+      }
+      res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+      res.setHeader('Content-Length', String(result.body.length));
+      res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+      res.setHeader('X-Apk-Version', tag);
+      res.end(result.body);
+    });
+  };
+  fetchLatest().then(info => streamApk(info.url, info.name, info.size, info.tag), err => {
+    if (!res.headersSent) return res.status(502).json({ error: err.message });
+    res.end();
+  });
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`veyra-backend listening on 0.0.0.0:${PORT}, data dir: ${DATA_DIR}`);
 });
