@@ -689,6 +689,28 @@ function isPrivateHost(hostname) {
   }
   return false;
 }
+// 黄果单集转 mp4（APK 手机下载用：后端取流封装成可播 mp4，返回下载直链）
+app.get('/api/web/huangguo/episode-mp4', auth, async (req, res) => {
+  const seriesId = String(req.query.seriesId || '').trim();
+  const episode = parseInt(String(req.query.episode || ''), 10);
+  if (!/^\d+$/.test(seriesId) || !episode || episode < 1) return res.status(400).json({ error: '参数无效' });
+  try {
+    const mp4 = await downloader.huangguoEpisodeMp4(seriesId, episode);
+    res.json({ url: '/api/huangguo-episode-mp4/' + encodeURIComponent(path.basename(mp4)) });
+  } catch (e) {
+    console.log('[episode-mp4]', new Date().toISOString(), seriesId, 'ep', episode, 'ERR', e.message);
+    res.status(502).json({ error: '取流失败: ' + e.message });
+  }
+});
+// 转换产物直链：APK 下载线程无登录态，不鉴权；文件名仅含 seriesId+集数，无敏感信息
+app.get('/api/huangguo-episode-mp4/:file', (req, res) => {
+  const name = String(req.params.file || '').replace(/[^a-zA-Z0-9._-]/g, '');
+  const file = path.join(os.tmpdir(), 'veyra-episode', name);
+  if (!file.startsWith(path.join(os.tmpdir(), 'veyra-episode')) || !fs.existsSync(file))
+    return res.status(404).json({ error: '文件不存在或已过期' });
+  res.sendFile(file);
+});
+
 app.get('/api/huangguo-proxy', (req, res) => {
   const target = String(req.query.url || '');
   console.log('[proxy]', new Date().toISOString(), 'REQ', (req.headers['user-agent'] || '').slice(0, 24), target.slice(0, 120));

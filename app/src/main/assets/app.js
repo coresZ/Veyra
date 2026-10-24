@@ -1000,7 +1000,14 @@ function renderDownloadSheet() {
 async function resolveEpisodesForDownload(episodes) {
   const resolved = [];
   const detailEpisodes = asArray(state.detail.episodes);
+  const hgJobs = [];
   for (const n of episodes) {
+    if (privateMode()) {
+      // 黄果源：选集列表的 url 只是剧集页面地址，且分集是 m3u8 流，APK 无法直接落盘；
+      // 一律由后端取流封装成 mp4（后端并发转换），再下到手机
+      hgJobs.push({ n, p: api('hg-episode-mp4', { seriesId: String(state.detail.seriesId || state.detail.id), episode: n }) });
+      continue;
+    }
     const meta = detailEpisodes.find(ep => Number(ep.number) === n);
     if (meta && meta.url) { resolved.push({ index: n, url: meta.url, key: '' }); continue; }
     let data;
@@ -1014,6 +1021,13 @@ async function resolveEpisodesForDownload(episodes) {
       throw new Error(`第 ${n} 集没有拿到有效的播放地址（${source.slice(0, 40) || '为空'}），请稍后重试`);
     }
     resolved.push({ index: n, url: source, key: data.key || '' });
+  }
+  for (const j of hgJobs) {
+    let mp4;
+    try { mp4 = await j.p; } catch (error) { throw new Error(`第 ${j.n} 集转换失败：${error.message || '未知错误'}`); }
+    const mp4url = mp4 && String(mp4.url || '');
+    if (!/^https?:\/\//i.test(mp4url)) throw new Error(`第 ${j.n} 集转换失败（${mp4 && mp4.error || '无返回地址'}），请稍后重试`);
+    resolved.push({ index: j.n, url: mp4url, key: '' });
   }
   if (!resolved.length) throw new Error('没有可下载的分集');
   const bad = resolved.find(r => !/^https?:\/\//i.test(String(r.url || '')));
