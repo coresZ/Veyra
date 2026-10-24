@@ -384,17 +384,19 @@ function unwrapHgProxy(uri) {
   return uri;
 }
 
-function hgRequest(url, referer, maxBytes) {
+function hgRequest(url, referer, maxBytes, opts) {
   // curl globbing 安全：源站分片文件名可能含未编码的 ()[]{}，curl 会按 glob 解析报 error 3
   url = String(url).replace(/[\[\]\(\)\{\}]/g, c => encodeURIComponent(c));
+  // 请求头策略：默认带 Accept-Encoding: identity 强制明文；noIdentity=true 时模仿播放代理
+  // （源站对 identity 请求可能返回二进制/加密体，播放代理不带 identity 拿到的就是明文）
+  const noIdentity = !!(opts && opts.noIdentity);
   // https 握手失败自动降级 http 重试（部分 CDN 如 tp1.drleao.cn 的 https 端口不稳，与播放代理行为一致）
   const attempt = (u, retriedHttp) => new Promise((resolve, reject) => {
     proxyFetch.requestThroughProxy(u, readBackendProxy(), {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36',
         'Accept': '*/*',
-        // 强制明文：不声明压缩编码，避免源站返回 gzip 二进制导致 m3u8 展开成乱码
-        'Accept-Encoding': 'identity',
+        ...(noIdentity ? {} : { 'Accept-Encoding': 'identity' }),
         ...(referer ? { Referer: referer } : {}),
       },
       timeout: 30_000, maxBytes: maxBytes || 40 * 1024 * 1024, redirects: 5,
@@ -406,10 +408,14 @@ function hgRequest(url, referer, maxBytes) {
         return reject(err);
       }
       if (!result || result.status < 200 || result.status >= 300) return reject(new Error('HTTP ' + (result && result.status)));
-      // 兜底解压：个别源站无视 identity 仍返回 gzip（魔数 1f 8b）
+      // 兜底解压：个别源站/代理无视 identity 仍返回压缩体（gzip 魔数 1f 8b / deflate 78 / brotli ce b2）
       let body = result.body;
-      if (body && body.length > 2 && body[0] === 0x1f && body[1] === 0x8b) {
-        try { body = zlib.gunzipSync(body); } catch { /* 保留原样 */ }
+      if (body && body.length > 2) {
+        try {
+          if (body[0] === 0x1f && body[1] === 0x8b) body = zlib.gunzipSync(body);
+          else if (body[0] === 0x78 && (body[1] === 0x9c || body[1] === 0x01 || body[1] === 0x5e || body[1] === 0xda)) body = zlib.inflateSync(body);
+          else if (body[0] === 0xce && body[1] === 0xb2) body = zlib.brotliDecompressSync(body);
+        } catch { /* 保留原样 */ }
       }
       resolve(body);
     });
@@ -422,16 +428,29 @@ function resolveHuangguoUri(uri, base) {
   catch { return uri; }
 }
 
+// 判断文本是否为乱码/二进制（替换符或控制字符占比超标）
+function isGarbledText(text) {
+  if (!text || !text.length) return false;
+  let bad = 0;
+  for (const ch of text) {
+    if (ch === '\uFFFD' || (ch.charCodeAt(0) < 32 && ch !== '\n' && ch !== '\r' && ch !== '\t')) bad++;
+  }
+  return bad / text.length > 0.02;
+}
+
 // 展开 m3u8：master 里若含子流（#EXT-X-STREAM-INF）则递归取第一条子流；返回 { segments:[url], keys:[url] }
-// 健壮性：gzip 已在 hgRequest 兜底解压；此处再检测乱码（二进制当文本展开会产出 U+FFFD 垃圾分片 URL）
+// 双策略请求：先模仿播放代理（不带 Accept-Encoding，源站对播放链路返回明文），
+// 拿到的仍是乱码/二进制则换 Accept-Encoding: identity 重试（直连场景 identity 返回明文）。
 async function expandHuangguoM3u8(masterUrl, referer, depth) {
   if (depth > 5) throw new Error('m3u8 层级过深');
-  const body = await hgRequest(masterUrl, referer, 10 * 1024 * 1024);
-  const text = body.toString('utf8');
-  // 乱码检测：替换符(U+FFFD)或控制字符占比过高说明不是纯文本 m3u8
-  let bad = 0;
-  for (const ch of text) { if (ch === '\uFFFD' || (ch.charCodeAt(0) < 32 && ch !== '\n' && ch !== '\r' && ch !== '\t')) bad++; }
-  if (text.length > 0 && bad / text.length > 0.02) {
+  let body = await hgRequest(masterUrl, referer, 10 * 1024 * 1024, { noIdentity: true });
+  let text = body.toString('utf8');
+  if (isGarbledText(text)) {
+    console.log(`[huangguo] master ${String(masterUrl).slice(0, 90)} 无编码头请求返回乱码 bytes=${body.length}，换 identity 重试`);
+    body = await hgRequest(masterUrl, referer, 10 * 1024 * 1024, { noIdentity: false });
+    text = body.toString('utf8');
+  }
+  if (isGarbledText(text)) {
     throw new Error('m3u8 内容异常（二进制/乱码）bytes=' + body.length);
   }
   const lines = text.split(/\r?\n/);
