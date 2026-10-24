@@ -915,9 +915,34 @@ document.getElementById('btn-admin-diagnose').onclick=async()=>{
     lines.push('');
     if(cover)await debug('封面',cover);
   }catch(e){lines.push('[私密首页] 失败: '+e.message+'\n')}
+  // 1.5) 封面 HTML 特征（定位源站封面真实结构）
+  try{
+    const site=await fetch('/api/debug/site?url='+encodeURIComponent(HUANGGUO_BASE),{headers:AUTH()}).then(r=>r.json());
+    if(site.ok){
+      lines.push('[封面HTML特征] 页面 '+site.bytes+'B');
+      lines.push(' img标签('+(site.imgs||[]).length+'):');
+      (site.imgs||[]).slice(0,5).forEach(s=>lines.push('  '+s));
+      lines.push(' 背景style('+(site.backgrounds||[]).length+'):');
+      (site.backgrounds||[]).slice(0,3).forEach(s=>lines.push('  '+s));
+      lines.push(' 图片属性URL('+(site.attrUrls||[]).length+'):');
+      (site.attrUrls||[]).slice(0,6).forEach(s=>lines.push('  '+s));
+      lines.push('');
+    }else lines.push('[封面HTML特征] '+site.error+'\n');
+  }catch(e){}
   // 2) 最近播放源
   if(_lastPrivatePlayUrl){
     await debug('最近播放源',_lastPrivatePlayUrl);
+    try{
+      const m=await fetch(hgProxy(_lastPrivatePlayUrl)).then(r=>r.text());
+      lines.push('[播放源master] 文本 '+m.length+'B');
+      const first=(m.split('\n').map(s=>s.trim()).filter(s=>s&&!s.startsWith('#'))||[])[0];
+      if(first){
+        lines.push('  首个媒体URI: '+first.slice(0,140));
+        const abs=new URL(first,_lastPrivatePlayUrl).toString();
+        await debug(/\.m3u8/i.test(abs)?'子m3u8':'首分片',abs);
+      }else lines.push('  !! master 内无媒体行');
+      lines.push('');
+    }catch(e){lines.push('[播放源master] 读取失败: '+e.message+'\n')}
   }else{
     lines.push('[最近播放源] 暂无（去私密模式点一集播放后再诊断）\n');
   }

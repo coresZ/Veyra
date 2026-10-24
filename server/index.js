@@ -711,6 +711,37 @@ app.get('/api/debug/proxy', requireAdmin, (req, res) => {
   });
 });
 
+// 站点 HTML 特征诊断：拉页面原文，提取 img/background/poster 标签样例（定位封面解析）
+app.get('/api/debug/site', requireAdmin, (req, res) => {
+  const target = String(req.query.url || '');
+  let parsed;
+  try { parsed = new URL(target); } catch { return res.json({ ok: false, error: '无效地址', target }); }
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36',
+    'Referer': `${parsed.protocol}//${parsed.hostname}/`, 'Accept': '*/*',
+  };
+  proxyFetch.requestThroughProxy(target, backendProxy, { headers, timeout: 20_000, maxBytes: 20 * 1024 * 1024, redirects: 5 }, (err, result) => {
+    if (err) return res.json({ ok: false, error: String(err.message || err), target });
+    if (result.status < 200 || result.status >= 300)
+      return res.json({ ok: false, status: result.status, error: '上游返回 ' + result.status, target });
+    const text = result.body.toString('utf8');
+    const out = { ok: true, url: target, status: result.status, bytes: text.length };
+    out.imgs = [];
+    let m, re = /<img[^>]*>/gi, n = 0;
+    while ((m = re.exec(text)) !== null && out.imgs.length < 15) out.imgs.push(m[0].slice(0, 160));
+    out.backgrounds = [];
+    re = /<(?:div|a|li|span|section)[^>]+style=["'][^"']*(?:background|background-image)[^"']*["'][^>]*>/gi;
+    while ((m = re.exec(text)) !== null && out.backgrounds.length < 10) out.backgrounds.push(m[0].slice(0, 160));
+    out.posters = [];
+    re = /<video[^>]+poster=["'][^"']+["']/gi;
+    while ((m = re.exec(text)) !== null && out.posters.length < 5) out.posters.push(m[0].slice(0, 160));
+    out.attrUrls = [];
+    re = /(?:data-src|data-original|data-lazy|src|data-cover|data-img)="([^"]+)"|url\(\s*['"]?([^'")\s]+)['"]?\s*\)/gi;
+    while ((m = re.exec(text)) !== null && out.attrUrls.length < 20) out.attrUrls.push((m[1] || m[2] || '').slice(0, 160));
+    res.json(out);
+  });
+});
+
 // 健康检查
 // ---- 下载任务（NAS 整剧下载+合并，需登录；管理员会话可见/可删全部）----
 function isAdminRequest(req) {
