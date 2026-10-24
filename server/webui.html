@@ -583,10 +583,18 @@ function attachPlayer(url,onReady){
   player.onloadedmetadata=()=>{if(onReady)onReady()};
   player.onerror=()=>{toast('播放失败（错误码 '+(player.error?player.error.code:'?')+'），可在 ⚙ 里切换 直连/后端转发 通道再试');};
   if(/\.m3u8(\?|$)/i.test(url)&&window.Hls&&Hls.isSupported()){
-    _hls=new Hls();
+    _hls=new Hls({maxBufferLength:30});
     _hls.loadSource(url);
     _hls.attachMedia(player);
-    _hls.on(Hls.Events.ERROR,(e,data)=>{if(data&&data.fatal){toast('播放失败: '+((data.details||'').toString()));}});
+    _hls.on(Hls.Events.ERROR,(e,data)=>{
+      if(data&&data.fatal){
+        const details=data.details||'';
+        const net=data.networkDetails&&(data.networkDetails.message||data.networkDetails.statusText)?String(data.networkDetails.message||data.networkDetails.statusText):'';
+        const resp=data.response&&data.response.code?('HTTP '+data.response.code):'';
+        const frag=data.frag&&data.frag.url?(data.frag.url.slice(0,120)):'';
+        toast('播放失败['+details+'] '+resp+' '+net+' '+(frag||''));
+      }
+    });
     player.play().catch(()=>{});
   }else{
     player.src=url;
