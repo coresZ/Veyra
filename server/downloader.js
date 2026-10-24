@@ -350,6 +350,7 @@ function startTask(task) {
     if (task.status === 'canceled') return;
     task.status = 'failed';
     task.error = err && err.message ? err.message : String(err);
+    console.error(`[download] 任务失败 ${task.title}: ${task.error}`);
     task.progress.percent = 0;
     touch(task);
     flushStore(true);
@@ -456,9 +457,11 @@ async function huangguoDownloadEpisode(seriesId, number, dir, plainFile) {
       if (!src) throw new Error('videoSrc 为空');
       masterSite = site; // 记住解析出 m3u8 的站点，防盗链 Referer 必须用播放页所属站点
       masterUrl = resolveHuangguoUri(src, `${site}/video/${seriesId}/`);
+      console.log(`[huangguo] 第 ${number} 集 页面解析成功 site=${site.replace(/^https:\/\//, '')} master=${String(masterUrl).slice(0, 110)}`);
       break;
     } catch (e) {
       errors.push(site.replace(/^https:\/\//, '') + ':' + e.message);
+      console.log(`[huangguo] 第 ${number} 集 页面解析失败 site=${site.replace(/^https:\/\//, '')} 原因: ${e.message}`);
     }
   }
   if (!masterUrl) throw new Error('解析播放地址失败（' + errors.join(' | ') + '）');
@@ -466,13 +469,19 @@ async function huangguoDownloadEpisode(seriesId, number, dir, plainFile) {
   const referer = `${masterSite}/video/${seriesId}/` + (first ? '' : `ep-${number}/`);
   const plan = await expandHuangguoM3u8(masterUrl, referer, 0);
   if (!plan.segments.length) throw new Error('m3u8 无分片');
+  console.log(`[huangguo] 第 ${number} 集 m3u8 展开成功 分片=${plan.segments.length} keys=${plan.keys.length}`);
 
   const keyFiles = [];
   for (let i = 0; i < plan.keys.length; i++) {
-    const k = await hgRequest(plan.keys[i], referer, 1024 * 1024);
-    const f = safeJoin(dir, `key-${number}-${i}.key`);
-    fs.writeFileSync(f, k);
-    keyFiles.push(f);
+    try {
+      const k = await hgRequest(plan.keys[i], referer, 1024 * 1024);
+      const f = safeJoin(dir, `key-${number}-${i}.key`);
+      fs.writeFileSync(f, k);
+      keyFiles.push(f);
+    } catch (e) {
+      console.log(`[huangguo] 第 ${number} 集 KEY 下载失败 ${String(plan.keys[i]).slice(0, 90)}: ${e.message}`);
+      throw e;
+    }
   }
 
   // 并发下载全部分片（源站分片通常数百 KB～数 MB）
@@ -485,11 +494,14 @@ async function huangguoDownloadEpisode(seriesId, number, dir, plainFile) {
       const i = nextSeg++;
       let buf = null;
       let lastErr = null;
-      for (const rf of segReferers) {
+  for (const rf of segReferers) {
         try { buf = await hgRequest(plan.segments[i], rf, 60 * 1024 * 1024); break; }
         catch (e) { lastErr = e; }
       }
-      if (buf === null) throw lastErr || new Error(`分片 ${i} 下载失败`);
+      if (buf === null) {
+        console.log(`[huangguo] 第 ${number} 集 分片 ${i} 下载失败(换 ${segReferers.length} 个站点 Referer 均失败): ${lastErr && lastErr.message} url=${String(plan.segments[i]).slice(0, 110)}`);
+        throw lastErr || new Error(`分片 ${i} 下载失败`);
+      }
       const f = safeJoin(dir, `seg-${number}-${String(i).padStart(4, '0')}.ts`);
       fs.writeFileSync(f, buf);
       segFiles[i] = f;
