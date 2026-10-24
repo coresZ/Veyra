@@ -764,7 +764,9 @@ app.get('/api/debug/proxy', requireAdmin, (req, res) => {
   try { parsed = new URL(target); } catch { return res.json({ ok: false, error: '无效地址', target }); }
   const isMedia = MEDIA_PATH_RE.test(parsed.pathname + parsed.search);
   const verdict = isPrivateHost(parsed.hostname) ? '拒绝:内网地址' : '放行:公网资源';
+  const attempted = [];
   const attemptDbg = (u, retriedHttp) => {
+    attempted.push(u.slice(0, 200));
     proxyFetch.requestThroughProxy(u, backendProxy, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 13) Mobile', 'Referer': `${parsed.protocol}//${parsed.hostname}/` },
       timeout: 20_000, maxBytes: 20 * 1024 * 1024, redirects: 5,
@@ -774,7 +776,7 @@ app.get('/api/debug/proxy', requireAdmin, (req, res) => {
           console.log('[debug] https 握手失败，降级 http 重试', u.slice(0, 90));
           return attemptDbg('http://' + u.slice(8), true);
         }
-        return res.json({ ok: false, verdict, error: String(err.message || err), target: u.slice(0, 200) });
+        return res.json({ ok: false, verdict, error: String(err.message || err), target: u.slice(0, 200), attempted });
       }
       return res.json({
         ok: result.status >= 200 && result.status < 300,
@@ -782,6 +784,7 @@ app.get('/api/debug/proxy', requireAdmin, (req, res) => {
         contentType: String(result.headers['content-type'] || ''),
         bytes: result.body.length,
         target: u.slice(0, 200),
+        attempted,
       });
     });
   };

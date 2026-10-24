@@ -929,6 +929,7 @@ document.getElementById('btn-admin-diagnose').onclick=async()=>{
   const debug=(label,url)=>fetch('/api/debug/proxy?url='+encodeURIComponent(url),{headers:AUTH()}).then(r=>r.json()).then(d=>{
     lines.push('['+label+']');
     lines.push('  URL: '+String(d.target||url).slice(0,140));
+    if(d.attempted&&d.attempted.length>1)lines.push('  尝试序列: '+d.attempted.map(s=>s.slice(0,70)).join(' → '));
     lines.push('  判定: '+(d.verdict||'?')+' → '+(d.ok?'OK':'失败'));
     if(d.status)lines.push('  上游HTTP: '+d.status+' 类型: '+(d.contentType||'').slice(0,40)+' 大小: '+d.bytes+'B');
     if(d.error)lines.push('  错误: '+d.error);
