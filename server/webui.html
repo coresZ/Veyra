@@ -356,26 +356,58 @@ function parseHuangguoHtml(html){
     let c=cover||'';try{if(c)c=new URL(c,base).toString()}catch{}
     items.push({id:u,title:(title||'').trim(),cover:c,badge:'',detailUrl:u});
   };
+  // 封面提取多策略：img 各种懒加载属性 → srcset → style 背景图 → video poster
+  function coverOf(seg){
+    if(!seg)return '';
+    const attr=/<(?:img|source)[^>]+(?:data-src|data-original|data-lazy|data-lazy-src|data-cover|data-thumb|data-poster|data-bg|data-background|data-img|src)="([^"]+)"/i;
+    const m=seg.match(attr); if(m&&m[1]&&!m[1].startsWith('data:'))return m[1];
+    const m2=seg.match(/<img[^>]+srcset="([^"]+)"/i);
+    if(m2){const c=(m2[1].split(',')[0]||'').trim().split(/\s+/)[0]||''; if(c&&!c.startsWith('data:'))return c;}
+    const m3=seg.match(/(?:style|css)="[^"]*(?:background|background-image)\s*:\s*url\(\s*['"]?([^'")]+)['"]?\s*\)/i);
+    if(m3&&m3[1])return m3[1].trim();
+    const m4=seg.match(/<video[^>]+poster="([^"]+)"/i); if(m4&&m4[1])return m4[1];
+    return '';
+  }
   for(const seg of links){
     const href=(seg.match(/href="([^"]+)"/)||[])[1]||'';
     if(!href)continue;
-    const img=(seg.match(/<img[^>]+(?:data-src|data-original|data-lazy|src)="([^"]+)"/i)||[])[1]||'';
+    const cover=coverOf(seg);
     const t=(seg.match(/<(?:h\d|p|span|div)[^>]*>([\s\S]*?)<\/(?:h\d|p|span|div)>/i)||[])[1]||'';
     const t2=(seg.match(/\s(title|alt)="([^"]+)"/i)||[])[2]||'';
     const title=(t.replace(/<[^>]+>/g,'').trim())||t2;
-    pushItem(href,img,title);
+    pushItem(href,cover,title);
   }
-  // 兜底：裸链接 + 相邻 img
+  // 兜底 1：裸链接 + 相邻 img（含 style 背景）
   if(!items.length){
-    const re=/<a[^>]+href="([^"]+)"[^>]*>[\s\S]{0,400}?<img[^>]+(?:data-src|data-original|data-lazy|src)="([^"]+)"[^>]*>/gi;
+    const re=/<a[^>]+href="([^"]+)"[^>]*>[\s\S]{0,400}?(?:<img[^>]+(?:data-src|data-original|data-lazy|data-lazy-src|data-cover|data-thumb|data-poster|src)="([^"]+)"|style="[^"]*(?:background|background-image)\s*:\s*url\(\s*['"]?([^'")]+))/i;
     let m;
     while((m=re.exec(html))!==null&&items.length<30){
-      let href=m[1],cover=m[2];
+      let href=m[1],cover=m[2]||m[3]||'';
       try{href=new URL(href,base).toString()}catch{continue}
       if(!/detail|video|play|show|vod|info|series|drama/i.test(href)||seen.has(href))continue;
       seen.add(href);
       try{cover=new URL(cover,base).toString()}catch{}
       items.push({id:href,title:'',cover,badge:'',detailUrl:href});
+    }
+  }
+  // 兜底 2：条目已有但封面为空时，用整页图片按顺序配对（封面特征词优先）
+  if(items.length){
+    const imgs=[]; re=/<img[^>]+(?:data-src|data-original|data-lazy|data-lazy-src|data-cover|data-thumb|data-poster|src)="([^"]+)"/gi;
+    while((m=re.exec(html))!==null&&imgs.length<300){const v=m[1]; if(v&&!v.startsWith('data:'))imgs.push(v);}
+    const bg=[]; re=/url\(\s*['"]?([^'")]+\.(?:jpe?g|png|webp|gif|avif)(?:\?[^'")]*)?)['"]?\s*\)/gi;
+    while((m=re.exec(html))!==null&&bg.length<100){const v=m[1]; if(v&&/^https?:/i.test(v)&&!/(logo|icon|avatar|banner)/i.test(v))bg.push(v);}
+    const pool=bg.concat(imgs).filter(u=>/^(https?:|data:)/i.test(u));
+    let pi=0;
+    for(const it of items){
+      if(it.cover||pi>=pool.length)continue;
+      // 优先找含封面特征词的 URL
+      let hit=null;
+      for(let k=pi;k<pool.length;k++){
+        if(/(cover|poster|thumb|upload|pic|img|face|bg|vod|movie)/i.test(pool[k])){hit=pool[k];pi=k+1;break;}
+      }
+      if(!hit){hit=pool[pi];pi++;}
+      try{it.cover=new URL(hit,base).toString()}catch{}
+      if(pi>=pool.length)break;
     }
   }
   return items;
@@ -908,7 +940,7 @@ document.getElementById('btn-admin-diagnose').onclick=async()=>{
     const html=await r.text();
     lines.push('[私密首页] HTTP '+r.status+' 字节 '+(html.length||0));
     const items=parseHuangguoHtml(html);
-    lines.push('  解析条目: '+items.length);
+    lines.push('  解析条目: '+items.length+'（有封面 '+items.filter(i=>i.cover).length+'/'+items.length+'）');
     const cover=items[0]&&items[0].cover;
     if(cover)lines.push('  示例封面: '+cover.slice(0,140));
     else lines.push('  !! 未解析到封面 URL（解析层问题）');
