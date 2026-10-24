@@ -686,8 +686,10 @@ final class DownloadManager {
         try {
             List<String> segUris = new ArrayList<>();
             List<String> segKeys = new ArrayList<>();
+            task.detail = "解析 m3u8 播放列表…";
             expandM3u8(url, segUris, segKeys, 0);
             if (segUris.isEmpty()) throw new java.io.IOException("m3u8 无分片");
+            task.detail = "解析完成，共 " + segUris.size() + " 个分片，开始下载";
             // 去重 KEY → 本地 key 文件
             LinkedHashMap<String, String> keyFiles = new LinkedHashMap<>();
             {
@@ -714,6 +716,11 @@ final class DownloadManager {
                             String name = String.format(Locale.US, "seg-%04d.ts", idx);
                             downloadToFile(segUris.get(idx), new File(work, name), dlBytes, totalBytes);
                             segFiles[idx] = name;
+                            // 分片进度反馈：每 3 片或最后一片刷新一次，避免界面看起来卡死
+                            int done = Math.min(nextSeg.get(), segN);
+                            if (idx % 3 == 0 || idx == segN - 1) {
+                                task.detail = "下载中 " + done + "/" + segN + " 片";
+                            }
                         }
                     } catch (Exception e) {
                         throw new RuntimeException(e);
