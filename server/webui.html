@@ -374,8 +374,11 @@ function parseHuangguoHtml(html){
     const href=(seg.match(/href="([^"]+)"/)||[])[1]||'';
     if(!href)continue;
     const cover=coverOf(seg);
-    const t=(seg.match(/<(?:h\d|p|span|div|b|strong|i|em)[^>]*>([\s\S]*?)<\/(?:h\d|p|span|div|b|strong|i|em)>/i)||[])[1]||'';
-    let title=t.replace(/<[^>]+>/g,'').trim();
+    // 标题：优先源站卡片标题 class（.hg-drama-card__title，APK 选择器同款）→ 标签文本 → aria/title 属性 → href slug
+    let title=(seg.match(/class="[^"]*hg-drama-card__title[^"]*"[^>]*>([\s\S]*?)<\//i)||[])[1]||'';
+    title=title.replace(/<[^>]+>/g,'').trim();
+    if(!title)title=(seg.match(/<(?:h\d|p|span|div|b|strong|i|em)[^>]*>([\s\S]*?)<\/(?:h\d|p|span|div|b|strong|i|em)>/i)||[])[1]||'';
+    title=title.replace(/<[^>]+>/g,'').trim();
     if(!title)title=(seg.match(/\s(?:title|aria-label)="([^"]+)"/i)||[])[1]||'';
     if(!title){
       // href slug 兜底：/video/123/abc-name/ → abc name
@@ -420,12 +423,13 @@ function parseHuangguoHtml(html){
       if(pi>=pool.length)break;
     }
   }
-  // 最终防线：同 /video/<id>/ 的条目合并（不同 URL 形式/区块重复），保留首个
+  // 最终防线：同剧不同 URL 形式（/video/10058/ vs /drama/10058/ 等）按任意数字 id 合并，保留首个
   const dedup=[],idSeen=new Set();
   for(const it of items){
-    const id=(it.id.match(/\/video\/(\d+)/)||[])[1]||'';
-    if(id&&idSeen.has(id))continue;
-    if(id)idSeen.add(id);
+    const segs=it.id.split('/').filter(Boolean);
+    const num=segs.find(s=>/^\d+$/.test(s))||'';
+    if(num&&idSeen.has(num))continue;
+    if(num)idSeen.add(num);
     dedup.push(it);
   }
   return dedup;

@@ -833,10 +833,17 @@ app.get('/api/debug/site', requireAdmin, (req, res) => {
     out.scriptSrcs = [];
     re = /<script[^>]+src=["']([^"']+)["'][^>]*>/gi;
     while ((m = re.exec(text)) !== null && out.scriptSrcs.length < 12) out.scriptSrcs.push(m[1].slice(0, 160));
-    // 条目 HTML 特征：前 3 个指向 /video/ 的 <a> 原始片段（看卡片结构/标题位置）
+    // 条目 HTML 特征：优先抓卡片（hg-drama-card class），无则抓非搜索建议的 /video/ 链接
     out.entries = [];
-    re = /<a[^>]*href=["'][^"']*\/video\/[^"']*["'][^>]*>[\s\S]{0,500}?<\/a>/gi;
-    while ((m = re.exec(text)) !== null && out.entries.length < 3) out.entries.push(m[0].replace(/\s+/g, ' ').slice(0, 300));
+    re = /<a[^>]*class=["'][^"']*hg-drama-card[^"']*["'][^>]*>[\s\S]{0,700}?<\/a>/gi;
+    while ((m = re.exec(text)) !== null && out.entries.length < 3) out.entries.push(m[0].replace(/\s+/g, ' ').slice(0, 340));
+    if (!out.entries.length) {
+      re = /<a[^>]*href=["'][^"']*\/video\/\d+[^"']*["'][^>]*>[\s\S]{0,500}?<\/a>/gi;
+      while ((m = re.exec(text)) !== null && out.entries.length < 3) {
+        if (m[0].includes('hg-search-suggest') || m[0].includes('nav') || m[0].includes('menu')) continue;
+        out.entries.push(m[0].replace(/\s+/g, ' ').slice(0, 340));
+      }
+    }
     res.json(out);
   });
 });
