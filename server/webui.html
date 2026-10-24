@@ -355,7 +355,6 @@ function parseHuangguoHtml(html){
     if(seen.has(u))return;seen.add(u);
     let c=cover||'';try{if(c)c=new URL(c,base).toString()}catch{}
     items.push({id:u,title:(title||'').trim(),cover:c,coverFrom:String(cover||'').slice(0,140),badge:'',detailUrl:u});
-    items.push({id:u,title:(title||'').trim(),cover:c,badge:'',detailUrl:u});
   };
   // 封面提取多策略：img 各种懒加载属性 → srcset → style 背景图 → video poster
   function coverOf(seg){
