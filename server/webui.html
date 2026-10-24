@@ -586,7 +586,9 @@ function attachPlayer(url,onReady){
   player.removeAttribute('src');player.load();
   player.onloadedmetadata=()=>{if(onReady)onReady()};
   player.onerror=()=>{toast('播放失败（错误码 '+(player.error?player.error.code:'?')+'），可在 ⚙ 里切换 直连/后端转发 通道再试');};
-  if(/\.m3u8(\?|$)/i.test(url)){
+  // m3u8 判断：直接 .m3u8 或经 hgProxy 代理的 URL（其 url 参数内是带 ?auth_key 的 m3u8，
+  // encodeURIComponent 后 ? 变 %3F 导致 /\.m3u8(\?|$)/ 匹配不到 → 必须识别代理路径，否则走原生播放报错误码4）
+  if(/\.m3u8(\?|$)/i.test(url)||url.indexOf('/api/huangguo-proxy?')>=0){
     if(!window.Hls){toast('hls.js 未加载'+(window.__hlsFailed?'（本地脚本加载失败，请刷新页面）':'（请刷新页面）')+'，点击播放前请确认网络正常');player.src=url;player.play().catch(()=>{});return}
     if(!Hls.isSupported()){toast('当前浏览器不支持 MSE/HLS 播放');player.src=url;player.play().catch(()=>{});return}
     _hls=new Hls({maxBufferLength:30});
