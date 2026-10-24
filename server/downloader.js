@@ -11,6 +11,7 @@
  *  - 合并成功后删除分集，只保留整剧单文件。任务状态持久化 DATA_DIR/downloads.json。
  */
 const crypto = require('crypto');
+const zlib = require('zlib');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -392,6 +393,8 @@ function hgRequest(url, referer, maxBytes) {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36',
         'Accept': '*/*',
+        // 强制明文：不声明压缩编码，避免源站返回 gzip 二进制导致 m3u8 展开成乱码
+        'Accept-Encoding': 'identity',
         ...(referer ? { Referer: referer } : {}),
       },
       timeout: 30_000, maxBytes: maxBytes || 40 * 1024 * 1024, redirects: 5,
@@ -403,7 +406,12 @@ function hgRequest(url, referer, maxBytes) {
         return reject(err);
       }
       if (!result || result.status < 200 || result.status >= 300) return reject(new Error('HTTP ' + (result && result.status)));
-      resolve(result.body);
+      // 兜底解压：个别源站无视 identity 仍返回 gzip（魔数 1f 8b）
+      let body = result.body;
+      if (body && body.length > 2 && body[0] === 0x1f && body[1] === 0x8b) {
+        try { body = zlib.gunzipSync(body); } catch { /* 保留原样 */ }
+      }
+      resolve(body);
     });
   });
   return attempt(url, false);
@@ -415,10 +423,18 @@ function resolveHuangguoUri(uri, base) {
 }
 
 // 展开 m3u8：master 里若含子流（#EXT-X-STREAM-INF）则递归取第一条子流；返回 { segments:[url], keys:[url] }
+// 健壮性：gzip 已在 hgRequest 兜底解压；此处再检测乱码（二进制当文本展开会产出 U+FFFD 垃圾分片 URL）
 async function expandHuangguoM3u8(masterUrl, referer, depth) {
   if (depth > 5) throw new Error('m3u8 层级过深');
   const body = await hgRequest(masterUrl, referer, 10 * 1024 * 1024);
-  const lines = body.toString('utf8').split(/\r?\n/);
+  const text = body.toString('utf8');
+  // 乱码检测：替换符(U+FFFD)或控制字符占比过高说明不是纯文本 m3u8
+  let bad = 0;
+  for (const ch of text) { if (ch === '\uFFFD' || (ch.charCodeAt(0) < 32 && ch !== '\n' && ch !== '\r' && ch !== '\t')) bad++; }
+  if (text.length > 0 && bad / text.length > 0.02) {
+    throw new Error('m3u8 内容异常（二进制/乱码）bytes=' + body.length);
+  }
+  const lines = text.split(/\r?\n/);
   const keys = [];
   const segments = [];
   let expectSub = false;
@@ -430,7 +446,10 @@ async function expandHuangguoM3u8(masterUrl, referer, depth) {
     } else if (line.startsWith('#EXT-X-STREAM-INF') || line.startsWith('#EXT-X-MEDIA')) {
       expectSub = true;
     } else if (line && !line.startsWith('#')) {
+      // 跳过垃圾行（含替换符/控制字符/非法 URL 前缀）
+      if (/[\uFFFD\u0000-\u001F]/.test(line)) continue;
       const uri = resolveHuangguoUri(line, masterUrl);
+      if (!/^https?:\/\//.test(uri)) continue;
       if (expectSub) return expandHuangguoM3u8(uri, referer, depth + 1);
       segments.push(uri);
     }
