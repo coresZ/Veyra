@@ -719,6 +719,8 @@ app.get('/api/huangguo-proxy', (req, res) => {
   headers['Referer'] = req.query.ref ? String(req.query.ref) : `${parsed.protocol}//${parsed.hostname}/`;
   // https 握手失败自动降级 http 重试（部分 CDN 如 tp1.drleao.cn 的 https 端口不稳，源站 m3u8 内引用其子 m3u8/分片）
   const attempt = (u, retriedHttp) => {
+    // curl globbing 安全：源站分片文件名可能含未编码的 ()[]{}，curl 会按 glob 解析报 error 3
+    u = String(u).replace(/[\[\]\(\)\{\}]/g, c => encodeURIComponent(c));
     proxyFetch.requestThroughProxy(u, backendProxy, {
       headers, timeout: 25_000, maxBytes: 50 * 1024 * 1024, redirects: 5,
     }, (err, result) => {

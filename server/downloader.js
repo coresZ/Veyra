@@ -383,6 +383,8 @@ function unwrapHgProxy(uri) {
 }
 
 function hgRequest(url, referer, maxBytes) {
+  // curl globbing 安全：源站分片文件名可能含未编码的 ()[]{}，curl 会按 glob 解析报 error 3
+  url = String(url).replace(/[\[\]\(\)\{\}]/g, c => encodeURIComponent(c));
   return new Promise((resolve, reject) => {
     proxyFetch.requestThroughProxy(url, readBackendProxy(), {
       headers: {

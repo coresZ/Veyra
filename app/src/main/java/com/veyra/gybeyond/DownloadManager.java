@@ -639,7 +639,15 @@ final class DownloadManager {
         catch (Exception e) { return new URL(new URL(base), line).toString(); }
     }
 
+    /** curl/HTTP 客户端兼容：源站分片文件名可能含未编码的 ()[]{}，先补编码再请求。 */
+    private static String curlSafeUrl(String url) {
+        return url.replace("[", "%5B").replace("]", "%5D")
+                .replace("(", "%28").replace(")", "%29")
+                .replace("{", "%7B").replace("}", "%7D");
+    }
+
     private byte[] fetchBytes(String url) throws Exception {
+        url = curlSafeUrl(url);
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setConnectTimeout(15_000);
         conn.setReadTimeout(90_000);
@@ -657,6 +665,7 @@ final class DownloadManager {
     }
 
     private void downloadToFile(String url, File out, AtomicLong dlBytes, AtomicLong totalBytes) throws Exception {
+        url = curlSafeUrl(url);
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setConnectTimeout(15_000);
         conn.setReadTimeout(90_000);
