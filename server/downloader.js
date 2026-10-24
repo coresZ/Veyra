@@ -805,7 +805,7 @@ async function runTask(task) {
   task.status = 'ready';
   const appCount = task.episodes.filter(ep => ep._appSource).length;
   const failedCount = (task.failedEpisodes || []).length;
-  const sourceNote = task._appVids ? `（红果 App 源 ${appCount}/${task.episodes.length} 集）` : '（网页源，未注入 App vid）';
+  const sourceNote = task._appVids ? `（红果 App 源 ${appCount}/${task.episodes.length} 集）` : '（网页源）';
   if (failedCount > 0) {
     task.progress = { phase: 'ready', episode: downloaded, total: task.episodes.length, percent: 100, detail: `已下载 ${downloaded}/${task.episodes.length} 集，失败 ${failedCount} 集${sourceNote}，可重试失败集或先合并成功部分` };
   } else {

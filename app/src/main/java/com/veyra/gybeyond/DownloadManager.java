@@ -623,12 +623,23 @@ final class DownloadManager {
             if (line.startsWith("#EXT-X-KEY")) {
                 keyMatcher.reset(line);
                 if (keyMatcher.find()) currentKey = resolveUri(keyMatcher.group(1), url);
-            } else if (line.startsWith("#EXT-X-STREAM-INF") || line.startsWith("#EXT-X-MEDIA")) {
+            } else if (line.startsWith("#EXT-X-STREAM-INF")) {
                 expectSub = true;
+            } else if (line.startsWith("#EXT-X-MEDIA")) {
+                // 音轨/字幕声明（自带 URI 属性），不是子流：跳过，避免把下一行分片误当子流递归（拿 ts 当 m3u8 解析必失败）
+                expectSub = false;
             } else if (!line.isEmpty() && !line.startsWith("#")) {
                 String uri = resolveUri(line, url);
-                if (expectSub) expandM3u8(uri, segs, segKeys, depth + 1);
-                else { segs.add(uri); segKeys.add(currentKey); }
+                if (expectSub) {
+                    // 防误判：递归请求返回的可能不是播放列表（如误把分片当子流），校验含 #EXT 标签才递归，否则忽略该行
+                    String subText = new String(fetchBytes(uri), StandardCharsets.UTF_8);
+                    if (!subText.contains("#EXT")) {
+                        // 非播放列表：该 URL 实际是分片，直接纳入分片列表
+                        segs.add(uri); segKeys.add(currentKey);
+                    } else {
+                        expandM3u8(uri, segs, segKeys, depth + 1);
+                    }
+                } else { segs.add(uri); segKeys.add(currentKey); }
                 expectSub = false;
             }
         }

@@ -936,6 +936,7 @@ function downloadStatusText(task, kind) {
   if (task.status === 'canceled') return '已取消';
   const detail = task.detail || '';
   if (detail.includes('保存')) return '保存到手机';
+  if (detail.includes('待合并')) return '待合并';
   if (detail.includes('合并')) return '合并中';
   const m = detail.match(/第\s*(\d+)\s*\/\s*(\d+)/);
   if (m) return `下载中 ${m[1]}/${m[2]}`;
