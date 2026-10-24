@@ -19,6 +19,7 @@ import com.hongguotv.core.StreamInfo;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -27,9 +28,11 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
@@ -297,6 +300,7 @@ final class DownloadManager {
                     }
                     try {
                         if ("hongguo".equals(task.source)) downloadHongguo(task, url, key, out, idx, dlBytes, totalBytes, n);
+                        else if (isHuangguoM3u8Url(url)) downloadM3u8(task, url, out, dlBytes, totalBytes, idx + 1);
                         else downloadPlain(task, url, out, dlBytes, totalBytes, n);
                         ep.put("dlv", "raw-v2");   // 标记新格式（随任务持久化，重试时据此判定可复用）
                         plainArr[idx] = out;
@@ -597,6 +601,159 @@ final class DownloadManager {
                 }
             }
         } finally { conn.disconnect(); }
+    }
+
+    // ---- 黄果源 m3u8 本地下载：APK 直拉 m3u8/分片（走后端代理同播放链路），本地 ffmpeg 封装 mp4 ----
+    private boolean isHuangguoM3u8Url(String url) {
+        if (url == null) return false;
+        return url.contains("/api/huangguo-proxy?")
+                || url.contains(".m3u8") || url.contains("m3u8")
+                || url.contains("video.225600.xyz");   // 仅直连模式下 episode source 是源站 m3u8 直链，兜底识别
+    }
+
+    /** 递归展开 m3u8（代理已把 URI 重写为绝对代理 URL）：收集分片与每段对应 KEY。 */
+    private void expandM3u8(String url, List<String> segs, List<String> segKeys, int depth) throws Exception {
+        if (depth > 6) throw new java.io.IOException("m3u8 层级过深");
+        String text = new String(fetchBytes(url), StandardCharsets.UTF_8);
+        String currentKey = null;
+        boolean expectSub = false;
+        java.util.regex.Matcher keyMatcher = java.util.regex.Pattern.compile("URI=\"([^\"]+)\"").matcher("");
+        for (String raw : text.split("\r?\n")) {
+            String line = raw.trim();
+            if (line.startsWith("#EXT-X-KEY")) {
+                keyMatcher.reset(line);
+                if (keyMatcher.find()) currentKey = resolveUri(keyMatcher.group(1), url);
+            } else if (line.startsWith("#EXT-X-STREAM-INF") || line.startsWith("#EXT-X-MEDIA")) {
+                expectSub = true;
+            } else if (!line.isEmpty() && !line.startsWith("#")) {
+                String uri = resolveUri(line, url);
+                if (expectSub) expandM3u8(uri, segs, segKeys, depth + 1);
+                else { segs.add(uri); segKeys.add(currentKey); }
+                expectSub = false;
+            }
+        }
+    }
+
+    private String resolveUri(String line, String base) throws Exception {
+        try { return new URL(line).toString(); }
+        catch (Exception e) { return new URL(new URL(base), line).toString(); }
+    }
+
+    private byte[] fetchBytes(String url) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setConnectTimeout(15_000);
+        conn.setReadTimeout(90_000);
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36");
+        try {
+            int code = conn.getResponseCode();
+            if (code != 200) throw new java.io.IOException("下载失败 HTTP " + code);
+            try (InputStream in = conn.getInputStream(); ByteArrayOutputStream bo = new ByteArrayOutputStream()) {
+                byte[] buf = new byte[64 * 1024];
+                int k;
+                while ((k = in.read(buf)) > 0) bo.write(buf, 0, k);
+                return bo.toByteArray();
+            }
+        } finally { conn.disconnect(); }
+    }
+
+    private void downloadToFile(String url, File out, AtomicLong dlBytes, AtomicLong totalBytes) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setConnectTimeout(15_000);
+        conn.setReadTimeout(90_000);
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36");
+        try {
+            int code = conn.getResponseCode();
+            if (code != 200) throw new java.io.IOException("下载失败 HTTP " + code);
+            long total = conn.getContentLengthLong();
+            totalBytes.addAndGet(Math.max(total, 0));
+            try (InputStream in = conn.getInputStream(); FileOutputStream fos = new FileOutputStream(out)) {
+                byte[] buffer = new byte[128 * 1024];
+                int k; long received = 0;
+                while ((k = in.read(buffer)) > 0) {
+                    fos.write(buffer, 0, k);
+                    received += k;
+                    dlBytes.addAndGet(k);
+                }
+            }
+        } finally { conn.disconnect(); }
+    }
+
+    /** 黄果 m3u8 下载：展开 → 拉 KEY/分片（并发）→ 本地 playlist → ffmpeg remux mp4 → 清理。 */
+    private void downloadM3u8(Task task, String url, File out, AtomicLong dlBytes, AtomicLong totalBytes, int n) throws Exception {
+        File dir = out.getParentFile();
+        List<String> segUris = new ArrayList<>();
+        List<String> segKeys = new ArrayList<>();
+        expandM3u8(url, segUris, segKeys, 0);
+        if (segUris.isEmpty()) throw new java.io.IOException("m3u8 无分片");
+        // 去重 KEY → 本地 key 文件
+        LinkedHashMap<String, String> keyFiles = new LinkedHashMap<>();
+        {
+            int keyIdx = 0;
+            for (String ku : segKeys) {
+                if (ku == null || keyFiles.containsKey(ku)) continue;
+                downloadToFile(ku, new File(dir, "key-" + keyIdx + ".key"), dlBytes, totalBytes);
+                keyFiles.put(ku, "key-" + keyIdx + ".key");
+                keyIdx++;
+            }
+        }
+        // 并发下载分片
+        final int segN = segUris.size();
+        final String[] segFiles = new String[segN];
+        final AtomicInteger nextSeg = new AtomicInteger();
+        ExecutorService pool = Executors.newFixedThreadPool(Math.min(6, Math.max(1, segN)));
+        List<Future<?>> futs = new ArrayList<>();
+        for (int i = 0; i < Math.min(6, segN); i++) {
+            futs.add(pool.submit(() -> {
+                try {
+                    while (!task.canceled) {
+                        int idx = nextSeg.getAndIncrement();
+                        if (idx >= segN) break;
+                        String name = String.format(Locale.US, "seg-%04d.ts", idx);
+                        downloadToFile(segUris.get(idx), new File(dir, name), dlBytes, totalBytes);
+                        segFiles[idx] = name;
+                    }
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }));
+        }
+        try {
+            Exception firstErr = null;
+            for (Future<?> f : futs) {
+                try { f.get(); } catch (Exception e) { if (firstErr == null) firstErr = e.getCause() instanceof Exception ? (Exception) e.getCause() : e; }
+            }
+            if (firstErr != null) throw firstErr;
+        } finally {
+            pool.shutdownNow();
+        }
+        if (task.canceled) return;
+        for (int i = 0; i < segN; i++) {
+            if (segFiles[i] == null) throw new java.io.IOException("分片下载不完整（第 " + (i + 1) + "/" + segN + " 片缺失）");
+        }
+        // 本地 playlist（相对路径；每段按需写 KEY 行，ffmpeg 原生 AES-128 解密）
+        File playlist = new File(dir, "play-" + n + ".m3u8");
+        {
+            StringBuilder sb = new StringBuilder("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:0\n");
+            String lastKeyName = null;
+            for (int i = 0; i < segN; i++) {
+                String ku = segKeys.get(i);
+                String kn = ku != null ? keyFiles.get(ku) : null;
+                if (kn != null && !kn.equals(lastKeyName)) {
+                    sb.append("#EXT-X-KEY:METHOD=AES-128,URI=\"").append(kn).append("\"\n");
+                    lastKeyName = kn;
+                }
+                sb.append("#EXTINF:4.0,\n").append(segFiles[i]).append('\n');
+            }
+            sb.append("#EXT-X-ENDLIST\n");
+            java.nio.file.Files.write(playlist.toPath(), sb.toString().getBytes(StandardCharsets.UTF_8));
+        }
+        StringBuilder dbg = new StringBuilder();
+        FFmpegConcat.m3u8ToMp4(playlist, out, dbg, new File(context.getFilesDir(), "native.log"));
+        // 清理分片/KEY/playlist（保留产物 mp4）
+        for (String sf : segFiles) { if (sf != null) new File(dir, sf).delete(); }
+        for (String kn : keyFiles.values()) { new File(dir, kn).delete(); }
+        playlist.delete();
+        if (!out.exists() || out.length() < 1024) throw new java.io.IOException("m3u8 转 mp4 产物无效");
     }
 
     // ---- MediaExtractor + MediaMuxer 合并 ----

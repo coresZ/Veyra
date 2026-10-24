@@ -117,4 +117,31 @@ final class FFmpegConcat {
      * @return null = 成功；非 null = 失败（错误消息字符串，含失败阶段与 rc 细节）。
      */
     private static native String nativeConcat(String[] inputPaths, String[] keys, String outputPath, String tag, String logPath);
+
+    /** 本地 HLS(m3u8) → MP4 重封装：等价 CLI `ffmpeg -allowed_extensions ALL -i playlist.m3u8 -c copy -f mp4 -y out`。
+     *  playlist 与分片/KEY 同目录（相对路径），hls demuxer 原生处理 AES-128 解密。
+     *  用于黄果源手机本地下载：APK 拉 m3u8/分片到本地后直接转成可播 mp4，不依赖后端转码。 */
+    static void m3u8ToMp4(File playlist, File output, StringBuilder debug, File nativeLog) throws Exception {
+        if (LOAD_ERROR != null) {
+            throw new java.io.IOException("ffmpeg 库加载失败: " + LOAD_ERROR, LOAD_ERROR);
+        }
+        if (nativeLog != null) {
+            try {
+                java.nio.file.Files.write(nativeLog.toPath(), new byte[0]);
+            } catch (Exception ignored) { }
+        }
+        debug.append("m3u8 remux: ").append(playlist.getAbsolutePath()).append(" → ").append(output.getAbsolutePath()).append('\n');
+        String err = nativeM3u8ToMp4(playlist.getAbsolutePath(), output.getAbsolutePath(),
+                nativeLog != null ? nativeLog.getAbsolutePath() : "");
+        if (nativeLog != null && nativeLog.exists()) {
+            try {
+                String nl = new String(java.nio.file.Files.readAllBytes(nativeLog.toPath()), "UTF-8");
+                if (!nl.isEmpty()) debug.append("--- native 阶段日志 ---\n").append(nl);
+            } catch (Exception ignored) { }
+        }
+        if (err != null) throw new java.io.IOException(err);
+        if (!output.exists() || output.length() == 0) throw new java.io.IOException("m3u8 转 mp4 产物为空");
+    }
+
+    private static native String nativeM3u8ToMp4(String playlistPath, String outputPath, String logPath);
 }

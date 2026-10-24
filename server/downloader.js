@@ -407,7 +407,7 @@ function resolveHuangguoUri(uri, base) {
 // 展开 m3u8：master 里若含子流（#EXT-X-STREAM-INF）则递归取第一条子流；返回 { segments:[url], keys:[url] }
 async function expandHuangguoM3u8(masterUrl, referer, depth) {
   if (depth > 5) throw new Error('m3u8 层级过深');
-  const body = await hgRequest(masterUrl, referer, 2 * 1024 * 1024);
+  const body = await hgRequest(masterUrl, referer, 10 * 1024 * 1024);
   const lines = body.toString('utf8').split(/\r?\n/);
   const keys = [];
   const segments = [];
@@ -497,21 +497,6 @@ async function huangguoDownloadEpisode(seriesId, number, dir, plainFile) {
 function cleanupHg(segFiles, keyFiles) {
   for (const f of segFiles || []) { try { if (f) fs.rmSync(f, { force: true }); } catch { } }
   for (const f of keyFiles || []) { try { if (f) fs.rmSync(f, { force: true }); } catch { } }
-}
-
-// 黄果单集转 mp4（供 APK 手机下载：先由后端取流转成可播放 mp4，再下到手机）
-// 复用 huangguoDownloadEpisode 的整条取流/合并管线，输出到临时目录，带缓存
-async function huangguoEpisodeMp4(seriesId, number) {
-  const dir = path.join(os.tmpdir(), 'veyra-episode');
-  fs.mkdirSync(dir, { recursive: true });
-  const out = path.join(dir, seriesId + '-' + number + '.mp4');
-  if (fs.existsSync(out) && fs.statSync(out).size > 1024) return out;
-  const tmp = path.join(dir, seriesId + '-' + number + '.part.mp4');
-  try { fs.rmSync(tmp, { force: true }); } catch { }
-  await huangguoDownloadEpisode(seriesId, number, dir, tmp);
-  if (!fs.existsSync(tmp) || fs.statSync(tmp).size < 1024) throw new Error('单集转换产物无效');
-  fs.renameSync(tmp, out);
-  return out;
 }
 
 async function runTask(task) {

@@ -1398,3 +1398,166 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
     }
     return NULL;   /* 成功 */
 }
+
+/* ---- 本地 HLS(m3u8) → MP4 重封装 ----
+ * 等价 CLI：ffmpeg -allowed_extensions ALL -i playlist.m3u8 -c copy -f mp4 -y out
+ * playlist 与分片/KEY 同目录（本地相对路径），hls demuxer 原生处理 AES-128 解密。
+ * 用于黄果源手机本地下载：APK 拉 m3u8/分片到本地后直接转成可播 mp4，不依赖后端转码。 */
+static int hls_remux(const char* playlistPath, const char* outPath, char* logBuf) {
+    AVFormatContext* in = NULL;
+    AVDictionary* opts = NULL;
+    av_dict_set(&opts, "allowed_extensions", "ALL", 0);
+    int rc = avformat_open_input(&in, playlistPath, NULL, &opts);
+    av_dict_free(&opts);
+    if (rc < 0) {
+        char e[128] = {0}; av_strerror(rc, e, sizeof(e));
+        logStageB(logBuf, "打开 m3u8 输入"); logErrBoth(logBuf, "异常: avformat_open_input(m3u8) 失败 rc=%d (%s)\n", rc, e);
+        return rc;
+    }
+    rc = avformat_find_stream_info(in, NULL);
+    if (rc < 0) {
+        char e[128] = {0}; av_strerror(rc, e, sizeof(e));
+        logStageB(logBuf, "探测 m3u8 流信息"); logErrBoth(logBuf, "异常: find_stream_info 失败 rc=%d (%s)\n", rc, e);
+        avformat_close_input(&in); return rc;
+    }
+    int vIdx = -1, aIdx = -1;
+    pick_streams(in, &vIdx, &aIdx);
+    if (vIdx < 0) {
+        logStageB(logBuf, "选择流"); logErrBoth(logBuf, "异常: m3u8 输入没有视频轨道\n");
+        avformat_close_input(&in); return AVERROR(EINVAL);
+    }
+    AVStream* vin = in->streams[vIdx];
+    if (vin->codecpar->extradata_size <= 0 || !vin->codecpar->extradata) {
+        logStageB(logBuf, "选择流"); logErrBoth(logBuf, "异常: 视频流无参数集(extradata)，无法 -c copy 封装\n");
+        avformat_close_input(&in); return AVERROR(EINVAL);
+    }
+
+    int timescale = 90000;
+    if (vin->time_base.den > 0 && vin->time_base.den <= 10000000) timescale = vin->time_base.den;
+    AVFormatContext* oc = NULL;
+    rc = avformat_alloc_output_context2(&oc, NULL, "mp4", outPath);
+    if (rc < 0 || !oc) {
+        char e[128] = {0}; if (rc < 0) av_strerror(rc, e, sizeof(e));
+        logStageB(logBuf, "创建输出上下文"); logErrBoth(logBuf, "异常: avformat_alloc_output_context2 失败 rc=%d (%s)\n", rc, e);
+        avformat_close_input(&in); return rc ? rc : AVERROR(ENOMEM);
+    }
+    char tsStr[24]; snprintf(tsStr, sizeof(tsStr), "%d", timescale);
+    av_opt_set(oc->priv_data, "video_track_timescale", tsStr, 0);
+    av_opt_set(oc->priv_data, "movflags", "+faststart", 0);
+    av_opt_set_int(oc, "max_muxing_queue_size", 4096, 0);
+    rc = avio_open(&oc->pb, outPath, AVIO_FLAG_WRITE);
+    if (rc < 0) {
+        char e[128] = {0}; av_strerror(rc, e, sizeof(e));
+        logStageB(logBuf, "打开输出文件"); logErrBoth(logBuf, "异常: avio_open 失败 rc=%d (%s)\n", rc, e);
+        cleanup_output(oc); avformat_close_input(&in); return rc;
+    }
+
+    AVStream* vout = avformat_new_stream(oc, NULL);
+    if (!vout) {
+        logStageB(logBuf, "创建输出流(video)"); logErrBoth(logBuf, "异常: avformat_new_stream(video) 失败\n");
+        cleanup_output(oc); avformat_close_input(&in); return AVERROR(ENOMEM);
+    }
+    avcodec_parameters_copy(vout->codecpar, vin->codecpar);
+    /* in-band 参数集 tag（等价 concat 的 hev1/avc3），保持 APK 播放/后续合并一致 */
+    vout->codecpar->codec_tag = make_tag(vin->codecpar->codec_id == AV_CODEC_ID_HEVC ? "hev1" : "avc3");
+    vout->time_base = vin->time_base;
+
+    AVStream* aout = NULL;
+    if (aIdx >= 0) {
+        AVStream* ain = in->streams[aIdx];
+        aout = avformat_new_stream(oc, NULL);
+        if (!aout) {
+            logStageB(logBuf, "创建输出流(audio)"); logErrBoth(logBuf, "异常: avformat_new_stream(audio) 失败\n");
+            cleanup_output(oc); avformat_close_input(&in); return AVERROR(ENOMEM);
+        }
+        avcodec_parameters_copy(aout->codecpar, ain->codecpar);
+        aout->time_base = ain->time_base;
+    }
+
+    rc = avformat_write_header(oc, NULL);
+    if (rc < 0) {
+        char e[128] = {0}; av_strerror(rc, e, sizeof(e));
+        logStageB(logBuf, "写文件头"); logErrBoth(logBuf, "异常: avformat_write_header 失败 rc=%d (%s)\n", rc, e);
+        cleanup_output(oc); avformat_close_input(&in); return rc;
+    }
+
+    AVPacket* pkt = av_packet_alloc();
+    if (!pkt) {
+        logStageB(logBuf, "拷贝音视频包"); logErrBoth(logBuf, "异常: av_packet_alloc 失败\n");
+        av_write_trailer(oc); cleanup_output(oc); avformat_close_input(&in); return AVERROR(ENOMEM);
+    }
+    long written = 0;
+    int64_t lastDtsV = AV_NOPTS_VALUE, lastDtsA = AV_NOPTS_VALUE;
+    while ((rc = av_read_frame(in, pkt)) >= 0) {
+        int si = pkt->stream_index;
+        if (si != vIdx && si != aIdx) { av_packet_unref(pkt); continue; }
+        if (pkt->size <= 0) { av_packet_unref(pkt); continue; }
+        AVStream* inSt = in->streams[si];
+        AVStream* outSt = (si == vIdx) ? vout : aout;
+        av_packet_rescale_ts(pkt, inSt->time_base, outSt->time_base);
+        pkt->pos = -1;
+        int64_t* lastDts = (si == vIdx) ? &lastDtsV : &lastDtsA;
+        if (pkt->dts == AV_NOPTS_VALUE) pkt->dts = (*lastDts == AV_NOPTS_VALUE) ? 0 : *lastDts + 1;
+        if (pkt->pts == AV_NOPTS_VALUE) pkt->pts = pkt->dts;
+        if (*lastDts != AV_NOPTS_VALUE && pkt->dts <= *lastDts) { pkt->dts = *lastDts + 1; if (pkt->pts < pkt->dts) pkt->pts = pkt->dts; }
+        *lastDts = pkt->dts;
+        int wr = av_interleaved_write_frame(oc, pkt);
+        int failRc = wr; long long failPts = pkt->pts, failDts = pkt->dts;
+        av_packet_unref(pkt);
+        if (failRc < 0) {
+            char e[128] = {0}; av_strerror(failRc, e, sizeof(e));
+            logStageB(logBuf, "拷贝音视频包");
+            logErrBoth(logBuf, "异常: av_interleaved_write_frame 失败 rc=%d (%s)，已写 %ld 包；包信息: stream=%d pts=%lld dts=%lld size=%d\n",
+                       failRc, e, written, si, failPts, failDts, pkt->size);
+            av_write_trailer(oc); av_packet_free(&pkt);
+            cleanup_output(oc); avformat_close_input(&in); return failRc;
+        }
+        written++;
+    }
+    rc = av_write_trailer(oc);
+    av_packet_free(&pkt);
+    cleanup_output(oc);
+    avformat_close_input(&in);
+    if (rc < 0) {
+        char e[128] = {0}; av_strerror(rc, e, sizeof(e));
+        logStageB(logBuf, "写文件尾"); logErrBoth(logBuf, "异常: av_write_trailer 失败 rc=%d (%s)\n", rc, e);
+        return rc;
+    }
+    stageLog(logBuf, "[hls_remux] m3u8 转 mp4 成功");
+    return 0;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_veyra_gybeyond_FFmpegConcat_nativeM3u8ToMp4(JNIEnv* env, jclass cls,
+                                                     jstring playlistPath,
+                                                     jstring outputPath,
+                                                     jstring logPath)
+{
+    g_err[0] = 0; g_errLen = 0;
+    char logBuf[1024];
+    if (!jstring_to_utf8(env, logPath, logBuf, sizeof(logBuf))) logBuf[0] = 0;
+    install_crash_handlers(logBuf);
+    stageLog(logBuf, "[nativeM3u8ToMp4] 进入 native m3u8 remux");
+
+    char inBuf[1024];
+    if (!jstring_to_utf8(env, playlistPath, inBuf, sizeof(inBuf))) {
+        logStage("参数校验"); logErr("异常: playlist 路径读取失败\n"); return (*env)->NewStringUTF(env, g_err);
+    }
+    char outBuf[1024];
+    if (!jstring_to_utf8(env, outputPath, outBuf, sizeof(outBuf))) {
+        logStage("参数校验"); logErr("异常: 输出路径读取失败\n"); return (*env)->NewStringUTF(env, g_err);
+    }
+    struct stat st;
+    if (stat(inBuf, &st) != 0 || st.st_size <= 0) {
+        logStage("校验输入"); logErr("异常: playlist 文件不存在或为空: %s\n", inBuf);
+        return (*env)->NewStringUTF(env, g_err);
+    }
+    stageLog(logBuf, "[nativeM3u8ToMp4] 输入校验通过");
+    int rc = hls_remux(inBuf, outBuf, logBuf);
+    if (rc < 0) {
+        stageLog(logBuf, "[nativeM3u8ToMp4] 失败");
+        return (*env)->NewStringUTF(env, g_err);
+    }
+    if (!g_err[0]) g_err[0] = 0;
+    return NULL;   /* 成功 */
+}
