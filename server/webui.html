@@ -960,6 +960,10 @@ document.getElementById('btn-admin-diagnose').onclick=async()=>{
       (site.backgrounds||[]).slice(0,3).forEach(s=>lines.push('  '+s));
       lines.push(' 图片属性URL('+(site.attrUrls||[]).length+'):');
       (site.attrUrls||[]).slice(0,6).forEach(s=>lines.push('  '+s));
+      lines.push(' 解密脚本线索('+(site.decryptHints||[]).length+'):');
+      (site.decryptHints||[]).slice(0,4).forEach(s=>lines.push('  '+s));
+      lines.push(' 外部JS('+(site.scriptSrcs||[]).length+'):');
+      (site.scriptSrcs||[]).slice(0,6).forEach(s=>lines.push('  '+s));
       lines.push('');
     }else lines.push('[封面HTML特征] '+site.error+'\n');
   }catch(e){}

@@ -719,19 +719,28 @@ app.get('/api/debug/proxy', requireAdmin, (req, res) => {
   try { parsed = new URL(target); } catch { return res.json({ ok: false, error: '无效地址', target }); }
   const isMedia = MEDIA_PATH_RE.test(parsed.pathname + parsed.search);
   const verdict = isPrivateHost(parsed.hostname) ? '拒绝:内网地址' : '放行:公网资源';
-  proxyFetch.requestThroughProxy(target, backendProxy, {
-    headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 13) Mobile', 'Referer': `${parsed.protocol}//${parsed.hostname}/` },
-    timeout: 20_000, maxBytes: 20 * 1024 * 1024, redirects: 5,
-  }, (err, result) => {
-    if (err) return res.json({ ok: false, verdict, error: String(err.message || err), target: target.slice(0, 200) });
-    return res.json({
-      ok: result.status >= 200 && result.status < 300,
-      verdict, status: result.status,
-      contentType: String(result.headers['content-type'] || ''),
-      bytes: result.body.length,
-      target: target.slice(0, 200),
+  const attemptDbg = (u, retriedHttp) => {
+    proxyFetch.requestThroughProxy(u, backendProxy, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 13) Mobile', 'Referer': `${parsed.protocol}//${parsed.hostname}/` },
+      timeout: 20_000, maxBytes: 20 * 1024 * 1024, redirects: 5,
+    }, (err, result) => {
+      if (err) {
+        if (!retriedHttp && u.startsWith('https://') && /TLS|SSL|eof|handshake|connect/i.test(err.message || '')) {
+          console.log('[debug] https 握手失败，降级 http 重试', u.slice(0, 90));
+          return attemptDbg('http://' + u.slice(8), true);
+        }
+        return res.json({ ok: false, verdict, error: String(err.message || err), target: u.slice(0, 200) });
+      }
+      return res.json({
+        ok: result.status >= 200 && result.status < 300,
+        verdict, status: result.status,
+        contentType: String(result.headers['content-type'] || ''),
+        bytes: result.body.length,
+        target: u.slice(0, 200),
+      });
     });
-  });
+  };
+  attemptDbg(target, false);
 });
 
 // 站点 HTML 特征诊断：拉页面原文，提取 img/background/poster 标签样例（定位封面解析）
@@ -761,6 +770,14 @@ app.get('/api/debug/site', requireAdmin, (req, res) => {
     out.attrUrls = [];
     re = /(?:data-src|data-original|data-lazy|src|data-cover|data-img)="([^"]+)"|url\(\s*['"]?([^'")\s]+)['"]?\s*\)/gi;
     while ((m = re.exec(text)) !== null && out.attrUrls.length < 20) out.attrUrls.push((m[1] || m[2] || '').slice(0, 160));
+    // 解密脚本探测：页面内嵌 script 中含封面域名/解密关键词的片段 + 外部 JS 列表
+    out.decryptHints = [];
+    re = /<script[^>]*>([\s\S]{0,600}?)(?:pic\.drleao\.cn|upload_01|decrypt|decode|xor|aes|createObjectURL|atob\(|backgroundImage|background-image|\.jpe?g\?auth_key)([\s\S]{0,300}?)<\/script>/gi;
+    while ((m = re.exec(text)) !== null && out.decryptHints.length < 6)
+      out.decryptHints.push((m[1] + '‖' + m[2]).replace(/\s+/g, ' ').slice(0, 420));
+    out.scriptSrcs = [];
+    re = /<script[^>]+src=["']([^"']+)["'][^>]*>/gi;
+    while ((m = re.exec(text)) !== null && out.scriptSrcs.length < 12) out.scriptSrcs.push(m[1].slice(0, 160));
     res.json(out);
   });
 });
