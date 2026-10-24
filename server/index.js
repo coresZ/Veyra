@@ -228,6 +228,8 @@ app.use(express.json({ limit: '3mb' }));
 // 状态页（WebUI：需管理员密码登录后可见全部管理与用户信息）
 app.get('/', (_req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  // 禁缓存：浏览器/反代缓存旧页面会导致 script 指向旧 CDN、hls.js 加载失败（错误码4）
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
   res.sendFile(path.join(__dirname, 'webui.html'));
 });
 
