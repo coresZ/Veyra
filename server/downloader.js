@@ -459,6 +459,7 @@ async function expandHuangguoM3u8(masterUrl, referer, depth) {
   const keys = [];
   const segments = [];
   const subStreams = [];
+  let expectSub = false;
   for (const raw of lines) {
     const line = raw.trim();
     if (line.startsWith('#EXT-X-KEY')) {
