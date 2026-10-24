@@ -184,51 +184,78 @@ final class UpdateManager {
                 return apk;
             }
             File partial = new File(directory, name + ".part");
-            HttpURLConnection connection = open(candidate.url);
-            try {
-                long downloaded = 0;
-                long total = candidate.size > 0 ? candidate.size : connection.getContentLengthLong();
-                try (InputStream input = connection.getInputStream(); FileOutputStream output = new FileOutputStream(partial)) {
-                    byte[] buffer = new byte[64 * 1024];
-                    int count;
-                    int previous = -1;
-                    while ((count = input.read(buffer)) != -1) {
-                        output.write(buffer, 0, count);
-                        downloaded += count;
-                        int percent = total > 0 ? (int) Math.min(99, downloaded * 100 / total) : 0;
-                        if (percent != previous) { progress.onPercent(percent); previous = percent; }
+            // 最多两次尝试：第一次中断后保留 .part，第二次走 Range 续传；仍失败则保留 .part，
+            // 下次点「重试下载」可从断点继续，不再每次从头下。
+            Exception lastError = null;
+            for (int attempt = 0; attempt < 2; attempt++) {
+                try {
+                    return downloadAttempt(candidate.url, candidate.size, candidate.digest, partial, apk, progress);
+                } catch (Exception error) {
+                    lastError = error;
+                    // 校验失败说明已下载内容本身就是坏的，续传无意义，清掉从头下；
+                    // 「下载不完整」/网络中断则保留 .part 供续传。
+                    if (error instanceof IllegalStateException && error.getMessage() != null
+                            && error.getMessage().contains("校验失败")) {
+                        if (partial.exists()) partial.delete();
                     }
+                    progress.onPercent(0);
                 }
-                if (candidate.size > 0 && downloaded != candidate.size) throw new IllegalStateException("更新包下载不完整，请重试");
-                if (!candidate.digest.isEmpty() && !matchesDigest(partial, candidate.digest)) throw new IllegalStateException("更新包校验失败，请重试");
-                if (apk.exists() && !apk.delete()) throw new IllegalStateException("无法替换旧下载包");
-                if (!partial.renameTo(apk)) throw new IllegalStateException("无法保存更新包");
-                progress.onPercent(100);
-                return apk;
-            } finally {
-                connection.disconnect();
-                if (partial.exists()) partial.delete();
             }
+            throw lastError != null ? lastError : new IllegalStateException("下载失败，请重试");
         } finally {
             downloading = false;
         }
     }
 
-    private static JSONObject status(String value) throws Exception { return new JSONObject().put("status", value); }
+    /** 单次下载尝试：.part 存在时带 Range 续传（服务器支持则 206），完成后校验大小 + SHA-256。 */
+    private File downloadAttempt(String url, long expectedSize, String digest, File partial, File apk, Progress progress) throws Exception {
+        long resume = partial.isFile() ? partial.length() : 0;
+        HttpURLConnection connection = open(url, resume);
+        try {
+            int code = connection.getResponseCode();
+            boolean resumed = resume > 0 && code == HttpURLConnection.HTTP_PARTIAL;
+            long downloaded = resumed ? resume : 0;
+            if (resume > 0 && !resumed) partial.delete();   // 服务器不认 Range：从头全量
+            long total = expectedSize > 0 ? expectedSize : connection.getContentLengthLong();
+            try (InputStream input = connection.getInputStream();
+                 FileOutputStream output = new FileOutputStream(partial, resumed)) {
+                byte[] buffer = new byte[64 * 1024];
+                int count;
+                int previous = -1;
+                while ((count = input.read(buffer)) != -1) {
+                    output.write(buffer, 0, count);
+                    downloaded += count;
+                    int percent = total > 0 ? (int) Math.min(99, downloaded * 100 / total) : 0;
+                    if (percent != previous) { progress.onPercent(percent); previous = percent; }
+                }
+            }
+            if (expectedSize > 0 && downloaded != expectedSize) throw new IllegalStateException("更新包下载不完整，请重试");
+            if (!digest.isEmpty() && !matchesDigest(partial, digest)) throw new IllegalStateException("更新包校验失败，请重试");
+            if (apk.exists() && !apk.delete()) throw new IllegalStateException("无法替换旧下载包");
+            if (!partial.renameTo(apk)) throw new IllegalStateException("无法保存更新包");
+            progress.onPercent(100);
+            return apk;
+        } finally {
+            connection.disconnect();
+        }
+    }
 
-    private static HttpURLConnection open(String address) throws Exception {
+    private static HttpURLConnection open(String address, long from) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
         connection.setConnectTimeout(15_000);
-        connection.setReadTimeout(30_000);
+        connection.setReadTimeout(60_000);
         connection.setRequestProperty("User-Agent", "ChengZi-Android-Updater");
         connection.setRequestProperty("Accept", "application/json");
+        if (from > 0) connection.setRequestProperty("Range", "bytes=" + from + "-");
         int code = connection.getResponseCode();
-        if (code < 200 || code >= 300) {
+        if ((code < 200 || code >= 300) && code != HttpURLConnection.HTTP_PARTIAL) {
             connection.disconnect();
             throw new IllegalStateException("GitHub 请求失败（" + code + "）");
         }
         return connection;
     }
+
+    private static JSONObject status(String value) throws Exception { return new JSONObject().put("status", value); }
 
     /** 拉取 GitHub Releases API latest：tag_name / body / 第一个 APK asset。 */
     private static JSONObject fetchManifest() throws Exception {
