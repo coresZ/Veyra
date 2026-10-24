@@ -826,6 +826,10 @@ app.get('/api/debug/site', requireAdmin, (req, res) => {
     out.scriptSrcs = [];
     re = /<script[^>]+src=["']([^"']+)["'][^>]*>/gi;
     while ((m = re.exec(text)) !== null && out.scriptSrcs.length < 12) out.scriptSrcs.push(m[1].slice(0, 160));
+    // 条目 HTML 特征：前 3 个指向 /video/ 的 <a> 原始片段（看卡片结构/标题位置）
+    out.entries = [];
+    re = /<a[^>]*href=["'][^"']*\/video\/[^"']*["'][^>]*>[\s\S]{0,500}?<\/a>/gi;
+    while ((m = re.exec(text)) !== null && out.entries.length < 3) out.entries.push(m[0].replace(/\s+/g, ' ').slice(0, 300));
     res.json(out);
   });
 });
