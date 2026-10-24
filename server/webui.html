@@ -289,10 +289,10 @@ function proxyUrl(u){
   // 直连模式：https 页面加载 http 资源会被浏览器拦（混合内容），统一升 https 尝试
   return u.replace(/^http:\/\//i,'https://');
 }
-// 私密源代理 URL：统一附加源站 Referer，防盗链校验按播放页域名放行
+// 私密源代理 URL：与 APK 后端转发完全一致（/api/huangguo-proxy?url=<raw>，无 ref）。
+// 后端对上游的 Referer 自动取 https://<当前请求host>/，与 APK 播放器行为相同（APK 实测可播）。
 function hgProxy(u){
-  const ref=encodeURIComponent(HUANGGUO_BASE.replace(/\/$/,''));
-  return '/api/huangguo-proxy?url='+encodeURIComponent(u)+'&ref='+ref;
+  return '/api/huangguo-proxy?url='+encodeURIComponent(u);
 }
 
 async function loadHome(){
