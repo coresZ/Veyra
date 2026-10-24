@@ -515,6 +515,35 @@ function hgProxy(u){
 }
 
 function parseHuangguoHtml(html){
+  // 主路径：与 APK SiteRepository 同款——按 .hg-drama-card[data-track-id] 卡片语义解析（分类/首页各自内容）
+  {
+    const items=[], seen=new Set();
+    try{
+      const doc=new DOMParser().parseFromString(html,'text/html');
+      const cards=doc.querySelectorAll('.hg-drama-card[data-track-id]');
+      for(const card of cards){
+        const id=card.getAttribute('data-track-id')||'';
+        const a=card.querySelector('a[href]');
+        const href=a?a.getAttribute('href'):'';
+        let u='';
+        if(id&&/^\d+$/.test(id))u=HUANGGUO_BASE+'video/'+id+'/';
+        else if(href){try{u=new URL(href,HUANGGUO_BASE).toString()}catch{}}
+        if(!u||seen.has(u))continue;
+        seen.add(u);
+        const img=card.querySelector('.hg-drama-card__cover img');
+        let cover=img?(img.getAttribute('data-src')||img.getAttribute('src')||img.getAttribute('data-original')||''):'';
+        let title=card.getAttribute('data-track-title')||'';
+        if(!title){const titleEl=card.querySelector('.hg-drama-card__title a')||card.querySelector('.hg-drama-card__title');
+          title=titleEl?titleEl.textContent.replace(/\s+/g,' ').trim():'';}
+        const epEl=card.querySelector('.hg-drama-card__episode');
+        const badge=epEl?epEl.textContent.replace(/\s+/g,' ').trim():'';
+        if(!title&&!u)continue;
+        try{cover=new URL(cover,HUANGGUO_BASE).toString()}catch{}
+        items.push({id:u,title,cover,coverFrom:String(cover).slice(0,140),badge,detailUrl:u});
+      }
+    }catch(e){}
+    if(items.length)return items;
+  }
   const items=[], seen=new Set();
   const base=HUANGGUO_BASE;
   // 收集所有 a 链接：href 或 onclick 里带播放/详情关键字
