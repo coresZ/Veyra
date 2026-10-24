@@ -521,7 +521,11 @@ async function runTask(task) {
   if (task.source === 'hongguo' && !task._appVids) {
     if (!task._webId) task._webId = task.seriesId; // 保留手机推来的原始 ID（网页源保底用）
     let vids = null;
-    if (task.seriesId) {
+    // 手机端直推的 vids（APK 用无签名 video_detail 解析官方 vid）：直接注入，绕开 NAS 端签名风控
+    if (Array.isArray(task.vids) && task.vids.length >= task.episodes.length) {
+      vids = task.vids.map(v => String(v));
+      console.log(`[hongguo-app] ${task.title} 手机端注入 ${vids.length} 个 vid`);
+    } else if (task.seriesId) {
       try {
         const det = await hgApp.videoDetail(task.seriesId);
         if (det.vids && det.vids.length >= task.episodes.length) vids = det.vids;
@@ -564,6 +568,8 @@ async function runTask(task) {
       : { 'User-Agent': BROWSER_UA, 'Accept-Encoding': 'identity' };
     // 网页源直链（镜像站）防盗链：下载必须带镜像站 Referer，否则源站 403
     if (ep._webReferer) h['Referer'] = ep._webReferer;
+    // App 源 CDN 直链：源站要求 Referer 时也带上（取流 URL 同域）
+    else if (ep._appReferer) h['Referer'] = ep._appReferer;
     return h;
   };
   const signal = { aborted: false };
@@ -601,6 +607,8 @@ async function runTask(task) {
                     ep.key = s.key || '';
                     ep.altUrls = (s.altUrls || []).slice(0, 4);
                     ep._appSource = true;
+                    // App 源 CDN 防盗链校验：下载带取流 URL 同域 Referer（源站要求 Referer 时避免 403）
+                    try { ep._appReferer = 'https://' + new URL(s.url).host + '/'; } catch { ep._appReferer = ''; }
                     task.progress.detail = `第 ${idx + 1} 集取流 ${s.quality || ''}`;
                   }
                 } catch (e) {

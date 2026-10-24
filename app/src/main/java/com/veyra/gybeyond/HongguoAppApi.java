@@ -5,6 +5,7 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.nio.charset.StandardCharsets;
@@ -83,11 +84,21 @@ final class HongguoAppApi {
             JSONObject data = json.optJSONObject("data");
             JSONObject video = data == null ? null : data.optJSONObject("video_data");
             if (video == null) return null;
+            // 解析每集 vid（vids[i] = 第 i+1 集），供 NAS 下载任务直推，绕开 NAS 端签名取流被风控
+            JSONArray list = video.optJSONArray("video_list");
+            JSONArray vids = new JSONArray();
+            if (list != null) {
+                for (int i = 0; i < list.length(); i++) {
+                    JSONObject v = list.optJSONObject(i);
+                    if (v != null && v.opt("vid") != null) vids.put(String.valueOf(v.opt("vid")));
+                }
+            }
             return new JSONObject()
                     .put("album_id", String.valueOf(video.optLong("related_album_id", 0L)))
                     .put("season_index", video.optInt("season_index", 0))
                     .put("episode_cnt", video.optInt("episode_cnt", 0))
-                    .put("series_title", video.optString("series_title", ""));
+                    .put("series_title", video.optString("series_title", ""))
+                    .put("vids", vids);
         }
     }
 

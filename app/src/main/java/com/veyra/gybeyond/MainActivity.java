@@ -634,9 +634,26 @@ public final class MainActivity extends Activity {
                 return new JSONObject().put("ok", true);
             }
             case "crash-log": return new JSONObject().put("log", crashLog());
-            case "nas-download-start": return account.postJson("api/download/tasks", new JSONObject()
-                    .put("source", args.optString("source")).put("title", args.optString("title"))
-                    .put("seriesId", args.optString("seriesId")).put("episodes", args.optJSONArray("episodes")));
+            case "nas-download-start": {
+                JSONObject body = new JSONObject()
+                        .put("source", args.optString("source")).put("title", args.optString("title"))
+                        .put("seriesId", args.optString("seriesId")).put("episodes", args.optJSONArray("episodes"));
+                // 红果源：手机端直接解析官方 vid 推给 NAS（NAS 端 video_detail/searchSeries 常被风控导致
+                // "未注入 App vid" 而走网页源 403）；NAS 拿到 vids 后直接用 vid 签名取流
+                if ("hongguo".equals(args.optString("source"))) {
+                    try {
+                        JSONObject det = new HongguoAppApi().fetch(args.optString("seriesId"));
+                        JSONArray vs = det == null ? null : det.optJSONArray("vids");
+                        if (vs != null && vs.length() > 0) {
+                            body.put("vids", vs);
+                            Log.i(TAG, "NAS 下载注入 vids " + vs.length() + " 个");
+                        }
+                    } catch (Exception e) {
+                        Log.w(TAG, "NAS 下载 vids 预解析失败，由后端自行解析", e);
+                    }
+                }
+                return account.postJson("api/download/tasks", body);
+            }
             case "nas-download-list": return account.getJson("api/download/tasks");
             case "nas-download-cancel": account.deleteJson("api/download/tasks/" + args.optString("id")); return new JSONObject().put("ok", true);
             case "nas-download-merge": return account.postJson("api/download/merge", new JSONObject().put("id", args.optString("id")));
