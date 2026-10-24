@@ -363,7 +363,9 @@ function startTask(task) {
 //   → m3u8(master) 递归展开（解包 video.225600.xyz 代理层/相对路径补全/子流）
 //   → 下载全部分片 + #EXT-X-KEY（AES-128）→ 写本地 playlist.m3u8 → ffmpeg -c copy 封装 mp4
 //   与 APK/WebUI 播放同源取流，天然兼容源站防盗链与加密。
-const HUANGGUO_SITES = ['https://www.pqhybuxo.cc', 'https://thu.pqhybuxo.cc', 'https://m.pqhybuxo.cc'];
+// 站点顺序：m 站优先（与 APK 播放链路同源，videoSrc 是 media playlist 直接分片；
+// www/thu 站的 videoSrc 可能是 variant 多清晰度子流，递归展开子流 CDN 会被风控返回 600KB 二进制）
+const HUANGGUO_SITES = ['https://m.pqhybuxo.cc', 'https://www.pqhybuxo.cc', 'https://thu.pqhybuxo.cc'];
 
 function readBackendProxy() {
   try {
@@ -456,7 +458,7 @@ async function expandHuangguoM3u8(masterUrl, referer, depth) {
   const lines = text.split(/\r?\n/);
   const keys = [];
   const segments = [];
-  let expectSub = false;
+  const subStreams = [];
   for (const raw of lines) {
     const line = raw.trim();
     if (line.startsWith('#EXT-X-KEY')) {
@@ -469,9 +471,23 @@ async function expandHuangguoM3u8(masterUrl, referer, depth) {
       if (/[\uFFFD\u0000-\u001F]/.test(line)) continue;
       const uri = resolveHuangguoUri(line, masterUrl);
       if (!/^https?:\/\//.test(uri)) continue;
-      if (expectSub) return expandHuangguoM3u8(uri, referer, depth + 1);
+      if (expectSub) { subStreams.push(uri); expectSub = false; continue; }
       segments.push(uri);
     }
+  }
+  // variant playlist：依次尝试子流，某条 CDN 风控/乱码则换下一条，全部失败才报错
+  if (subStreams.length) {
+    let lastErr = null;
+    for (const sub of subStreams) {
+      try {
+        console.log(`[huangguo] 展开子流 ${String(sub).slice(0, 90)}`);
+        return await expandHuangguoM3u8(sub, referer, depth + 1);
+      } catch (e) {
+        lastErr = e;
+        console.log(`[huangguo] 子流展开失败 ${String(sub).slice(0, 90)}: ${e.message}`);
+      }
+    }
+    throw lastErr || new Error('所有子流展开失败');
   }
   return { segments, keys };
 }
