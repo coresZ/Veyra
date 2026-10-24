@@ -31,6 +31,9 @@ final class HongguoAppApi {
 
     HongguoAppApi(OkHttpClient http) { this.http = http; }
 
+    /** 独立使用场景（如 MainActivity 注入 vids）：自建客户端。 */
+    HongguoAppApi() { this(new OkHttpClient()); }
+
     /** 取一部剧的官方系列信息；失败返回 null（调用方降级为不分组）。内存缓存避免重复请求。 */
     JSONObject fetch(String seriesId) {
         if (seriesId == null || !seriesId.matches("[0-9]{1,30}")) return null;
