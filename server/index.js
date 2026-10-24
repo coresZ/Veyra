@@ -599,8 +599,17 @@ function kindOf(type, body) {
   const t = String(type || '').toLowerCase();
   if (t.includes('mpegurl') || t.includes('m3u8')) return 'm3u8';
   if (body.length > 6 && body.slice(0, 7).toString('utf8') === '#EXTM3U') return 'm3u8';
-  if (t.startsWith('text/') || t.includes('html') || t.includes('xml') || t.includes('json')) return 'html';
   if (t.startsWith('image/')) return 'image';
+  // 图片魔数兜底（源站常见 binary/octet-stream，Chrome <img> 拒绝该类型，必须识别成 image 并改写响应头）
+  if (body.length >= 12) {
+    const b = body.subarray(0, 12);
+    if (b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) return 'image';               // JPEG
+    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) return 'image'; // PNG
+    if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'image'; // GIF
+    if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+        b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image'; // WEBP
+  }
+  if (t.startsWith('text/') || t.includes('html') || t.includes('xml') || t.includes('json')) return 'html';
   if (t.includes('mp2t') || t.includes('mp4') || t.includes('m4s') || t.includes('octet-stream')) return 'video';
   return 'other';
 }
@@ -639,54 +648,68 @@ app.get('/api/huangguo-proxy', (req, res) => {
     'Accept': '*/*',
   };
   headers['Referer'] = req.query.ref ? String(req.query.ref) : `${parsed.protocol}//${parsed.hostname}/`;
-  proxyFetch.requestThroughProxy(target, backendProxy, {
-    headers, timeout: 25_000, maxBytes: 50 * 1024 * 1024, redirects: 5,
-  }, (err, result) => {
-    if (err) {
-      console.log('[proxy]', new Date().toISOString(), 'ERR', (err.message || '').slice(0, 120), target.slice(0, 90));
-      if (!res.headersSent) return res.status(502).json({ error: '上游站点连接失败: ' + (err.message || '') });
-      return res.end();
-    }
-    if (result.status < 200 || result.status >= 300)
-      return res.status(502).json({ error: '上游站点返回 ' + result.status });
-    let type = String(result.headers['content-type'] || 'text/html; charset=utf-8');
-    let body = result.body;
-    let kind = kindOf(type, body);
-    if (body.length > MAX_BYTES[kind]) {
-      return res.status(502).json({ error: '响应超过大小限制（' + MAX_BYTES[kind] + ' 字节）' });
-    }
-    if (kind === 'm3u8') {
-      type = 'application/vnd.apple.mpegurl; charset=utf-8';
-      // 重写 m3u8：普通 URI 行 + #EXT-X-KEY/#EXT-X-MAP 的 URI="..." 全部包一层后端代理
-      // 协议跟随访问方式：公网经反代 TLS 终止后本服务收到的是 HTTP（req.protocol 不可靠），
-      // 故公网域名固定 https、局域网/本机保持 http；host 用请求真实 Host（反代透传）。
-      // 附加 ref=<源站>：分片/CDN 防盗链校验 Referer 需为播放页域名（此前传 CDN 自身域名会 403）
-      const proxyHost = String(req.headers.host || '');
-      const proxyHostOnly = proxyHost.split(':')[0].toLowerCase();
-      const privateHostRe = /^(localhost|127\.0\.0\.1|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
-      const base = `${privateHostRe.test(proxyHostOnly) ? 'http' : 'https'}://${proxyHost}/api/huangguo-proxy?url=`;
-      const ref = req.query.ref ? '&ref=' + encodeURIComponent(String(req.query.ref)) : '';
-      let text = body.toString('utf8');
-      text = text.replace(/(URI=")([^"]+)(")/g, (_m, a, u, c) => {
-        try { return a + base + encodeURIComponent(new URL(u, target).toString()) + ref + c; }
-        catch { return _m; }
+  // https 握手失败自动降级 http 重试（部分 CDN 如 tp1.drleao.cn 的 https 端口不稳，源站 m3u8 内引用其子 m3u8/分片）
+  const attempt = (u, retriedHttp) => {
+    proxyFetch.requestThroughProxy(u, backendProxy, {
+      headers, timeout: 25_000, maxBytes: 50 * 1024 * 1024, redirects: 5,
+    }, (err, result) => {
+      if (err) {
+        console.log('[proxy]', new Date().toISOString(), 'ERR', (err.message || '').slice(0, 120), u.slice(0, 90));
+        if (!retriedHttp && u.startsWith('https://') && /TLS|SSL|eof|handshake|connect/i.test(err.message || '')) {
+          console.log('[proxy] https 握手失败，降级 http 重试', u.slice(0, 90));
+          return attempt('http://' + u.slice(8), true);
+        }
+        if (!res.headersSent) return res.status(502).json({ error: '上游站点连接失败: ' + (err.message || '') });
+        return res.end();
+      }
+      if (result.status < 200 || result.status >= 300)
+        return res.status(502).json({ error: '上游站点返回 ' + result.status });
+      let type = String(result.headers['content-type'] || 'text/html; charset=utf-8');
+      let body = result.body;
+      let kind = kindOf(type, body);
+      if (body.length > MAX_BYTES[kind]) {
+        return res.status(502).json({ error: '响应超过大小限制（' + MAX_BYTES[kind] + ' 字节）' });
+      }
+      if (kind === 'image') {
+        // 源站常见 binary/octet-stream，Chrome <img> 拒绝渲染：按扩展名强制改写为 image/*
+        const ext = (parsed.pathname.match(/\.(jpe?g|png|webp|gif|avif|bmp)$/i) || [])[1] || '';
+        const ctMap = { jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', avif: 'image/avif', bmp: 'image/bmp' };
+        type = ctMap[ext.toLowerCase()] || 'image/jpeg';
+      }
+      if (kind === 'm3u8') {
+        type = 'application/vnd.apple.mpegurl; charset=utf-8';
+        // 重写 m3u8：普通 URI 行 + #EXT-X-KEY/#EXT-X-MAP 的 URI="..." 全部包一层后端代理
+        // 协议跟随访问方式：公网经反代 TLS 终止后本服务收到的是 HTTP（req.protocol 不可靠），
+        // 故公网域名固定 https、局域网/本机保持 http；host 用请求真实 Host（反代透传）。
+        // 附加 ref=<源站>：分片/CDN 防盗链校验 Referer 需为播放页域名（此前传 CDN 自身域名会 403）
+        const proxyHost = String(req.headers.host || '');
+        const proxyHostOnly = proxyHost.split(':')[0].toLowerCase();
+        const privateHostRe = /^(localhost|127\.0\.0\.1|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
+        const base = `${privateHostRe.test(proxyHostOnly) ? 'http' : 'https'}://${proxyHost}/api/huangguo-proxy?url=`;
+        const ref = req.query.ref ? '&ref=' + encodeURIComponent(String(req.query.ref)) : '';
+        let text = body.toString('utf8');
+        text = text.replace(/(URI=")([^"]+)(")/g, (_m, a, uri, c) => {
+          try { return a + base + encodeURIComponent(new URL(uri, u).toString()) + ref + c; }
+          catch { return _m; }
       });
       text = text.replace(/^(?!#)(.+)$/gm, (line) => {
         const uri = line.trim();
         if (!uri) return line;
-        try { return base + encodeURIComponent(new URL(uri, target).toString()) + ref; }
+        try { return base + encodeURIComponent(new URL(uri, u).toString()) + ref; }
         catch { return line; }
       });
       body = Buffer.from(text, 'utf8');
     }
-    if (kind === 'm3u8' || kind === 'html' || kind === 'image') cachePut(target, body, type, CACHE_TTL[kind]);
-    console.log('[proxy]', new Date().toISOString(), 'RES', kind, 'bytes=' + body.length, target.slice(0, 90));
+    if (kind === 'm3u8' || kind === 'html' || kind === 'image') cachePut(u, body, type, CACHE_TTL[kind]);
+    console.log('[proxy]', new Date().toISOString(), 'RES', kind, 'bytes=' + body.length, u.slice(0, 90));
     res.status(200);
     res.setHeader('Content-Type', type);
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Proxy-Cache', 'miss');
     res.end(body);
-  });
+    });
+  };
+  attempt(target, false);
 });
 
 // 代理诊断：管理员可查看任意 URL 的代理判定与结果（排查封面/分片 403）

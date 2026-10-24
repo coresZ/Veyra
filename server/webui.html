@@ -354,6 +354,7 @@ function parseHuangguoHtml(html){
     if(!/detail|video|play|show|vod|info|series|drama/i.test(u))return;
     if(seen.has(u))return;seen.add(u);
     let c=cover||'';try{if(c)c=new URL(c,base).toString()}catch{}
+    items.push({id:u,title:(title||'').trim(),cover:c,coverFrom:String(cover||'').slice(0,140),badge:'',detailUrl:u});
     items.push({id:u,title:(title||'').trim(),cover:c,badge:'',detailUrl:u});
   };
   // 封面提取多策略：img 各种懒加载属性 → srcset → style 背景图 → video poster
@@ -387,7 +388,7 @@ function parseHuangguoHtml(html){
       if(!/detail|video|play|show|vod|info|series|drama/i.test(href)||seen.has(href))continue;
       seen.add(href);
       try{cover=new URL(cover,base).toString()}catch{}
-      items.push({id:href,title:'',cover,badge:'',detailUrl:href});
+      items.push({id:href,title:'',cover,coverFrom:String(cover||'').slice(0,140),badge:'',detailUrl:href});
     }
   }
   // 兜底 2：条目已有但封面为空时，用整页图片按顺序配对（封面特征词优先）
@@ -944,6 +945,7 @@ document.getElementById('btn-admin-diagnose').onclick=async()=>{
     const cover=items[0]&&items[0].cover;
     if(cover)lines.push('  示例封面: '+cover.slice(0,140));
     else lines.push('  !! 未解析到封面 URL（解析层问题）');
+    if(items[0]&&items[0].coverFrom)lines.push('  封面来源片段: '+items[0].coverFrom);
     lines.push('');
     if(cover)await debug('封面',cover);
   }catch(e){lines.push('[私密首页] 失败: '+e.message+'\n')}
