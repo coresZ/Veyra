@@ -732,19 +732,31 @@ app.get('/api/huangguo-proxy', (req, res) => {
         const privateHostRe = /^(localhost|127\.0\.0\.1|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
         const base = `${privateHostRe.test(proxyHostOnly) ? 'http' : 'https'}://${proxyHost}/api/huangguo-proxy?url=`;
         const ref = req.query.ref ? '&ref=' + encodeURIComponent(String(req.query.ref)) : '';
+        // 解包源站自带代理层：video.225600.xyz:1314/api/huangguo-proxy?url=<真实分片>
+        // 该网关对后端拒绝（502/握手失败），但其 url 参数即真实 CDN 地址（tpX.drleao.cn，后端已验证可直抓）
+        const unwrapHgProxy = (uri) => {
+          try {
+            const u = new URL(uri);
+            if (u.hostname.includes('video.225600.xyz') && /\/api\/huangguo-proxy$/.test(u.pathname)) {
+              const inner = u.searchParams.get('url');
+              if (inner) return new URL(inner).toString();
+            }
+          } catch { /* 保留原样 */ }
+          return uri;
+        };
         let text = body.toString('utf8');
         text = text.replace(/(URI=")([^"]+)(")/g, (_m, a, uri, c) => {
-          try { return a + base + encodeURIComponent(new URL(uri, u).toString()) + ref + c; }
+          try { return a + base + encodeURIComponent(new URL(unwrapHgProxy(uri), u).toString()) + ref + c; }
           catch { return _m; }
-      });
-      text = text.replace(/^(?!#)(.+)$/gm, (line) => {
-        const uri = line.trim();
-        if (!uri) return line;
-        try { return base + encodeURIComponent(new URL(uri, u).toString()) + ref; }
-        catch { return line; }
-      });
-      body = Buffer.from(text, 'utf8');
-    }
+        });
+        text = text.replace(/^(?!#)(.+)$/gm, (line) => {
+          const uri = line.trim();
+          if (!uri) return line;
+          try { return base + encodeURIComponent(new URL(unwrapHgProxy(uri), u).toString()) + ref; }
+          catch { return line; }
+        });
+        body = Buffer.from(text, 'utf8');
+      }
     if (kind === 'm3u8' || kind === 'html' || kind === 'image') cachePut(u, body, type, CACHE_TTL[kind]);
     console.log('[proxy]', new Date().toISOString(), 'RES', kind, 'bytes=' + body.length, u.slice(0, 90));
     res.status(200);
