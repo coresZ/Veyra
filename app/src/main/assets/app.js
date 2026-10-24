@@ -1053,7 +1053,12 @@ async function submitDownloadTo(target) {
       // NAS 自主解析：只推 seriesId/title/集数，由后端调红果 App 接口取流（最高画质档）
       await api('nas-download-start', { source: contentSource, title: state.detail.title, seriesId: String(state.detail.seriesId || state.detail.id), episodes });
       toast('已提交 NAS 下载任务（后端自行解析取流）');
+    } else if (privateMode() && state.proxyMode === 3) {
+      // 黄果 + 走后端转发：手机弱网下再经 NAS 中转拉流只会更卡，直接转交 NAS 下载
+      await api('nas-download-start', { source: contentSource, title: state.detail.title, seriesId: String(state.detail.seriesId || state.detail.id), episodes });
+      toast('转发模式已转交 NAS 下载，完成后可在「我的下载」合并');
     } else {
+      // 直连/仅代理（含红果永远直连）：手机本地拉 m3u8/分片并封装 mp4，不经后端
       const resolved = await resolveEpisodesForDownload(episodes);
       if (!resolved.length) throw new Error('没有可下载的分集');
       await api('download-start', { source: contentSource, title: state.detail.title, episodes: resolved });
