@@ -385,8 +385,9 @@ function unwrapHgProxy(uri) {
 function hgRequest(url, referer, maxBytes) {
   // curl globbing 安全：源站分片文件名可能含未编码的 ()[]{}，curl 会按 glob 解析报 error 3
   url = String(url).replace(/[\[\]\(\)\{\}]/g, c => encodeURIComponent(c));
-  return new Promise((resolve, reject) => {
-    proxyFetch.requestThroughProxy(url, readBackendProxy(), {
+  // https 握手失败自动降级 http 重试（部分 CDN 如 tp1.drleao.cn 的 https 端口不稳，与播放代理行为一致）
+  const attempt = (u, retriedHttp) => new Promise((resolve, reject) => {
+    proxyFetch.requestThroughProxy(u, readBackendProxy(), {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36',
         'Accept': '*/*',
@@ -394,11 +395,17 @@ function hgRequest(url, referer, maxBytes) {
       },
       timeout: 30_000, maxBytes: maxBytes || 40 * 1024 * 1024, redirects: 5,
     }, (err, result) => {
-      if (err) return reject(err);
+      if (err) {
+        if (!retriedHttp && u.startsWith('https://') && /TLS|SSL|eof|handshake|connect/i.test(err.message || '')) {
+          return attempt('http://' + u.slice(8), true).then(resolve, reject);
+        }
+        return reject(err);
+      }
       if (!result || result.status < 200 || result.status >= 300) return reject(new Error('HTTP ' + (result && result.status)));
       resolve(result.body);
     });
   });
+  return attempt(url, false);
 }
 
 function resolveHuangguoUri(uri, base) {
@@ -435,6 +442,7 @@ async function huangguoDownloadEpisode(seriesId, number, dir, plainFile) {
   const first = number === 1;
   const errors = [];
   let masterUrl = null;
+  let masterSite = null;
   for (const site of HUANGGUO_SITES) {
     try {
       const pageUrl = first ? `${site}/video/${seriesId}/` : `${site}/video/${seriesId}/ep-${number}/`;
@@ -446,6 +454,7 @@ async function huangguoDownloadEpisode(seriesId, number, dir, plainFile) {
       const data = JSON.parse(jsonText.replace(/^[\s\S]*?(?=\{)/, ''));
       const src = data.videoSrc || (Array.isArray(data.videoSrcList) ? data.videoSrcList[0] : '');
       if (!src) throw new Error('videoSrc 为空');
+      masterSite = site; // 记住解析出 m3u8 的站点，防盗链 Referer 必须用播放页所属站点
       masterUrl = resolveHuangguoUri(src, `${site}/video/${seriesId}/`);
       break;
     } catch (e) {
@@ -453,7 +462,8 @@ async function huangguoDownloadEpisode(seriesId, number, dir, plainFile) {
     }
   }
   if (!masterUrl) throw new Error('解析播放地址失败（' + errors.join(' | ') + '）');
-  const referer = first ? `https://www.pqhybuxo.cc/video/${seriesId}/` : `https://www.pqhybuxo.cc/video/${seriesId}/ep-${number}/`;
+  // Referer 用解析出 m3u8 的站点（CDN 防盗链校验 Referer 需为播放页域名；硬编码 www 在 thu/m 站点解析时会 403）
+  const referer = `${masterSite}/video/${seriesId}/` + (first ? '' : `ep-${number}/`);
   const plan = await expandHuangguoM3u8(masterUrl, referer, 0);
   if (!plan.segments.length) throw new Error('m3u8 无分片');
 
@@ -466,12 +476,20 @@ async function huangguoDownloadEpisode(seriesId, number, dir, plainFile) {
   }
 
   // 并发下载全部分片（源站分片通常数百 KB～数 MB）
+  // 下载失败自动重试：403/瞬时限流换 Referer 变体（www/thu/m 站点域名各试一次），仍失败才报错
   const segFiles = new Array(plan.segments.length);
   let nextSeg = 0;
+  const segReferers = [referer, ...HUANGGUO_SITES.map(s => `${s}/video/${seriesId}/` + (first ? '' : `ep-${number}/`))];
   await Promise.all(Array.from({ length: Math.min(6, plan.segments.length) }, async () => {
     while (nextSeg < plan.segments.length) {
       const i = nextSeg++;
-      const buf = await hgRequest(plan.segments[i], referer, 60 * 1024 * 1024);
+      let buf = null;
+      let lastErr = null;
+      for (const rf of segReferers) {
+        try { buf = await hgRequest(plan.segments[i], rf, 60 * 1024 * 1024); break; }
+        catch (e) { lastErr = e; }
+      }
+      if (buf === null) throw lastErr || new Error(`分片 ${i} 下载失败`);
       const f = safeJoin(dir, `seg-${number}-${String(i).padStart(4, '0')}.ts`);
       fs.writeFileSync(f, buf);
       segFiles[i] = f;
