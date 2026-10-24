@@ -51,7 +51,7 @@ body{background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,"PingFang 
   .header{padding:10px 14px;gap:10px}
   .pc-nav{display:none}
   .container{padding:14px;padding-bottom:84px}
-  .grid{grid-template-columns:repeat(3,1fr);gap:10px}
+  .grid{grid-template-columns:repeat(2,1fr);gap:10px}
   .poster-title{font-size:12px}
   .view-head{padding:16px 14px 0}
   .view-head h1{font-size:22px}
@@ -135,6 +135,25 @@ video{width:100%;border-radius:10px;background:#000}
 .dlmgr-ops .ghost{font-size:12px;padding:6px 12px;margin:0}
 .dlmgr-empty{color:var(--mut);font-size:13px;text-align:center;padding:30px 0}
 .dlmgr-output{font-size:11px;color:var(--acc);word-break:break-all;margin-top:6px}
+/* ---- APK 对齐：手机首页分类横滑条 + 「我的」页（头像+组别徽章+NAS下载） ---- */
+.cat-strip{display:flex;gap:8px;overflow-x:auto;padding:0 14px 4px;margin-bottom:4px;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.cat-strip::-webkit-scrollbar{display:none}
+.cat-strip button{flex-shrink:0;background:#0d0f13;border:1px solid var(--line);color:var(--mut);border-radius:999px;padding:6px 14px;font-size:13px;cursor:pointer;transition:.2s;white-space:nowrap}
+.cat-strip button.active{background:var(--acc);color:#1a1e26;border-color:var(--acc);font-weight:600}
+.mine-view{max-width:720px;margin:0 auto;padding:20px}
+.mine-head{display:flex;align-items:center;gap:14px;padding:18px;background:var(--card);border:1px solid var(--line);border-radius:16px;margin-bottom:14px}
+.mine-avatar{width:56px;height:56px;border-radius:50%;object-fit:cover;background:var(--acc);display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:800;color:#1a1e26;position:relative;flex-shrink:0}
+.mine-avatar .role-badge{position:absolute;right:-6px;bottom:-6px;background:#e8483d;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:999px;border:2px solid var(--card);line-height:1.4;white-space:nowrap}
+.mine-name{font-size:17px;font-weight:700}
+.mine-sub{font-size:12px;color:var(--mut);margin-top:3px}
+.mine-tabs{display:flex;background:#0d0f13;border:1px solid var(--line);border-radius:12px;padding:3px;margin-bottom:14px}
+.mine-tabs button{flex:1;background:transparent;border:none;color:var(--mut);padding:9px 0;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer}
+.mine-tabs button.active{background:var(--acc);color:#1a1e26}
+.mine-body-pad{padding:0 2px}
+@media (max-width:800px){
+  .mine-view{padding:12px 14px 84px}
+  .mine-avatar{width:48px;height:48px;font-size:20px}
+}
 </style>
 </head>
 <body>
@@ -159,8 +178,24 @@ video{width:100%;border-radius:10px;background:#000}
   <div class="sub-tabs" id="sub-tabs" style="display:none"></div>
 </div>
 <div class="hero-wrap" id="hero-wrap" style="display:none"></div>
+<div class="cat-strip" id="cat-strip" style="display:none"></div>
 <div class="container">
   <div class="grid" id="grid"><div class="loading">加载中…</div></div>
+</div>
+
+<div class="mine-view" id="mine-view" style="display:none">
+  <div class="mine-head">
+    <div class="mine-avatar">V<span class="role-badge" id="mine-role">管理员</span></div>
+    <div>
+      <div class="mine-name" id="mine-name">Veyra 管理员</div>
+      <div class="mine-sub" id="mine-sub">Web 管理台 · 系统管理员</div>
+    </div>
+  </div>
+  <div class="mine-tabs">
+    <button type="button" id="mine-tab-dl" class="active">NAS下载</button>
+    <button type="button" id="mine-tab-diag">私密诊断</button>
+  </div>
+  <div id="mine-body" class="mine-body-pad"><div class="loading">加载中…</div></div>
 </div>
 
 <nav class="mobile-dock" id="mobile-dock" aria-label="主导航">
@@ -335,7 +370,7 @@ function setMode(m){
 }
 
 // ---- 分区视图：首页 / 剧场 / AI（排版逻辑对齐 APK） ----
-let view='home', subTab=0;
+let view='home', subTab=0, categoryTab='1', hgCat='';
 const PRIVATE_SUBS={adult:['ai-duanju','ai-manju'],ai:['ai-huanlian','ai-mogai']};
 const PRIVATE_SUB_NAMES={adult:['成人短剧','成人漫剧'],ai:['AI换脸','AI魔改']};
 const VIEW_META={
@@ -346,11 +381,12 @@ const VIEW_META={
 function setView(v){
   view=v;
   document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
-  subTab=0;
+  document.getElementById('dock-settings').classList.toggle('active',v==='mine');
+  subTab=0;categoryTab='1';hgCat='';
   loadView();
 }
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>setView(b.dataset.view));
-document.getElementById('dock-settings').onclick=()=>drawer.classList.contains('open')?closeDrawer():openDrawer();
+document.getElementById('dock-settings').onclick=()=>setView('mine');
 
 async function loadView(){
   const head=document.getElementById('view-head');
@@ -358,6 +394,16 @@ async function loadView(){
   const subtitle=document.getElementById('view-subtitle');
   const st=document.getElementById('sub-tabs');
   const hero=document.getElementById('hero-wrap');
+  const strip=document.getElementById('cat-strip');
+  const gridEl=document.getElementById('grid');
+  if(view==='mine'){
+    head.style.display='none';st.style.display='none';hero.style.display='none';strip.style.display='none';
+    gridEl.style.display='none';
+    renderMine();
+    return;
+  }
+  gridEl.style.display='grid';
+  strip.style.display='none';
   if(view==='home'){
     head.style.display='none';st.style.display='none';
     await loadHomeView();
@@ -383,22 +429,40 @@ async function loadView(){
 }
 
 async function loadHomeView(){
+  const strip=document.getElementById('cat-strip');
   grid.innerHTML='<div class="loading">加载中…</div>';
   const hero=document.getElementById('hero-wrap');
   hero.style.display='none';hero.innerHTML='';
   try{
     let items;
     if(mode==='public'){
-      const r=await fetch('/api/web/hongguo/home').then(x=>x.json());
-      items=r.items||[];
+      // 首页分类横滑条（与 APK 首页标签一致）：题材来自红果分类接口 selectorList
+      strip.style.display='flex';
+      const d=await fetch('/api/web/hongguo/category?tab=1').then(x=>x.json());
+      const tabs=[{tab:'1',name:'精选'},...(d.tabs||[])].filter(t=>t.tab&&t.name);
+      strip.innerHTML=tabs.map(t=>'<button type="button" data-tab="'+t.tab+'" class="'+(categoryTab===t.tab?'active':'')+'">'+escapeHtml(t.name)+'</button>').join('');
+      strip.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{categoryTab=b.dataset.tab;loadHomeView()});
+      if(categoryTab==='1'){
+        const r=await fetch('/api/web/hongguo/home').then(x=>x.json());
+        items=r.items||[];
+      }else{
+        const r=await fetch('/api/web/hongguo/category?tab='+categoryTab).then(x=>x.json());
+        items=r.items||[];
+      }
     }else{
-      const r=await fetch(hgProxy(HUANGGUO_BASE));
+      // 私密源首页：推荐 + 剧场合集分类（与 APK 剧场/AI 分类一致）
+      const cats=[['','推荐'],['ai-duanju/','成人短剧'],['ai-manju/','成人漫剧'],['ai-huanlian/','AI换脸'],['ai-mogai/','AI魔改']];
+      strip.style.display='flex';
+      strip.innerHTML=cats.map(c=>'<button type="button" data-cat="'+c[0]+'" class="'+(hgCat===c[0]?'active':'')+'">'+c[1]+'</button>').join('');
+      strip.querySelectorAll('[data-cat]').forEach(b=>b.onclick=()=>{hgCat=b.dataset.cat;loadHomeView()});
+      const u=hgCat?HUANGGUO_BASE+hgCat:HUANGGUO_BASE;
+      const r=await fetch(hgProxy(u));
       if(!r.ok)throw new Error('黄果源 '+r.status+'：请在管理抽屉配置可用的 backendProxy 后端代理');
       items=parseHuangguoHtml(await r.text());
     }
     if(!items.length){grid.innerHTML='<div class="loading">暂无内容</div>';return}
     renderGrid(items);
-    renderHero(items[0]);
+    if(mode==='public'&&categoryTab==='1')renderHero(items[0]);
   }catch(e){grid.innerHTML='<div class="loading">加载失败: '+e.message+'</div>'}
 }
 function renderHero(item){
@@ -935,8 +999,8 @@ document.getElementById('btn-downloads').onclick=()=>{
   const isOpen=ov.classList.contains('open');
   if(isOpen){closeDlmgr();return}
   ov.classList.add('open');
-  loadDlmgr();
-  _dlmgrTimer=setInterval(loadDlmgr,10000);
+  loadDlmgr(document.getElementById('dlmgr-list'));
+  _dlmgrTimer=setInterval(()=>loadDlmgr(document.getElementById('dlmgr-list')),10000);
 };
 function closeDlmgr(){
   document.getElementById('dlmgr-overlay').classList.remove('open');
@@ -945,8 +1009,24 @@ function closeDlmgr(){
 document.getElementById('btn-close-dlmgr').onclick=closeDlmgr;
 document.getElementById('dlmgr-overlay').addEventListener('click',e=>{if(e.target.id==='dlmgr-overlay')closeDlmgr()});
 
-async function loadDlmgr(){
-  const list=document.getElementById('dlmgr-list');
+// ---- 「我的」页（APK 对齐：头像+组别徽章，NAS下载/私密诊断两个入口） ----
+function renderMine(){
+  const body=document.getElementById('mine-body');
+  body.innerHTML='<div class="loading">加载中…</div>';
+  loadDlmgr(body);
+}
+document.getElementById('mine-tab-dl').onclick=()=>{
+  document.getElementById('mine-tab-dl').classList.add('active');
+  document.getElementById('mine-tab-diag').classList.remove('active');
+  renderMine();
+};
+document.getElementById('mine-tab-diag').onclick=()=>{
+  if(!document.getElementById('drawer').classList.contains('open'))openDrawer();
+  const b=document.getElementById('btn-admin-diagnose');
+  if(b)b.click();
+};
+
+async function loadDlmgr(list){
   try{
     const r=await fetch('/api/download/tasks',{headers:AUTH()});
     if(!r.ok)throw new Error('HTTP '+r.status);
@@ -989,7 +1069,7 @@ async function loadDlmgr(){
           const d=await r.json().catch(()=>({}));
           if(!r.ok)throw new Error(d.error||('HTTP '+r.status));
           toast(op==='del'?'任务已删除':(op==='merge'?'已开始合并':'已开始重试失败集'));
-          loadDlmgr();
+          loadDlmgr(list);
         }catch(e){toast((op==='del'?'删除失败':'操作失败')+': '+e.message);btn.disabled=false}
       };
     });
