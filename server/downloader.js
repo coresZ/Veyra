@@ -455,6 +455,11 @@ async function expandHuangguoM3u8(masterUrl, referer, depth) {
   if (isGarbledText(text)) {
     throw new Error('m3u8 内容异常（二进制/乱码）bytes=' + body.length);
   }
+  // 校验返回体确实是播放列表（含 #EXT 标签）：master 里若有音轨声明(#EXT-X-MEDIA)会被误判成子流，
+  // 从而把下一行分片(0.ts 等)当子流请求，拿到 ts 二进制当文本解析必然乱码。非列表内容直接抛错跳过。
+  if (!/#EXT/.test(text)) {
+    throw new Error('返回内容不是 m3u8 播放列表（疑似分片二进制）bytes=' + body.length);
+  }
   const lines = text.split(/\r?\n/);
   const keys = [];
   const segments = [];
@@ -465,8 +470,11 @@ async function expandHuangguoM3u8(masterUrl, referer, depth) {
     if (line.startsWith('#EXT-X-KEY')) {
       const m = line.match(/URI="([^"]+)"/);
       if (m) keys.push(resolveHuangguoUri(m[1], masterUrl));
-    } else if (line.startsWith('#EXT-X-STREAM-INF') || line.startsWith('#EXT-X-MEDIA')) {
+    } else if (line.startsWith('#EXT-X-STREAM-INF')) {
       expectSub = true;
+    } else if (line.startsWith('#EXT-X-MEDIA')) {
+      // 音轨/字幕声明：自身带 URI 属性，不是子流，跳过（不触发 expectSub）
+      expectSub = false;
     } else if (line && !line.startsWith('#')) {
       // 跳过垃圾行（含替换符/控制字符/非法 URL 前缀）
       if (/[\uFFFD\u0000-\u001F]/.test(line)) continue;
@@ -476,7 +484,8 @@ async function expandHuangguoM3u8(masterUrl, referer, depth) {
       segments.push(uri);
     }
   }
-  // variant playlist：依次尝试子流，某条 CDN 风控/乱码则换下一条，全部失败才报错
+  // variant playlist：依次尝试子流，某条 CDN 风控/乱码则换下一条；
+  // 全部失败但 master 自身有分片（media playlist）则回退用 master 自身分片
   if (subStreams.length) {
     let lastErr = null;
     for (const sub of subStreams) {
@@ -487,6 +496,10 @@ async function expandHuangguoM3u8(masterUrl, referer, depth) {
         lastErr = e;
         console.log(`[huangguo] 子流展开失败 ${String(sub).slice(0, 90)}: ${e.message}`);
       }
+    }
+    if (segments.length) {
+      console.log(`[huangguo] 子流全部失败，回退 master 自身分片 ${segments.length} 个`);
+      return { segments, keys };
     }
     throw lastErr || new Error('所有子流展开失败');
   }
