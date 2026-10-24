@@ -273,7 +273,11 @@ function loadChannelUi(){
 document.querySelectorAll('#drawer [data-ch]').forEach(l=>l.onclick=()=>{
   privateChannel=l.dataset.ch;localStorage.setItem(channelKey,privateChannel);loadChannelUi();toast('私密通道：'+(privateChannel==='relay'?'后端转发':'直连'));
 });
-function proxyUrl(u){return privateChannel==='relay'?('/api/huangguo-proxy?url='+encodeURIComponent(u)):u}
+function proxyUrl(u){
+  if(privateChannel==='relay')return '/api/huangguo-proxy?url='+encodeURIComponent(u);
+  // 直连模式：https 页面加载 http 资源会被浏览器拦（混合内容），统一升 https 尝试
+  return u.replace(/^http:\/\//i,'https://');
+}
 
 async function loadHome(){
   grid.innerHTML='<div class="loading">加载中…</div>';

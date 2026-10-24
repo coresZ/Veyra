@@ -604,8 +604,8 @@ function kindOf(type, body) {
   if (t.includes('mp2t') || t.includes('mp4') || t.includes('m4s') || t.includes('octet-stream')) return 'video';
   return 'other';
 }
-// 媒体资源（m3u8/ts/mp4/m4s/flv/key）放行任意公网域名（CDN 分片域名无法枚举），但拒绝内网地址防 SSRF
-const MEDIA_PATH_RE = /\.(m3u8|ts|mp4|m4s|flv|key)(\?|#|$)/i;
+// 媒体资源放行任意公网域名（CDN 域名无法枚举）：视频分片/图片/无扩展名 hls 路径；拒绝内网地址防 SSRF
+const MEDIA_PATH_RE = /\.(m3u8|ts|mp4|m4s|flv|key|jpg|jpeg|png|webp|gif|avif)(\?|#|$)|(?:hls|vod|live|media|segment|index)\//i;
 function isPrivateHost(hostname) {
   if (!hostname) return true;
   const h = hostname.toLowerCase();
@@ -624,12 +624,8 @@ app.get('/api/huangguo-proxy', (req, res) => {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
     return res.status(400).json({ error: '仅支持 http/https' });
   const isMedia = MEDIA_PATH_RE.test(parsed.pathname + parsed.search);
-  if (isMedia) {
-    if (isPrivateHost(parsed.hostname))
-      return res.status(403).json({ error: '媒体代理拒绝内网地址' });
-  } else if (!HUANGGUO_HOST_RE.test(parsed.hostname)) {
-    return res.status(403).json({ error: '仅允许黄果站点域名' });
-  }
+  if (isPrivateHost(parsed.hostname))
+    return res.status(403).json({ error: '代理拒绝内网地址（防 SSRF）' });
   const cached = cacheGet(target);
   if (cached) {
     console.log('[proxy]', new Date().toISOString(), 'HIT', cached.type, target.slice(0, 90));
@@ -688,6 +684,28 @@ app.get('/api/huangguo-proxy', (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Proxy-Cache', 'miss');
     res.end(body);
+  });
+});
+
+// 代理诊断：管理员可查看任意 URL 的代理判定与结果（排查封面/分片 403）
+app.get('/api/debug/proxy', requireAdmin, (req, res) => {
+  const target = String(req.query.url || '');
+  let parsed;
+  try { parsed = new URL(target); } catch { return res.json({ ok: false, error: '无效地址', target }); }
+  const isMedia = MEDIA_PATH_RE.test(parsed.pathname + parsed.search);
+  const verdict = isPrivateHost(parsed.hostname) ? '拒绝:内网地址' : '放行:公网资源';
+  proxyFetch.requestThroughProxy(target, backendProxy, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 13) Mobile', 'Referer': `${parsed.protocol}//${parsed.hostname}/` },
+    timeout: 20_000, maxBytes: 20 * 1024 * 1024, redirects: 5,
+  }, (err, result) => {
+    if (err) return res.json({ ok: false, verdict, error: String(err.message || err), target: target.slice(0, 200) });
+    return res.json({
+      ok: result.status >= 200 && result.status < 300,
+      verdict, status: result.status,
+      contentType: String(result.headers['content-type'] || ''),
+      bytes: result.body.length,
+      target: target.slice(0, 200),
+    });
   });
 });
 
