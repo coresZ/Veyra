@@ -785,6 +785,13 @@ app.get('/api/debug/proxy', requireAdmin, (req, res) => {
         bytes: result.body.length,
         target: u.slice(0, 200),
         attempted,
+        cors: (() => {
+          const h = result.headers || {};
+          const acao = h['access-control-allow-origin'];
+          const acah = h['access-control-allow-headers'];
+          const acam = h['access-control-allow-methods'];
+          return { 'access-control-allow-origin': acao || null, 'access-control-allow-headers': acah || null, 'access-control-allow-methods': acam || null };
+        })(),
       });
     });
   };

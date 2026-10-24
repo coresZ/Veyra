@@ -75,14 +75,15 @@ function requestThroughProxy(targetUrl, proxyUrl, opts, done) {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return done(new Error('仅支持 http/https'));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'veyra-curl-'));
   const bodyFile = path.join(dir, 'body');
+  const headerFile = path.join(dir, 'headers');
   const args = ['-sS', '-L', '--max-redirs', String(redirects),
     '--max-time', String(Math.max(1, Math.round(timeout / 1000)))];
   if (proxyUrl) args.push('-x', proxyUrl);
   for (const [k, v] of Object.entries(headers)) {
     if (v !== undefined && v !== null) args.push('-H', `${k}: ${v}`);
   }
-  // -w 输出跟随重定向后的最终状态码与 content-type；body 落临时文件，避免内存/管道限制
-  args.push('-o', bodyFile, '-w', '%{http_code}\n%{content_type}', targetUrl);
+  // -w 输出跟随重定向后的最终状态码与 content-type；body/响应头落临时文件，避免内存/管道限制
+  args.push('-o', bodyFile, '-D', headerFile, '-w', '%{http_code}\n%{content_type}', targetUrl);
   execFile('curl', args, { maxBuffer: 16 * 1024 * 1024, timeout: timeout + 5000 }, (err, stdout, stderr) => {
     const cleanup = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 忽略 */ } };
     if (err) {
@@ -96,8 +97,19 @@ function requestThroughProxy(targetUrl, proxyUrl, opts, done) {
     let body;
     try { body = fs.readFileSync(bodyFile); } catch (e) { cleanup(); return done(e); }
     if (body.length > maxBytes) { cleanup(); return done(new Error('响应超过大小限制 ' + maxBytes)); }
+    // 解析 curl -D dump 的响应头（重定向链只保留最终响应的头）
+    const respHeaders = {};
+    try {
+      const raw = fs.readFileSync(headerFile, 'utf8');
+      const blocks = raw.split(/\r?\n\r?\n/);
+      const last = blocks.filter(b => b.trim()).pop() || '';
+      for (const line of last.split(/\r?\n/)) {
+        const idx = line.indexOf(':');
+        if (idx > 0) respHeaders[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim();
+      }
+    } catch { /* 无响应头时忽略 */ }
     cleanup();
-    done(null, { status: code, headers: { 'content-type': contentType }, body });
+    done(null, { status: code, headers: Object.assign({ 'content-type': contentType }, respHeaders), body });
   });
 }
 

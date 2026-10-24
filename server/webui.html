@@ -951,6 +951,7 @@ document.getElementById('btn-admin-diagnose').onclick=async()=>{
     lines.push('  判定: '+(d.verdict||'?')+' → '+(d.ok?'OK':'失败'));
     if(d.status)lines.push('  上游HTTP: '+d.status+' 类型: '+(d.contentType||'').slice(0,40)+' 大小: '+d.bytes+'B');
     if(d.error)lines.push('  错误: '+d.error);
+    if(d.cors&&(d.cors['access-control-allow-origin']||d.cors['access-control-allow-headers']))lines.push('  CORS: allow-origin='+(d.cors['access-control-allow-origin']||'-')+' allow-headers='+(d.cors['access-control-allow-headers']||'-'));
     lines.push('');
   }).catch(e=>lines.push('['+label+'] 诊断失败: '+e.message+'\n'));
   // 1) 首页代理
