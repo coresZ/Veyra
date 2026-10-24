@@ -678,82 +678,98 @@ final class DownloadManager {
         } finally { conn.disconnect(); }
     }
 
-    /** 黄果 m3u8 下载：展开 → 拉 KEY/分片（并发）→ 本地 playlist → ffmpeg remux mp4 → 清理。 */
+    /** 黄果 m3u8 下载：展开 → 拉 KEY/分片（并发）→ 本地 playlist → ffmpeg remux mp4 → 清理。
+     *  临时文件放每集独立子目录（多集并发时不互相覆盖），产物最终落到 out。 */
     private void downloadM3u8(Task task, String url, File out, AtomicLong dlBytes, AtomicLong totalBytes, int n) throws Exception {
-        File dir = out.getParentFile();
-        List<String> segUris = new ArrayList<>();
-        List<String> segKeys = new ArrayList<>();
-        expandM3u8(url, segUris, segKeys, 0);
-        if (segUris.isEmpty()) throw new java.io.IOException("m3u8 无分片");
-        // 去重 KEY → 本地 key 文件
-        LinkedHashMap<String, String> keyFiles = new LinkedHashMap<>();
-        {
-            int keyIdx = 0;
-            for (String ku : segKeys) {
-                if (ku == null || keyFiles.containsKey(ku)) continue;
-                downloadToFile(ku, new File(dir, "key-" + keyIdx + ".key"), dlBytes, totalBytes);
-                keyFiles.put(ku, "key-" + keyIdx + ".key");
-                keyIdx++;
-            }
-        }
-        // 并发下载分片
-        final int segN = segUris.size();
-        final String[] segFiles = new String[segN];
-        final AtomicInteger nextSeg = new AtomicInteger();
-        ExecutorService pool = Executors.newFixedThreadPool(Math.min(6, Math.max(1, segN)));
-        List<Future<?>> futs = new ArrayList<>();
-        for (int i = 0; i < Math.min(6, segN); i++) {
-            futs.add(pool.submit(() -> {
-                try {
-                    while (!task.canceled) {
-                        int idx = nextSeg.getAndIncrement();
-                        if (idx >= segN) break;
-                        String name = String.format(Locale.US, "seg-%04d.ts", idx);
-                        downloadToFile(segUris.get(idx), new File(dir, name), dlBytes, totalBytes);
-                        segFiles[idx] = name;
-                    }
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
-            }));
-        }
+        File work = new File(out.getParentFile(), "m3u8-w" + n);
+        work.mkdirs();
         try {
-            Exception firstErr = null;
-            for (Future<?> f : futs) {
-                try { f.get(); } catch (Exception e) { if (firstErr == null) firstErr = e.getCause() instanceof Exception ? (Exception) e.getCause() : e; }
-            }
-            if (firstErr != null) throw firstErr;
-        } finally {
-            pool.shutdownNow();
-        }
-        if (task.canceled) return;
-        for (int i = 0; i < segN; i++) {
-            if (segFiles[i] == null) throw new java.io.IOException("分片下载不完整（第 " + (i + 1) + "/" + segN + " 片缺失）");
-        }
-        // 本地 playlist（相对路径；每段按需写 KEY 行，ffmpeg 原生 AES-128 解密）
-        File playlist = new File(dir, "play-" + n + ".m3u8");
-        {
-            StringBuilder sb = new StringBuilder("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:0\n");
-            String lastKeyName = null;
-            for (int i = 0; i < segN; i++) {
-                String ku = segKeys.get(i);
-                String kn = ku != null ? keyFiles.get(ku) : null;
-                if (kn != null && !kn.equals(lastKeyName)) {
-                    sb.append("#EXT-X-KEY:METHOD=AES-128,URI=\"").append(kn).append("\"\n");
-                    lastKeyName = kn;
+            List<String> segUris = new ArrayList<>();
+            List<String> segKeys = new ArrayList<>();
+            expandM3u8(url, segUris, segKeys, 0);
+            if (segUris.isEmpty()) throw new java.io.IOException("m3u8 无分片");
+            // 去重 KEY → 本地 key 文件
+            LinkedHashMap<String, String> keyFiles = new LinkedHashMap<>();
+            {
+                int keyIdx = 0;
+                for (String ku : segKeys) {
+                    if (ku == null || keyFiles.containsKey(ku)) continue;
+                    downloadToFile(ku, new File(work, "key-" + keyIdx + ".key"), dlBytes, totalBytes);
+                    keyFiles.put(ku, "key-" + keyIdx + ".key");
+                    keyIdx++;
                 }
-                sb.append("#EXTINF:4.0,\n").append(segFiles[i]).append('\n');
             }
-            sb.append("#EXT-X-ENDLIST\n");
-            java.nio.file.Files.write(playlist.toPath(), sb.toString().getBytes(StandardCharsets.UTF_8));
+            // 并发下载分片
+            final int segN = segUris.size();
+            final String[] segFiles = new String[segN];
+            final AtomicInteger nextSeg = new AtomicInteger();
+            ExecutorService pool = Executors.newFixedThreadPool(Math.min(6, Math.max(1, segN)));
+            List<Future<?>> futs = new ArrayList<>();
+            for (int i = 0; i < Math.min(6, segN); i++) {
+                futs.add(pool.submit(() -> {
+                    try {
+                        while (!task.canceled) {
+                            int idx = nextSeg.getAndIncrement();
+                            if (idx >= segN) break;
+                            String name = String.format(Locale.US, "seg-%04d.ts", idx);
+                            downloadToFile(segUris.get(idx), new File(work, name), dlBytes, totalBytes);
+                            segFiles[idx] = name;
+                        }
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                }));
+            }
+            try {
+                Exception firstErr = null;
+                for (Future<?> f : futs) {
+                    try { f.get(); } catch (Exception e) { if (firstErr == null) firstErr = e.getCause() instanceof Exception ? (Exception) e.getCause() : e; }
+                }
+                if (firstErr != null) throw firstErr;
+            } finally {
+                pool.shutdownNow();
+            }
+            if (task.canceled) return;
+            for (int i = 0; i < segN; i++) {
+                if (segFiles[i] == null) throw new java.io.IOException("分片下载不完整（第 " + (i + 1) + "/" + segN + " 片缺失）");
+            }
+            // 本地 playlist（相对路径；每段按需写 KEY 行，ffmpeg 原生 AES-128 解密）
+            File playlist = new File(work, "play.m3u8");
+            {
+                StringBuilder sb = new StringBuilder("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:0\n");
+                String lastKeyName = null;
+                for (int i = 0; i < segN; i++) {
+                    String ku = segKeys.get(i);
+                    String kn = ku != null ? keyFiles.get(ku) : null;
+                    if (kn != null && !kn.equals(lastKeyName)) {
+                        sb.append("#EXT-X-KEY:METHOD=AES-128,URI=\"").append(kn).append("\"\n");
+                        lastKeyName = kn;
+                    }
+                    sb.append("#EXTINF:4.0,\n").append(segFiles[i]).append('\n');
+                }
+                sb.append("#EXT-X-ENDLIST\n");
+                java.nio.file.Files.write(playlist.toPath(), sb.toString().getBytes(StandardCharsets.UTF_8));
+            }
+            StringBuilder dbg = new StringBuilder();
+            File tmpOut = new File(work, "ep.mp4");
+            FFmpegConcat.m3u8ToMp4(playlist, tmpOut, dbg, new File(context.getFilesDir(), "native.log"));
+            // 产物移到正式分集路径；移动失败则复制（跨目录 rename 一般可成）
+            if (!tmpOut.renameTo(out)) {
+                java.nio.file.Files.copy(tmpOut.toPath(), out.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                tmpOut.delete();
+            }
+            if (!out.exists() || out.length() < 1024) throw new java.io.IOException("m3u8 转 mp4 产物无效");
+        } finally {
+            // 清理本集临时目录（含分片/KEY/playlist/半成品）
+            deleteRecursively(work);
         }
-        StringBuilder dbg = new StringBuilder();
-        FFmpegConcat.m3u8ToMp4(playlist, out, dbg, new File(context.getFilesDir(), "native.log"));
-        // 清理分片/KEY/playlist（保留产物 mp4）
-        for (String sf : segFiles) { if (sf != null) new File(dir, sf).delete(); }
-        for (String kn : keyFiles.values()) { new File(dir, kn).delete(); }
-        playlist.delete();
-        if (!out.exists() || out.length() < 1024) throw new java.io.IOException("m3u8 转 mp4 产物无效");
+    }
+
+    private static void deleteRecursively(File f) {
+        if (f == null || !f.exists()) return;
+        File[] children = f.listFiles();
+        if (children != null) for (File c : children) deleteRecursively(c);
+        f.delete();
     }
 
     // ---- MediaExtractor + MediaMuxer 合并 ----
