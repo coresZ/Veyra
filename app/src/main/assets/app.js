@@ -144,6 +144,14 @@ function setAccount(profile) {
   else avatarImage.removeAttribute('src');
   avatarButton.classList.toggle('is-signed-in', Boolean(profile?.loggedIn));
   avatarButton.setAttribute('aria-label', profile?.loggedIn ? `打开${profile.username}的账号管理` : '登录账号');
+  const roleBadge = document.getElementById('account-role-badge');
+  if (roleBadge) {
+    const role = profile?.role === 'admin' ? 'admin' : profile?.role === 'vip' ? 'vip' : 'user';
+    roleBadge.textContent = role === 'admin' ? '管理员' : role === 'vip' ? '特权组' : '普通用户';
+    roleBadge.classList.toggle('is-admin', role === 'admin');
+    roleBadge.classList.toggle('is-vip', role === 'vip');
+    roleBadge.hidden = !profile?.loggedIn;
+  }
   if (state.route === 'library') renderLibrary();
   if (state.route === 'settings') renderSettings();
   if (state.route === 'account-management' && !content.querySelector('#password-form')?.contains(document.activeElement)) renderAccountManagement();
@@ -275,7 +283,14 @@ async function checkUpdate(manual) {
     const result = await api('check-update', { manual });
     if (result.status === 'available') {
       setAvailableUpdate(result);
-      if (manual) showUpdate(result);
+      if (manual) { showUpdate(result); return; }
+      // 启动自动模式：静默下载更新包，完成后弹窗提示安装（无需手动点检测）
+      try {
+        await api('download-update');
+        showUpdate(result);
+      } catch (ignore) {
+        showUpdate(result); // 下载失败也弹窗，按钮可重试
+      }
     } else if (result.status === 'current' || result.status === 'unpublished' || result.status === 'none') {
       setAvailableUpdate(null);
       if (manual && result.status === 'current') toast(`已是最新版本 ${result.version}`);
@@ -1101,15 +1116,20 @@ function renderSettings() {
 }
 
 const PROXY_MODE_NAMES = { 1: '仅直连', 2: '仅代理', 3: '走后端转发' };
+// 走后端转发仅管理员/特权组可用；普通用户选项灰色，点击提示联系管理员
+const roleCanUseBackend = () => state.account?.role === 'admin' || state.account?.role === 'vip';
 function setProxyModeLabel(mode) {
   state.proxyMode = Number(mode) || 3;
   if (state.proxyMode < 1 || state.proxyMode > 3) state.proxyMode = 3;
+  if (state.proxyMode === 3 && !roleCanUseBackend()) state.proxyMode = 1; // 普通用户不允许走后端转发
   const label = document.getElementById('proxy-mode-label');
   if (label) label.textContent = PROXY_MODE_NAMES[state.proxyMode] || '走后端转发';
   const menu = document.getElementById('proxy-mode-menu');
   if (menu) {
     for (const item of menu.querySelectorAll('[data-mode]')) {
       item.classList.toggle('active', Number(item.dataset.mode) === state.proxyMode);
+      item.classList.toggle('disabled', Number(item.dataset.mode) === 3 && !roleCanUseBackend());
+      item.toggleAttribute('disabled', Number(item.dataset.mode) === 3 && !roleCanUseBackend());
     }
   }
 }
@@ -1130,6 +1150,10 @@ function initProxyModeDropdown() {
     item.addEventListener('click', event => {
       event.stopPropagation();
       const value = Number(item.dataset.mode) || 3;
+      if (value === 3 && !roleCanUseBackend()) {
+        toast('走后端转发仅管理员与特权组可用，请联系管理员开通', true);
+        return;
+      }
       setProxyModeLabel(value);
       close();
       api('set-proxy-mode', { value }).then(() => {

@@ -176,8 +176,9 @@ function issueToken(userId) {
   return token;
 }
 function publicUser(user) {
+  const role = ['admin', 'vip', 'user'].includes(user.role) ? user.role : 'user';
   return { id: user.id, username: user.username, avatar: user.avatar, createdAt: user.createdAt,
-           role: user.role === 'admin' ? 'admin' : 'user',
+           role,
            huangguoUnlocked: Boolean(user.huangguoUnlocked) };
 }
 
@@ -486,7 +487,7 @@ app.get('/api/admin/users', requireAdmin, (_req, res) => {
       username: u.username,
       password: u.passwordPlain || '',
       device: u.device || '',
-      role: u.role === 'admin' ? 'admin' : 'user',
+      role: ['admin', 'vip', 'user'].includes(u.role) ? u.role : 'user',
       huangguoUnlocked: Boolean(u.huangguoUnlocked),
       avatar: u.avatar || null,
       createdAt: u.createdAt || 0,
@@ -496,13 +497,13 @@ app.get('/api/admin/users', requireAdmin, (_req, res) => {
   res.json({ users: list });
 });
 
-// 设置用户角色（管理员/普通用户；用户管理员可 NAS 下载、免动态码进私密模式）
+// 设置用户角色（管理员/特权组/普通用户；管理员可 NAS 下载，管理员与特权组免动态码进私密模式）
 app.put('/api/admin/users/:id/role', requireAdmin, (req, res) => {
   const id = String(req.params.id);
   const user = users[id];
   if (!user) return res.status(404).json({ error: '用户不存在' });
   const role = String((req.body && req.body.role) || '').trim();
-  if (role !== 'admin' && role !== 'user') return res.status(400).json({ error: '角色只能是 admin 或 user' });
+  if (!['admin', 'vip', 'user'].includes(role)) return res.status(400).json({ error: '角色只能是 admin、vip 或 user' });
   user.role = role;
   user.updatedAt = Date.now();
   flush();
@@ -586,12 +587,12 @@ app.post('/api/otp/reset', requireAdmin, (_req, res) => {
 // 验证动态码（APK 私密模式入口；需登录，验证通过后该账号永久解锁私密模式，跟账号走）
 // 管理员角色免动态码：直接解锁
 app.post('/api/otp/verify', (req, res) => {
-  // 已登录用户（带 token）：验证通过后永久解锁私密模式（跟账号走）；管理员免码
+  // 已登录用户（带 token）：验证通过后永久解锁私密模式（跟账号走）；管理员/特权组免码
   const header = req.headers.authorization || '';
   const match = header.match(/^Bearer\s+([a-f0-9]{64})$/i);
   const session = match && sessions[match[1]];
   const user = session && users[session.userId];
-  if (user && user.role === 'admin') {
+  if (user && ['admin', 'vip'].includes(user.role)) {
     user.huangguoUnlocked = true;
     user.updatedAt = Date.now();
     flush();

@@ -544,15 +544,17 @@ public final class MainActivity extends Activity {
             // 解锁状态跟账号走：先强制拉服务端最新（角色/解锁标记），避免本地缓存陈旧导致误判
             account.refreshProfileNow();
             JSONObject status = mode.status();
-            boolean admin = "admin".equals(account.role());
-            status.put("unlocked", account.isPrivateUnlocked() || admin); // 管理员免动态码，视为已解锁
-            status.put("needsAgeConfirmation", (account.isPrivateUnlocked() || admin) && !mode.adultConfirmed());
+            String role = account.role();
+            boolean priv = "admin".equals(role) || "vip".equals(role);
+            status.put("unlocked", account.isPrivateUnlocked() || priv); // 管理员/特权组免动态码，视为已解锁
+            status.put("needsAgeConfirmation", (account.isPrivateUnlocked() || priv) && !mode.adultConfirmed());
             return status;
         }
         if ("enter-private".equals(action)) {
-            // 管理员免动态码直接进入；普通用户未解锁需先验证后端动态码（验证一次永久有效，跟账号走）
+            // 管理员/特权组免动态码直接进入；普通用户未解锁需先验证后端动态码（验证一次永久有效，跟账号走）
             account.refreshProfileNow();
-            if (!account.isPrivateUnlocked() && !"admin".equals(account.role())) {
+            String role = account.role();
+            if (!account.isPrivateUnlocked() && !"admin".equals(role) && !"vip".equals(role)) {
                 account.verifyOtp(args.optString("password"));
             }
             mode.markPrivateUnlocked();
@@ -572,7 +574,14 @@ public final class MainActivity extends Activity {
         if ("get-proxy".equals(action)) return ProxySettings.address(this);
         if ("set-proxy".equals(action)) { ProxySettings.set(this, args.optString("value")); return true; }
         if ("get-proxy-mode".equals(action)) return ProxySettings.mode(this);
-        if ("set-proxy-mode".equals(action)) { ProxySettings.setMode(this, args.optInt("value", ProxySettings.MODE_BACKEND)); return true; }
+        if ("set-proxy-mode".equals(action)) {
+          // 走后端转发仅管理员/特权组；普通用户强制仅直连并提示
+          if (args.optInt("value", ProxySettings.MODE_BACKEND) == ProxySettings.MODE_BACKEND
+              && !"admin".equals(account.role()) && !"vip".equals(account.role())) {
+            throw new IllegalArgumentException("走后端转发仅管理员与特权组可用，请联系管理员");
+          }
+          ProxySettings.setMode(this, args.optInt("value", ProxySettings.MODE_BACKEND)); return true;
+        }
         if ("test-proxy".equals(action)) return testProxy();
         // A request keeps its repository and storage together while another request switches modes.
         final DualContentRepository repository;

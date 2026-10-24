@@ -18,6 +18,7 @@ const http = require('http');
 const https = require('https');
 const { spawnSync, spawn } = require('child_process');
 const hgApp = require('./hongguo-app');
+const proxyFetch = require('./proxy-fetch');
 
 // 数据/下载目录：环境变量指定，默认 /data、/video（docker-compose 挂载）。
 // 裸跑/本地运行时根目录不可写 → 自动回退到可写目录，避免服务因 EACCES 直接崩溃。
@@ -355,12 +356,160 @@ function startTask(task) {
   });
 }
 
+// ================= 黄果（私密）源 NAS 下载 =================
+// 链路：每集页面（/video/<id>/ 或 /video/<id>/ep-<n>/）#videoInitialData JSON.videoSrc
+//   → m3u8(master) 递归展开（解包 video.225600.xyz 代理层/相对路径补全/子流）
+//   → 下载全部分片 + #EXT-X-KEY（AES-128）→ 写本地 playlist.m3u8 → ffmpeg -c copy 封装 mp4
+//   与 APK/WebUI 播放同源取流，天然兼容源站防盗链与加密。
+const HUANGGUO_SITES = ['https://www.pqhybuxo.cc', 'https://thu.pqhybuxo.cc', 'https://m.pqhybuxo.cc'];
+
+function readBackendProxy() {
+  try {
+    const s = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'settings.json'), 'utf8'));
+    return typeof s.backendProxy === 'string' ? s.backendProxy : '';
+  } catch { return ''; }
+}
+
+// 解包源站自带代理层：video.225600.xyz:1314/api/huangguo-proxy?url=<真实分片>
+function unwrapHgProxy(uri) {
+  try {
+    const u = new URL(uri);
+    if (u.hostname.includes('video.225600.xyz') && /\/api\/huangguo-proxy$/.test(u.pathname)) {
+      const inner = u.searchParams.get('url');
+      if (inner) return new URL(inner).toString();
+    }
+  } catch { /* 保留原样 */ }
+  return uri;
+}
+
+function hgRequest(url, referer, maxBytes) {
+  return new Promise((resolve, reject) => {
+    proxyFetch.requestThroughProxy(url, readBackendProxy(), {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36',
+        'Accept': '*/*',
+        ...(referer ? { Referer: referer } : {}),
+      },
+      timeout: 30_000, maxBytes: maxBytes || 40 * 1024 * 1024, redirects: 5,
+    }, (err, result) => {
+      if (err) return reject(err);
+      if (!result || result.status < 200 || result.status >= 300) return reject(new Error('HTTP ' + (result && result.status)));
+      resolve(result.body);
+    });
+  });
+}
+
+function resolveHuangguoUri(uri, base) {
+  try { return new URL(unwrapHgProxy(uri), base).toString(); }
+  catch { return uri; }
+}
+
+// 展开 m3u8：master 里若含子流（#EXT-X-STREAM-INF）则递归取第一条子流；返回 { segments:[url], keys:[url] }
+async function expandHuangguoM3u8(masterUrl, referer, depth) {
+  if (depth > 5) throw new Error('m3u8 层级过深');
+  const body = await hgRequest(masterUrl, referer, 2 * 1024 * 1024);
+  const lines = body.toString('utf8').split(/\r?\n/);
+  const keys = [];
+  const segments = [];
+  let expectSub = false;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line.startsWith('#EXT-X-KEY')) {
+      const m = line.match(/URI="([^"]+)"/);
+      if (m) keys.push(resolveHuangguoUri(m[1], masterUrl));
+    } else if (line.startsWith('#EXT-X-STREAM-INF') || line.startsWith('#EXT-X-MEDIA')) {
+      expectSub = true;
+    } else if (line && !line.startsWith('#')) {
+      const uri = resolveHuangguoUri(line, masterUrl);
+      if (expectSub) return expandHuangguoM3u8(uri, referer, depth + 1);
+      segments.push(uri);
+    }
+  }
+  return { segments, keys };
+}
+
+// 下载一整集：返回 { bytes }；产出 plainFile（明文 MP4）。失败抛错（分片/KEY/合并产物清理由调用方兜底）
+async function huangguoDownloadEpisode(seriesId, number, dir, plainFile) {
+  const first = number === 1;
+  const errors = [];
+  let masterUrl = null;
+  for (const site of HUANGGUO_SITES) {
+    try {
+      const pageUrl = first ? `${site}/video/${seriesId}/` : `${site}/video/${seriesId}/ep-${number}/`;
+      const page = await hgRequest(pageUrl, `${site}/video/${seriesId}/`, 3 * 1024 * 1024);
+      const html = page.toString('utf8');
+      const jsonText = (html.match(/<script[^>]*id="videoInitialData"[^>]*>([\s\S]*?)<\/script>/) || [])[1]
+        || (html.match(/videoInitialData["']?\s*[:=]\s*(\{[\s\S]*?\})\s*;/) || [])[1];
+      if (!jsonText) throw new Error('页面无 videoInitialData');
+      const data = JSON.parse(jsonText.replace(/^[\s\S]*?(?=\{)/, ''));
+      const src = data.videoSrc || (Array.isArray(data.videoSrcList) ? data.videoSrcList[0] : '');
+      if (!src) throw new Error('videoSrc 为空');
+      masterUrl = resolveHuangguoUri(src, `${site}/video/${seriesId}/`);
+      break;
+    } catch (e) {
+      errors.push(site.replace(/^https:\/\//, '') + ':' + e.message);
+    }
+  }
+  if (!masterUrl) throw new Error('解析播放地址失败（' + errors.join(' | ') + '）');
+  const referer = first ? `https://www.pqhybuxo.cc/video/${seriesId}/` : `https://www.pqhybuxo.cc/video/${seriesId}/ep-${number}/`;
+  const plan = await expandHuangguoM3u8(masterUrl, referer, 0);
+  if (!plan.segments.length) throw new Error('m3u8 无分片');
+
+  const keyFiles = [];
+  for (let i = 0; i < plan.keys.length; i++) {
+    const k = await hgRequest(plan.keys[i], referer, 1024 * 1024);
+    const f = safeJoin(dir, `key-${number}-${i}.key`);
+    fs.writeFileSync(f, k);
+    keyFiles.push(f);
+  }
+
+  // 并发下载全部分片（源站分片通常数百 KB～数 MB）
+  const segFiles = new Array(plan.segments.length);
+  let nextSeg = 0;
+  await Promise.all(Array.from({ length: Math.min(6, plan.segments.length) }, async () => {
+    while (nextSeg < plan.segments.length) {
+      const i = nextSeg++;
+      const buf = await hgRequest(plan.segments[i], referer, 60 * 1024 * 1024);
+      const f = safeJoin(dir, `seg-${number}-${String(i).padStart(4, '0')}.ts`);
+      fs.writeFileSync(f, buf);
+      segFiles[i] = f;
+    }
+  }));
+  for (let i = 0; i < segFiles.length; i++) {
+    if (!segFiles[i]) { const e = new Error('分片下载不完整（第 ' + (i + 1) + '/' + segFiles.length + ' 片缺失）'); cleanupHg(segFiles, keyFiles); throw e; }
+  }
+
+  // 写本地 playlist（分片/KEY 用本地相对路径），ffmpeg 原生支持 AES-128 解密
+  const playlist = safeJoin(dir, `play-${number}.m3u8`);
+  const keyTag = keyFiles.length ? `#EXT-X-KEY:METHOD=AES-128,URI="${path.basename(keyFiles[0])}"\n` : '';
+  const content = '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:0\n'
+    + keyTag + segFiles.map(f => '#EXTINF:4.0,\n' + path.basename(f)).join('\n') + '\n#EXT-X-ENDLIST\n';
+  fs.writeFileSync(playlist, content);
+  try {
+    await runFFmpeg(['-allowed_extensions', 'ALL', '-i', playlist, '-c', 'copy', '-f', 'mp4', '-y', plainFile]);
+  } finally {
+    cleanupHg(segFiles, keyFiles);
+    try { fs.rmSync(playlist, { force: true }); } catch { }
+  }
+  if (!fs.existsSync(plainFile) || fs.statSync(plainFile).size < 1024) throw new Error('合并产物无效');
+}
+
+function cleanupHg(segFiles, keyFiles) {
+  for (const f of segFiles || []) { try { if (f) fs.rmSync(f, { force: true }); } catch { } }
+  for (const f of keyFiles || []) { try { if (f) fs.rmSync(f, { force: true }); } catch { } }
+}
+
 async function runTask(task) {
   const dir = taskDir(task);
   const workDir = safeJoin(dir, '.merge-work');
   fs.mkdirSync(workDir, { recursive: true });
   const outName = `${sanitizeName(task.title)}_全${task.episodes.length}集.mp4`;
   const outputPath = safeJoin(DOWNLOAD_DIR, outName);
+
+  // 黄果（私密）源：记录播放页 Referer 基准（分片/CDN 防盗链校验），并预取每集 m3u8
+  if (task.source === 'huangguo' && !task._hgPlayReferer) {
+    task._hgPlayReferer = `https://www.pqhybuxo.cc/video/${task.seriesId}/`;
+  }
 
   // 红果 App 取流升级（v0.13.45）：官方接口多清晰度选最高档（随机设备+签名，NAS 家宽出口）。
   // 解析链路（NAS 自主，手机端只推 seriesId/title/集数）：
@@ -461,7 +610,12 @@ async function runTask(task) {
                   throw new Error(`第 ${idx + 1} 集网页源解析失败: ${e.message}`);
                 }
               }
-              if (ep.key) {
+              if (task.source === 'huangguo') {
+                // 黄果（私密）源：每集页面解析 videoSrc(m3u8) → 分片下载 → ffmpeg 封装（一次完成）
+                task.progress.detail = `第 ${idx + 1} 集取流合并`;
+                touch(task);
+                await huangguoDownloadEpisode(task.seriesId, idx + 1, dir, plainFile);
+              } else if (ep.key) {
                 // 红果 CENC-AES-CTR：完整下载密文后由 ffmpeg -decryption_key 本地解密（与 juku-backend 一致，
                 // ffmpeg mov demuxer 原生支持 CENC，产物为标准明文 MP4；避免对不支持 Range 的服务器直连拉流）
                 const rawFile = safeJoin(dir, epEncName(idx + 1));

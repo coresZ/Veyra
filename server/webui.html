@@ -27,6 +27,45 @@ body{background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,"PingFang 
 .cat-btn{flex-shrink:0;background:#0d0f13;border:1px solid var(--line);color:var(--mut);border-radius:20px;padding:6px 16px;cursor:pointer;font-size:13px;white-space:nowrap;transition:.2s}
 .cat-btn:hover{border-color:var(--mut);color:var(--fg)}
 .cat-btn.active{background:var(--acc);color:#1a1e26;font-weight:700;border-color:var(--acc)}
+.pc-nav{display:flex;gap:2px;background:#0d0f13;border:1px solid var(--line);border-radius:10px;padding:3px}
+.pc-nav button{background:transparent;border:none;color:var(--mut);padding:7px 18px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600;transition:.2s}
+.pc-nav button:hover{color:var(--fg)}
+.pc-nav button.active{background:var(--acc);color:#1a1e26}
+.view-head{max-width:1200px;margin:0 auto;padding:22px 20px 0}
+.view-head h1{font-size:26px;font-weight:800;letter-spacing:.5px}
+.view-head p{color:var(--mut);font-size:13px;margin-top:4px}
+.sub-tabs{display:flex;gap:8px;overflow-x:auto;margin-top:14px;scrollbar-width:none}
+.sub-tabs::-webkit-scrollbar{display:none}
+.sub-tabs button{flex-shrink:0;background:#0d0f13;border:1px solid var(--line);color:var(--mut);border-radius:20px;padding:7px 18px;cursor:pointer;font-size:13px;font-weight:600;white-space:nowrap;transition:.2s}
+.sub-tabs button:hover{border-color:var(--mut);color:var(--fg)}
+.sub-tabs button.active{background:var(--acc);color:#1a1e26;font-weight:700;border-color:var(--acc)}
+.hero-wrap{max-width:1200px;margin:0 auto;padding:20px 20px 0}
+.hero-card{position:relative;border-radius:16px;overflow:hidden;cursor:pointer;aspect-ratio:16/7;background:var(--card)}
+.hero-card img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.hero-card::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,#0f1115cc 0%,transparent 55%)}
+.hero-copy{position:absolute;left:24px;bottom:20px;right:20px;z-index:2}
+.hero-copy h2{font-size:24px;font-weight:800;max-width:60%}
+.hero-copy span{display:block;margin-top:6px;color:var(--acc);font-size:14px;font-weight:700;letter-spacing:2px}
+.mobile-dock{display:none}
+@media (max-width:800px){
+  .header{padding:10px 14px;gap:10px}
+  .pc-nav{display:none}
+  .container{padding:14px;padding-bottom:84px}
+  .grid{grid-template-columns:repeat(3,1fr);gap:10px}
+  .poster-title{font-size:12px}
+  .view-head{padding:16px 14px 0}
+  .view-head h1{font-size:22px}
+  .hero-wrap{padding:14px 14px 0}
+  .hero-card{aspect-ratio:3/4;border-radius:12px}
+  .hero-copy{left:14px;bottom:12px}
+  .hero-copy h2{font-size:16px;max-width:100%}
+  .mobile-dock{position:fixed;left:0;right:0;bottom:0;z-index:150;display:flex;justify-content:space-around;background:rgba(15,17,21,.94);backdrop-filter:blur(20px);border-top:1px solid var(--line);padding:8px 0 calc(8px + env(safe-area-inset-bottom,0px))}
+  .mobile-dock button{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;background:transparent;border:none;color:var(--mut);font-size:11px;cursor:pointer;padding:4px 0}
+  .mobile-dock button.active{color:var(--acc)}
+  .mobile-dock .dock-icon{font-size:19px;line-height:1}
+  .drawer{width:100%;max-width:100vw;right:-100vw}
+  .drawer.open{right:0}
+}
 .container{max-width:1200px;margin:0 auto;padding:20px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:16px}
 .card-poster{cursor:pointer;transition:transform .2s}
@@ -101,6 +140,11 @@ video{width:100%;border-radius:10px;background:#000}
 <body>
 <div class="header">
   <div class="logo">Veyra</div>
+  <nav class="pc-nav" id="pc-nav" aria-label="主导航">
+    <button type="button" data-view="home" class="active">首页</button>
+    <button type="button" data-view="adult">剧场</button>
+    <button type="button" data-view="ai">AI</button>
+  </nav>
   <input class="search" id="search-input" placeholder="搜索短剧…">
   <div class="mode-toggle">
     <button id="mode-public" class="active">公开</button>
@@ -109,10 +153,22 @@ video{width:100%;border-radius:10px;background:#000}
   <button class="gear" id="btn-downloads" title="NAS 下载管理">⬇</button>
   <button class="gear" id="btn-settings">⚙</button>
 </div>
-<div class="cat-bar" id="cat-bar" style="display:none"></div>
+<div class="view-head" id="view-head" style="display:none">
+  <h1 id="view-title"></h1>
+  <p id="view-subtitle"></p>
+  <div class="sub-tabs" id="sub-tabs" style="display:none"></div>
+</div>
+<div class="hero-wrap" id="hero-wrap" style="display:none"></div>
 <div class="container">
   <div class="grid" id="grid"><div class="loading">加载中…</div></div>
 </div>
+
+<nav class="mobile-dock" id="mobile-dock" aria-label="主导航">
+  <button type="button" data-view="home" class="active"><span class="dock-icon">⌂</span><span>首页</span></button>
+  <button type="button" data-view="adult"><span class="dock-icon">▶</span><span>剧场</span></button>
+  <button type="button" data-view="ai"><span class="dock-icon">✦</span><span>AI</span></button>
+  <button type="button" id="dock-settings"><span class="dock-icon">☰</span><span>我的</span></button>
+</nav>
 
 <div class="modal-overlay" id="detail-overlay">
   <div class="modal">
@@ -230,7 +286,7 @@ async function gateLogin(){
     if(!r.ok){document.getElementById('gate-err').textContent=d.error||'密码错误';return}
     adminToken=d.token;localStorage.setItem('veyraAdmin',adminToken);
     document.getElementById('login-gate').style.display='none';
-    loadHome();
+    loadView();
   }catch(e){document.getElementById('gate-err').textContent='网络错误'}
 }
 document.getElementById('gate-btn').onclick=gateLogin;
@@ -240,7 +296,7 @@ document.getElementById('gate-pass').addEventListener('keydown',e=>{if(e.key==='
   if(!adminToken){document.getElementById('gate-pass').focus();return}
   try{
     const r=await fetch('/api/admin/session',{headers:AUTH()});
-    if(r.ok){document.getElementById('login-gate').style.display='none';loadHome();return}
+    if(r.ok){document.getElementById('login-gate').style.display='none';loadView();return}
   }catch(e){}
   adminToken='';localStorage.removeItem('veyraAdmin');
   document.getElementById('gate-pass').focus();
@@ -274,8 +330,100 @@ function setMode(m){
   mode=m;
   document.getElementById('mode-public').classList.toggle('active',m==='public');
   document.getElementById('mode-private').classList.toggle('active',m==='private');
-  document.getElementById('cat-bar').style.display=m==='public'?'flex':'none';
-  loadHome();
+  subTab=0;
+  loadView();
+}
+
+// ---- 分区视图：首页 / 剧场 / AI（排版逻辑对齐 APK） ----
+let view='home', subTab=0;
+const PRIVATE_SUBS={adult:['ai-duanju','ai-manju'],ai:['ai-huanlian','ai-mogai']};
+const PRIVATE_SUB_NAMES={adult:['成人短剧','成人漫剧'],ai:['AI换脸','AI魔改']};
+const VIEW_META={
+  home:['首页','精选推荐，热播不断'],
+  adult:['剧场','走进不同的故事'],
+  ai:['AI专区','探索影像新可能']
+};
+function setView(v){
+  view=v;
+  document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
+  subTab=0;
+  loadView();
+}
+document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>setView(b.dataset.view));
+document.getElementById('dock-settings').onclick=()=>drawer.classList.contains('open')?closeDrawer():openDrawer();
+
+async function loadView(){
+  const head=document.getElementById('view-head');
+  const title=document.getElementById('view-title');
+  const subtitle=document.getElementById('view-subtitle');
+  const st=document.getElementById('sub-tabs');
+  const hero=document.getElementById('hero-wrap');
+  if(view==='home'){
+    head.style.display='none';st.style.display='none';
+    await loadHomeView();
+    return;
+  }
+  head.style.display='block';
+  title.textContent=VIEW_META[view][0];
+  subtitle.textContent=VIEW_META[view][1];
+  if(mode==='private'){
+    st.style.display='flex';
+    st.innerHTML=PRIVATE_SUB_NAMES[view].map((n,i)=>
+      '<button type="button" class="'+(i===subTab?'active':'')+'" data-sub="'+i+'">'+n+'</button>').join('');
+    st.querySelectorAll('[data-sub]').forEach(b=>b.onclick=()=>{
+      subTab=Number(b.dataset.sub);
+      st.querySelectorAll('[data-sub]').forEach(x=>x.classList.toggle('active',Number(x.dataset.sub)===subTab));
+      loadCategoryView();
+    });
+  }else{
+    st.style.display='none';
+  }
+  hero.style.display='none';
+  await loadCategoryView();
+}
+
+async function loadHomeView(){
+  grid.innerHTML='<div class="loading">加载中…</div>';
+  const hero=document.getElementById('hero-wrap');
+  hero.style.display='none';hero.innerHTML='';
+  try{
+    let items;
+    if(mode==='public'){
+      const r=await fetch('/api/web/hongguo/home').then(x=>x.json());
+      items=r.items||[];
+    }else{
+      const r=await fetch(hgProxy(HUANGGUO_BASE));
+      if(!r.ok)throw new Error('黄果源 '+r.status+'：请在管理抽屉配置可用的 backendProxy 后端代理');
+      items=parseHuangguoHtml(await r.text());
+    }
+    if(!items.length){grid.innerHTML='<div class="loading">暂无内容</div>';return}
+    renderGrid(items);
+    renderHero(items[0]);
+  }catch(e){grid.innerHTML='<div class="loading">加载失败: '+e.message+'</div>'}
+}
+function renderHero(item){
+  const hero=document.getElementById('hero-wrap');
+  hero.style.display='block';
+  const src=item.cover?(mode==='public'?coverSrc(item.cover):proxyUrl(item.cover)):'';
+  hero.innerHTML='<div class="hero-card" data-hero="0"><img src="'+src+'" alt="" onerror="fallbackCover(this)"'+(src?'':' style="background:#1a1e26"')+'><div class="hero-copy"><h2>'+escapeHtml(item.title)+'</h2><span>立即播放 ▸</span></div></div>';
+  hero.querySelector('.hero-card').onclick=()=>openDetail(0);
+}
+
+async function loadCategoryView(){
+  grid.innerHTML='<div class="loading">加载中…</div>';
+  try{
+    if(mode==='public'){
+      const d=await fetch('/api/web/hongguo/category?tab=1').then(x=>x.json());
+      renderGrid(d.items||[]);
+    }else{
+      const id=PRIVATE_SUBS[view][subTab];
+      const r=await fetch(hgProxy(HUANGGUO_BASE+id+'/'));
+      if(!r.ok)throw new Error('黄果源 '+r.status+'：请在管理抽屉配置可用的 backendProxy 后端代理');
+      const items=parseHuangguoHtml(await r.text());
+      if(!items.length)grid.innerHTML='<div class="loading">该分类为空或页面结构变化</div>';
+      else renderGrid(items);
+    }
+  }catch(e){grid.innerHTML='<div class="loading">加载失败: '+e.message+'</div>'}
 }
 
 // ---- 私密播放通道（localStorage 持久化） ----
@@ -297,49 +445,6 @@ function proxyUrl(u){
 // 后端对上游的 Referer 自动取 https://<当前请求host>/，与 APK 播放器行为相同（APK 实测可播）。
 function hgProxy(u){
   return '/api/huangguo-proxy?url='+encodeURIComponent(u);
-}
-
-async function loadHome(){
-  grid.innerHTML='<div class="loading">加载中…</div>';
-  try{
-    if(mode==='public'){
-      const r=await fetch('/api/web/hongguo/home').then(x=>x.json());
-      renderGrid(r.items||[]);
-      loadCategories();
-    }else{
-      const r=await fetch(hgProxy(HUANGGUO_BASE));
-      if(!r.ok)throw new Error('黄果源 '+r.status+'：请在管理抽屉配置可用的 backendProxy 后端代理');
-      const html=await r.text();
-      const items=parseHuangguoHtml(html);
-      if(!items.length)grid.innerHTML='<div class="loading">私密源解析为空：可能页面结构变化或需配置后端代理</div>';
-      else renderGrid(items);
-    }
-  }catch(e){grid.innerHTML='<div class="loading">加载失败: '+e.message+'</div>'}
-}
-
-// ---- 分类条（公开模式） ----
-async function loadCategories(){
-  const bar=document.getElementById('cat-bar');
-  try{
-    const d=await fetch('/api/web/hongguo/category?tab=1').then(x=>x.json());
-    const tabs=d.tabs||[];
-    if(!tabs.length){bar.style.display='none';return}
-    bar.innerHTML=[{tab:'1',name:'推荐'}].concat(tabs).map((t,i)=>
-      '<button class="cat-btn'+(i===0?' active':'')+'" data-tab="'+t.tab+'">'+escapeHtml(t.name||('分类'+t.tab))+'</button>').join('');
-    bar.querySelectorAll('.cat-btn').forEach(b=>b.onclick=()=>{
-      bar.querySelectorAll('.cat-btn').forEach(x=>x.classList.remove('active'));
-      b.classList.add('active');
-      loadCategory(b.dataset.tab);
-    });
-    bar.style.display='flex';
-  }catch(e){bar.style.display='none'}
-}
-async function loadCategory(tab){
-  grid.innerHTML='<div class="loading">加载中…</div>';
-  try{
-    const d=await fetch('/api/web/hongguo/category?tab='+encodeURIComponent(tab)).then(x=>x.json());
-    renderGrid(d.items||[]);
-  }catch(e){grid.innerHTML='<div class="loading">加载失败: '+e.message+'</div>'}
 }
 
 function parseHuangguoHtml(html){
@@ -470,7 +575,7 @@ function renderGrid(items){
 
 async function doSearch(){
   const q=document.getElementById('search-input').value.trim();
-  if(!q){loadHome();return}
+  if(!q){loadView();return}
   grid.innerHTML='<div class="loading">搜索中…</div>';
   try{
     if(mode==='public'){
@@ -1032,12 +1137,16 @@ document.getElementById('diag-overlay').addEventListener('click',e=>{if(e.target
 
 async function loadUsers(){
   try{
+    const ROLE_NAMES={user:'普通用户',vip:'特权组',admin:'管理员'};
+    const NEXT_ROLE={user:'vip',vip:'admin',admin:'user'};
     const d=await fetch('/api/admin/users',{headers:AUTH()}).then(r=>r.json());
-    document.getElementById('user-rows').innerHTML=(d.users||[]).map(u=>
-      '<tr><td>'+escapeHtml(u.username)+'</td><td>'+(u.role==='admin'?'管理员':'用户')+'</td>'+
-      '<td><button class="ghost" data-uid="'+u.id+'" data-role="'+(u.role==='admin'?'user':'admin')+'">'+(u.role==='admin'?'降级':'升级')+'</button>'+
-      ' <button class="danger" data-del="'+u.id+'">删</button></td></tr>'
-    ).join('');
+    document.getElementById('user-rows').innerHTML=(d.users||[]).map(u=>{
+      const role=(u.role==='admin'||u.role==='vip'||u.role==='user')?u.role:'user';
+      const next=NEXT_ROLE[role];
+      return '<tr><td>'+escapeHtml(u.username)+'</td><td>'+(ROLE_NAMES[role])+'</td>'+
+      '<td><button class="ghost" data-uid="'+u.id+'" data-role="'+next+'">切换为'+ROLE_NAMES[next]+'</button>'+
+      ' <button class="danger" data-del="'+u.id+'">删</button></td></tr>';
+    }).join('');
     document.querySelectorAll('[data-uid]').forEach(b=>b.onclick=()=>setRole(b.dataset.uid,b.dataset.role));
     document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>delUser(b.dataset.del));
   }catch(e){}
@@ -1056,7 +1165,7 @@ async function delUser(id){
 
 /* init */
 if(adminToken){document.getElementById('login-area').style.display='none';document.getElementById('admin-area').style.display='block';loadAdmin()}
-loadHome();
+loadView();
 </script>
 </body>
 </html>
