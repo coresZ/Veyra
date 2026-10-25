@@ -1095,9 +1095,13 @@ async function submitDownloadTo(target) {
       toast('已提交 NAS 下载任务（后端自行解析取流）');
     } else {
       // 下载到手机。
-      // 先实时问原生端当前内容模式（不依赖可能过期的全局 contentSource，避免进私密模式后判定失误走手机本地）。
-      let sourceNow = contentSource;
-      try { const fresh = await api('content-status'); if (fresh && fresh.source) sourceNow = fresh.source; } catch (ignore) {}
+      // 判定依据优先级：① 当前详情页实际内容源（detail.source，与详情/播放完全一致，杜绝全局模式脱节）；
+      // ② 实时问原生端 content-status；③ 全局 contentSource。
+      let sourceNow = String(state.detail?.source || '');
+      if (sourceNow !== 'huangguo' && sourceNow !== 'hongguo') {
+        try { const fresh = await api('content-status'); if (fresh && fresh.source) sourceNow = fresh.source; } catch (ignore) {}
+        if (sourceNow !== 'huangguo' && sourceNow !== 'hongguo') sourceNow = contentSource;
+      }
       // 走后端转发(proxyMode=3)仅对黄果/私密源生效：NAS 后端全权下载（解析/分片/解密/转码全在后端，复用已验证稳定链路），
       // 完成后手机拉取 mp4 → 删 NAS 原文件 → 手机合并导出。手机端不再碰 m3u8 解析/分片/remux。
       // 红果源保持手机直连，不受影响。

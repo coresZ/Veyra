@@ -726,6 +726,9 @@ public final class MainActivity extends Activity {
             case "detail": {
                 String id = args.optString("id");
                 JSONObject result = repository.detail(id);
+                // 记录详情实际内容源：下载/播放判定必须与详情一致，避免全局模式与详情脱节导致
+                // 黄果剧被误判红果源而走了手机直连（防盗链失败）。
+                result.put("source", ContentMode.get(this).active());
                 store.saveCache("detail:" + id, result);
                 return result;
             }
