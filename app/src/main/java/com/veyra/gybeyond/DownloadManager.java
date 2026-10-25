@@ -1160,12 +1160,15 @@ final class DownloadManager {
 
         // 3) 逐分片 MediaExtractor → 同一 MediaMuxer：每个分片是独立合法 ts（自带 PAT/PMT），
         //    单独解析可靠（拼接 full.ts 只读第一分片的坑在这里规避）。
-        //    PTS：分片内归零（t-basePts）+ 跨分片偏移（vOff/aOff 按轨累加前分片时长），全局时间轴连续。
+        //    PTS：分片内归零（t-basePts）后叠加跨分片累积值（lastV/lastA 按轨持续累加），
+        //    并对 B 帧回退做单调化（不早于前样本，同 writeSamples 红果路径）——缺这一步
+        //    部分设备 MediaMuxer 内部报错标记 stopped，到 stop() 才抛 "would have stopped already"。
         dbg.append("MediaExtractor 逐分片重封装 ").append(decFiles.length).append(" 片…\n");
         MediaMuxer muxer = new MediaMuxer(out.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
         boolean started = false;
         int vTrack = -1, aTrack = -1;
-        long vOff = 0, aOff = 0;
+        long vLast = 0, aLast = 0;      // 跨分片最后写入 PTS（每轨独立，保证全局单调）
+        int vCnt = 0, aCnt = 0;
         ByteBuffer buf = ByteBuffer.allocateDirect(2 * 1024 * 1024);
         MediaCodec.BufferInfo bi = new MediaCodec.BufferInfo();
         try {
@@ -1225,7 +1228,7 @@ final class DownloadManager {
                     }
                     if (ev >= 0) ex.selectTrack(ev);
                     if (ea >= 0) ex.selectTrack(ea);
-                    long vBase = -1, aBase = -1, vMax = 0, aMax = 0;
+                    long vBase = -1, aBase = -1;
                     while (true) {
                         long sz = ex.getSampleSize();
                         if (sz <= 0) break;
@@ -1239,21 +1242,28 @@ final class DownloadManager {
                         buf.position(0); buf.limit(n);
                         if (track == ev) {
                             if (vBase < 0) vBase = t;
-                            if (t > vMax) vMax = t;
-                            bi.set(0, n, t - vBase + vOff, flags);
+                            long rel = t - vBase; if (rel < 0) rel = 0;
+                            long pts = vLast + rel;
+                            if (pts <= vLast) pts = vLast + 1;   // B 帧回退单调化
+                            vLast = pts;
+                            bi.set(0, n, pts, flags);
                             muxer.writeSampleData(vTrack, buf, bi);
+                            vCnt++;
                         } else if (track == ea) {
                             if (aBase < 0) aBase = t;
-                            if (t > aMax) aMax = t;
-                            bi.set(0, n, t - aBase + aOff, flags);
+                            long rel = t - aBase; if (rel < 0) rel = 0;
+                            long pts = aLast + rel;
+                            if (pts <= aLast) pts = aLast + 1;
+                            aLast = pts;
+                            bi.set(0, n, pts, flags);
                             muxer.writeSampleData(aTrack, buf, bi);
+                            aCnt++;
                         }
                         ex.advance();
                     }
-                    if (vBase >= 0) vOff += (vMax - vBase);
-                    if (aBase >= 0) aOff += (aMax - aBase);
                 } finally { ex.release(); }
             }
+            dbg.append("写入统计: 视频 ").append(vCnt).append(" 样本、音频 ").append(aCnt).append(" 样本\n");
             if (started) muxer.stop();
         } finally {
             muxer.release();
