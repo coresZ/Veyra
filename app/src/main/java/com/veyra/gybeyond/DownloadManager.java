@@ -1168,6 +1168,7 @@ final class DownloadManager {
         boolean started = false;
         int vTrack = -1, aTrack = -1;
         long vLast = 0, aLast = 0;      // 跨分片最后写入 PTS（每轨独立，保证全局单调）
+        long vSegBase = 0, aSegBase = 0; // 跨分片全局基准（每片起始时间轴位置，分片内相对偏移加在这个基准上）
         int vCnt = 0, aCnt = 0;
         ByteBuffer buf = ByteBuffer.allocateDirect(2 * 1024 * 1024);
         MediaCodec.BufferInfo bi = new MediaCodec.BufferInfo();
@@ -1245,7 +1246,7 @@ final class DownloadManager {
                     }
                     if (ev >= 0) ex.selectTrack(ev);
                     if (ea >= 0) ex.selectTrack(ea);
-                    long vBase = -1, aBase = -1;
+                    long vBase = -1, aBase = -1, vMax = 0, aMax = 0;
                     while (true) {
                         long sz = ex.getSampleSize();
                         if (sz <= 0) break;
@@ -1259,8 +1260,11 @@ final class DownloadManager {
                         buf.position(0); buf.limit(n);
                         if (track == ev) {
                             if (vBase < 0) vBase = t;
+                            if (t > vMax) vMax = t;
+                            // PTS = 分片全局基准(vSegBase) + 分片内相对偏移(t-vBase)——不能把相对偏移
+                            // 加到上一帧 PTS 上（会每帧累积叠加，几十帧后整片时长被拉长几十倍=播放慢放）
                             long rel = t - vBase; if (rel < 0) rel = 0;
-                            long pts = vLast + rel;
+                            long pts = vSegBase + rel;
                             if (pts <= vLast) pts = vLast + 1;   // B 帧回退单调化
                             vLast = pts;
                             bi.set(0, n, pts, flags);
@@ -1268,8 +1272,9 @@ final class DownloadManager {
                             vCnt++;
                         } else if (track == ea) {
                             if (aBase < 0) aBase = t;
+                            if (t > aMax) aMax = t;
                             long rel = t - aBase; if (rel < 0) rel = 0;
-                            long pts = aLast + rel;
+                            long pts = aSegBase + rel;
                             if (pts <= aLast) pts = aLast + 1;
                             aLast = pts;
                             // TS 音频 sample 是 ADTS 帧（含头），mp4 的 AAC 轨必须 raw AAC——剥头。
@@ -1292,6 +1297,9 @@ final class DownloadManager {
                         }
                         ex.advance();
                     }
+                    // 分片结束：全局基准累加本片时长（源 PTS 差，独立或延续两种源都正确）
+                    if (vBase >= 0) vSegBase += (vMax - vBase);
+                    if (aBase >= 0) aSegBase += (aMax - aBase);
                 } finally { ex.release(); }
             }
             dbg.append("写入统计: 视频 ").append(vCnt).append(" 样本、音频 ").append(aCnt).append(" 样本\n");
