@@ -984,11 +984,13 @@ final class DownloadManager {
             // 独立子线程 + 120s 硬超时：偶发卡死时任务报"合并超时"可重试，不再永久卡住
             task.detail = "第 " + n + " 集合并中…";
             task.debug = "第 " + n + " 集：解密合并中…";
-            int mediaSeq = 0;
+            int msq = 0;
             try {
-                java.util.regex.Matcher ms = java.util.regex.Pattern.compile("#EXT-X-MEDIA-SEQUENCE:\\s*(\\d+)").matcher(playlist);
-                if (ms.find()) mediaSeq = Integer.parseInt(ms.group(1));
+                java.util.regex.Matcher ms = java.util.regex.Pattern.compile("#EXT-X-MEDIA-SEQUENCE:\\s*(\\d+)")
+                        .matcher(new String(java.nio.file.Files.readAllBytes(playlist.toPath()), StandardCharsets.UTF_8));
+                if (ms.find()) msq = Integer.parseInt(ms.group(1));
             } catch (Exception ignored) {}
+            final int mediaSeq = msq;
             ExecutorService remuxPool = Executors.newSingleThreadExecutor();
             try {
                 Future<?> fr = remuxPool.submit(() -> {
