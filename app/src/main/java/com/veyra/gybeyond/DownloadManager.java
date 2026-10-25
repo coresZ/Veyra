@@ -870,11 +870,12 @@ final class DownloadManager {
             List<Future<?>> futs = new ArrayList<>();
             for (int i = 0; i < Math.min(12, segN); i++) {
                 futs.add(pool.submit(() -> {
+                    int curIdx = -1;
                     try {
                         while (!task.canceled) {
                             int idx = nextSeg.getAndIncrement();
                             if (idx >= segN) break;
-                            final int curIdx = idx;
+                            curIdx = idx;
                             // 先显示"正在下载第 X/N 片"，卡住时用户能看出在等哪一片（避免误判成合并卡）
                             task.detail = "下载中 第 " + (idx + 1) + "/" + segN + " 片…";
                             task.debug = "第 " + n + " 集：正在下载第 " + (idx + 1) + "/" + segN + " 片…";
