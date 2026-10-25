@@ -40,6 +40,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -707,9 +708,11 @@ final class DownloadManager {
             List<String> segUris = new ArrayList<>();
             List<String> segKeys = new ArrayList<>();
             task.detail = "解析 m3u8 播放列表…";
+            task.debug = "第 " + n + " 集：解析 m3u8 播放列表…";
             expandM3u8(url, segUris, segKeys, 0);
             if (segUris.isEmpty()) throw new java.io.IOException("m3u8 无分片");
             task.detail = "解析完成，共 " + segUris.size() + " 个分片，开始下载";
+            task.debug = "第 " + n + " 集：m3u8 含 " + segUris.size() + " 个分片，开始下载";
             // 去重 KEY → 本地 key 文件
             LinkedHashMap<String, String> keyFiles = new LinkedHashMap<>();
             {
@@ -740,6 +743,7 @@ final class DownloadManager {
                             int done = Math.min(nextSeg.get(), segN);
                             if (idx % 3 == 0 || idx == segN - 1) {
                                 task.detail = "下载中 " + done + "/" + segN + " 片";
+                                task.debug = "第 " + n + " 集：下载分片 " + done + "/" + segN;
                             }
                         }
                     } catch (Exception e) {
@@ -779,7 +783,23 @@ final class DownloadManager {
             }
             StringBuilder dbg = new StringBuilder();
             File tmpOut = new File(work, "ep.mp4");
-            FFmpegConcat.m3u8ToMp4(playlist, tmpOut, dbg, new File(context.getFilesDir(), "native.log"));
+            // remux 放独立子线程 + 120s 硬超时：ffmpeg 偶发卡死时任务报"合并超时"可重试，不再永久卡住
+            task.detail = "第 " + n + " 集合并中…";
+            task.debug = "第 " + n + " 集：ffmpeg 合并中…";
+            ExecutorService remuxPool = Executors.newSingleThreadExecutor();
+            try {
+                Future<?> fr = remuxPool.submit(() -> {
+                    try { FFmpegConcat.m3u8ToMp4(playlist, tmpOut, dbg, new File(context.getFilesDir(), "native.log")); }
+                    catch (Throwable t) { throw new RuntimeException(t); }
+                });
+                try {
+                    fr.get(120, TimeUnit.SECONDS);
+                } catch (TimeoutException te) {
+                    fr.cancel(true);
+                    throw new java.io.IOException("第 " + n + " 集 m3u8 合并超时（120s），请重试");
+                }
+            } finally { remuxPool.shutdownNow(); }
+            task.debug = "第 " + n + " 集：合并完成";
             // 产物移到正式分集路径；移动失败则复制（跨目录 rename 一般可成）
             if (!tmpOut.renameTo(out)) {
                 java.nio.file.Files.copy(tmpOut.toPath(), out.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);

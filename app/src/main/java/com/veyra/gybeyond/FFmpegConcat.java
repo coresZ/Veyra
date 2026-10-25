@@ -158,6 +158,11 @@ final class FFmpegConcat {
      */
     private static String jcpM3u8ToMp4(String playlistPath, String outputPath, String logPath) {
         try {
+            // Android 预加载保险：APK lib/ 里的 ffmpeg so 直接 System.loadLibrary 加载，
+            // 避免 Loader 从 classpath 资源解压路径在 APK 内失效导致的阻塞/异常（重复加载无害）
+            try { System.loadLibrary("avformat"); } catch (Throwable ignored) { }
+            try { System.loadLibrary("avcodec"); } catch (Throwable ignored) { }
+            try { System.loadLibrary("avutil"); } catch (Throwable ignored) { }
             org.bytedeco.javacpp.Loader.load(org.bytedeco.ffmpeg.global.avformat.class);
             AVDictionary opts = new AVDictionary();
             org.bytedeco.ffmpeg.global.avutil.av_dict_set(opts, "allowed_extensions", "ALL", 0);
