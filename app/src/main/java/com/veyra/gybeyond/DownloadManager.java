@@ -31,13 +31,19 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -974,13 +980,19 @@ final class DownloadManager {
             }
             StringBuilder dbg = new StringBuilder();
             File tmpOut = new File(work, "ep.mp4");
-            // remux 放独立子线程 + 120s 硬超时：ffmpeg 偶发卡死时任务报"合并超时"可重试，不再永久卡住
+            // 方案2（无 ffmpeg）：Cipher 解密 ts → full.ts 字节拼接 → MediaExtractor/MediaMuxer 重封装。
+            // 独立子线程 + 120s 硬超时：偶发卡死时任务报"合并超时"可重试，不再永久卡住
             task.detail = "第 " + n + " 集合并中…";
-            task.debug = "第 " + n + " 集：ffmpeg 合并中…";
+            task.debug = "第 " + n + " 集：解密合并中…";
+            int mediaSeq = 0;
+            try {
+                java.util.regex.Matcher ms = java.util.regex.Pattern.compile("#EXT-X-MEDIA-SEQUENCE:\\s*(\\d+)").matcher(playlist);
+                if (ms.find()) mediaSeq = Integer.parseInt(ms.group(1));
+            } catch (Exception ignored) {}
             ExecutorService remuxPool = Executors.newSingleThreadExecutor();
             try {
                 Future<?> fr = remuxPool.submit(() -> {
-                    try { FFmpegConcat.m3u8ToMp4(playlist, tmpOut, dbg, new File(context.getFilesDir(), "native.log")); }
+                    try { mergeTsToMp4(work, segFiles, segKeys, segIVs, keyFiles, mediaSeq, tmpOut, dbg); }
                     catch (Throwable t) { throw new RuntimeException(t); }
                 });
                 try {
@@ -1012,6 +1024,153 @@ final class DownloadManager {
             // 文件管理器可见已下载分片（下多少存多少，与后端落盘一致）
             if (segOk) deleteRecursively(work);
         }
+    }
+
+    /** 方案2（彻底移除 ffmpeg/JavaCPP）：Cipher AES-128-CBC 解密每个 ts → 字节级拼 full.ts →
+     *  MediaExtractor/MediaMuxer 重封装单集 mp4。HLS 标准：分片 16 字节对齐，NoPadding 解密；
+     *  显式 IV 按分片（segIVs），无显式 IV 时用媒体序列号（mediaSeq+i 大端 16B）。
+     *  成功后删密文 ts + full.ts；失败保留密文 ts（可重试，文件管理器可见分片）。
+     *  视频/音频 csd 缺失走提取/构造兜底（复用 normalizeEpisode 同款逻辑）。 */
+    private static void mergeTsToMp4(File work, String[] segFiles, List<String> segKeys, List<String> segIVs,
+            Map<String, String> keyFiles, int mediaSeq, File out, StringBuilder dbg) throws Exception {
+        long t0 = System.currentTimeMillis();
+        dbg.append("方案2：Cipher 解密 + MediaExtractor/MediaMuxer 合并\n");
+        // 1) KEY 字节（KEY URL → 16B）
+        Map<String, byte[]> keyBytes = new HashMap<>();
+        for (Map.Entry<String, String> e : keyFiles.entrySet()) {
+            File kf = new File(work, e.getValue());
+            if (!kf.exists() || kf.length() == 0) throw new java.io.IOException("KEY 文件缺失: " + e.getValue());
+            byte[] kb = java.nio.file.Files.readAllBytes(kf.toPath());
+            if (kb.length != 16) throw new java.io.IOException("KEY 文件异常: " + e.getValue() + " len=" + kb.length);
+            keyBytes.put(e.getKey(), kb);
+        }
+        // 2) 逐片解密 → full.ts（字节级拼接，源 pts 天然连续；失败保留密文可重试）
+        File full = new File(work, "full.ts");
+        try (FileOutputStream fos = new FileOutputStream(full)) {
+            for (int i = 0; i < segFiles.length; i++) {
+                File seg = new File(work, segFiles[i]);
+                if (!seg.exists() || seg.length() == 0) throw new java.io.IOException("分片缺失: " + segFiles[i]);
+                byte[] enc = java.nio.file.Files.readAllBytes(seg.toPath());
+                byte[] key = keyBytes.get(segKeys.get(i));
+                if (key == null) throw new java.io.IOException("缺少分片 KEY: " + segFiles[i]);
+                byte[] iv = ivForSeg(segIVs, i, mediaSeq);
+                try {
+                    Cipher c = Cipher.getInstance("AES/CBC/NoPadding");
+                    c.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
+                    byte[] dec = c.doFinal(enc);
+                    fos.write(dec);
+                } catch (Exception ce) {
+                    throw new java.io.IOException("分片解密失败 " + segFiles[i] + ": " + ce);
+                }
+            }
+        }
+        dbg.append("解密拼接完成 ").append(segFiles.length).append(" 片 → full.ts ").append(full.length()).append("B\n");
+        // 3) MediaExtractor 打开 full.ts → 音视频轨
+        MediaExtractor ex = new MediaExtractor();
+        ex.setDataSource(full.getAbsolutePath());
+        int vIdx = -1, aIdx = -1;
+        for (int t = 0; t < ex.getTrackCount(); t++) {
+            String mime = ex.getTrackFormat(t).getString(MediaFormat.KEY_MIME);
+            if (mime != null && mime.startsWith("video/")) vIdx = t;
+            else if (mime != null && mime.startsWith("audio/")) aIdx = t;
+        }
+        if (vIdx < 0) { ex.release(); throw new java.io.IOException("合并产物没有视频轨道"); }
+        MediaFormat vf = ex.getTrackFormat(vIdx);
+        MediaFormat af = aIdx >= 0 ? ex.getTrackFormat(aIdx) : null;
+        ex.release();
+        // 视频 csd 缺失（avc3/hev1 内联参数集）→ 流式扫描首关键帧提取 SPS/PPS（HEVC 含 VPS）
+        String vmime = vf.getString(MediaFormat.KEY_MIME);
+        if (!vf.containsKey("csd-0")) {
+            List<byte[]> nal = null;
+            MediaExtractor se = new MediaExtractor();
+            try {
+                se.setDataSource(full.getAbsolutePath());
+                se.selectTrack(vIdx);
+                boolean hevc = vmime != null && vmime.startsWith("video/hevc");
+                while (se.advance()) {
+                    if ((se.getSampleFlags() & MediaCodec.BUFFER_FLAG_KEY_FRAME) == 0) continue;
+                    long sz = se.getSampleSize();
+                    if (sz <= 0 || sz > 4 * 1024 * 1024) continue;
+                    ByteBuffer bb = ByteBuffer.allocate((int) sz);
+                    int n = se.readSampleData(bb, 0);
+                    if (n <= 0) continue;
+                    bb.position(0); bb.limit(n);
+                    List<byte[]> p = extractParameterSets(bb, hevc);
+                    if (!p.isEmpty()) { nal = p; break; }
+                }
+            } finally { se.release(); }
+            if (nal == null) throw new java.io.IOException("无法提取视频参数集(csd)");
+            int total = 0; for (byte[] b : nal) total += b.length;
+            ByteBuffer csd = ByteBuffer.allocate(total);
+            for (byte[] b : nal) csd.put(b);
+            csd.position(0);
+            vf.setByteBuffer("csd-0", csd);
+        }
+        // 音频 csd 缺失 → 从首个 ADTS 帧构造 AudioSpecificConfig
+        if (af != null && !af.containsKey("csd-0")) {
+            ByteBuffer asc = extractAacAsc(full, aIdx);
+            if (asc == null) throw new java.io.IOException("无法构造音频 csd(ADTS)");
+            af.setByteBuffer("csd-0", asc);
+        }
+        // 4) 音视频各自归零基准 + 流式交错写 mp4（与 normalizeEpisode 一致）
+        long vFirst = Math.max(0, firstSamplePts(full, vIdx));
+        long aFirst = af != null ? Math.max(0, firstSamplePts(full, aIdx)) : vFirst;
+        MediaMuxer muxer = new MediaMuxer(out.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+        try {
+            int vt = muxer.addTrack(vf);
+            int at = af != null ? muxer.addTrack(af) : -1;
+            muxer.start();
+            writeInterleavedStream(full, vIdx, aIdx, muxer, vt, at, vFirst, aFirst);
+            muxer.stop();
+        } finally { muxer.release(); }
+        dbg.append("合并完成 ").append(out.length()).append("B 耗时 ").append((System.currentTimeMillis() - t0) / 1000).append("s\n");
+    }
+
+    /** 分片 IV：显式 IV（segIVs 里 0x…）优先；无显式 IV 时 HLS 默认 = 媒体序列号（mediaSeq+i，16 字节大端）。 */
+    private static byte[] ivForSeg(List<String> segIVs, int i, int mediaSeq) {
+        String ivs = (i < segIVs.size()) ? segIVs.get(i) : null;
+        if (ivs != null && !ivs.isEmpty()) {
+            String h = ivs.replace("0x", "").replace("0X", "");
+            if (h.length() == 32) {
+                byte[] b = new byte[16];
+                for (int k = 0; k < 16; k++) b[k] = (byte) Integer.parseInt(h.substring(k * 2, k * 2 + 2), 16);
+                return b;
+            }
+        }
+        long seq = ((long) mediaSeq) + i;
+        byte[] b = new byte[16];
+        for (int k = 15; k >= 0; k--) { b[k] = (byte) (seq & 0xff); seq >>>= 8; }
+        return b;
+    }
+
+    /** 从音频轨首个 ADTS 帧头构造 AudioSpecificConfig（MediaMuxer addTrack 需要 csd-0）。 */
+    private static ByteBuffer extractAacAsc(File file, int track) throws Exception {
+        MediaExtractor ex = new MediaExtractor();
+        try {
+            ex.setDataSource(file.getAbsolutePath());
+            ex.selectTrack(track);
+            while (ex.advance()) {
+                long sz = ex.getSampleSize();
+                if (sz < 7) continue;
+                ByteBuffer bb = ByteBuffer.allocate((int) Math.min(sz, 1024));
+                int n = ex.readSampleData(bb, 0);
+                if (n < 7) continue;
+                byte[] h = new byte[4];
+                bb.position(0); bb.get(h);
+                if ((h[0] & 0xff) != 0xff || (h[1] & 0xf0) != 0xf0) continue;   // 非 ADTS sync
+                int profile = (h[2] & 0xc0) >> 6;                     // objectType - 1
+                int sfIdx = (h[2] & 0x3c) >> 2;                        // samplingFrequencyIndex
+                int chCfg = ((h[2] & 0x01) << 2) | ((h[3] & 0xc0) >> 6); // channelConfiguration
+                int objectType = profile + 1;
+                byte[] asc = new byte[2];
+                asc[0] = (byte) ((objectType << 3) | (sfIdx >> 1));
+                asc[1] = (byte) (((sfIdx & 1) << 7) | (chCfg << 3));
+                ByteBuffer out = ByteBuffer.wrap(asc);
+                out.position(0);
+                return out;
+            }
+            return null;
+        } finally { ex.release(); }
     }
 
     private static void deleteRecursively(File f) {
