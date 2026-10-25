@@ -998,8 +998,7 @@ final class DownloadManager {
                 File sf = new File(work, segFiles[i]);
                 if (!sf.exists() || sf.length() == 0) throw new java.io.IOException("分片文件无效（第 " + (i + 1) + "/" + segN + " 片大小异常）");
             }
-            // 本地 playlist（相对路径；每段按需写 KEY 行，ffmpeg 原生 AES-128 解密）
-            File playlist = new File(work, "play.m3u8");
+            // 本地 playlist（相对路径；每段按需写 KEY 行，合并阶段从本地 playlist 自解析 AES-128 解密）
             {
                 StringBuilder sb = new StringBuilder("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:0\n");
                 String lastKeyName = null;
@@ -1129,11 +1128,11 @@ final class DownloadManager {
                     byte[] dec = c.doFinal(enc);
                     fos.write(dec);
                 } catch (Exception ce) {
-                    throw new java.io.IOException("分片解密失败 " + segFiles[i] + ": " + ce);
+                    throw new java.io.IOException("分片解密失败 " + segNames.get(i) + ": " + ce);
                 }
             }
         }
-        dbg.append("解密拼接完成 ").append(segFiles.length).append(" 片 → full.ts ").append(full.length()).append("B\n");
+        dbg.append("解密拼接完成 ").append(segNames.size()).append(" 片 → full.ts ").append(full.length()).append("B\n");
         // 3) MediaExtractor 打开 full.ts → 音视频轨
         MediaExtractor ex = new MediaExtractor();
         ex.setDataSource(full.getAbsolutePath());
