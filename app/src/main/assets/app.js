@@ -59,6 +59,8 @@ const state = {
 contentReady = api('content-status').then(status => {
   contentSource = status.source || 'hongguo';
   state.privateUnlocked = Boolean(status.unlocked);
+  // 启动即拉取黄果网络通道（避免重启后 state.proxyMode 未初始化导致下载误判手机直连）
+  try { api('get-proxy-mode').then(v => { state.proxyMode = Number(v) || 3; }).catch(() => {}); } catch (ignore) {}
   document.title = 'Veyra';
   if (!privateMode()) {
     categoryIds.adult = ['short']; categoryIds.ai = ['comic'];
@@ -1105,18 +1107,23 @@ async function submitDownloadTo(target) {
       // 走后端转发(proxyMode=3)仅对黄果/私密源生效：NAS 后端全权下载（解析/分片/解密/转码全在后端，复用已验证稳定链路），
       // 完成后手机拉取 mp4 → 删 NAS 原文件 → 手机合并导出。手机端不再碰 m3u8 解析/分片/remux。
       // 红果源保持手机直连，不受影响。
-      if (sourceNow === 'huangguo' && state.proxyMode === 3) {
+      // 通道模式实时问原生端持久化值（杜绝重启后内存未初始化/设置页时序降级导致误判手机直连）
+      let proxyModeNow = Number(state.proxyMode) || 3;
+      try { const pmv = await api('get-proxy-mode'); if (pmv !== null && pmv !== undefined && pmv !== '') proxyModeNow = Number(pmv) || 3; } catch (ignore) {}
+      const willForward = sourceNow === 'huangguo' && proxyModeNow === 3;
+      console.log(`[dl-judge] source=${sourceNow} proxyMode=${proxyModeNow} forward=${willForward} role=${state.account?.role}`);
+      if (willForward) {
         const r = await api('nas-download-start', { source: sourceNow, title: state.detail.title, seriesId: String(state.detail.seriesId || state.detail.id), episodes });
         const nasTaskId = String((r && r.task && r.task.id) || (r && r.id) || '');
         if (!nasTaskId) throw new Error('NAS 任务创建失败');
         await api('download-forward-prepare', { title: state.detail.title, count: episodes.length, nasTaskId });
-        toast('已提交 NAS 下载，完成后自动拉到手机合并');
+        toast(`判定[黄果+转发→NAS] 已提交 NAS 下载，完成后自动拉到手机合并`);
       } else {
         // 直连/仅代理：手机直接拉源站（现有逻辑）
         const resolved = await resolveEpisodesForDownload(episodes);
         if (!resolved.length) throw new Error('没有可下载的分集');
         await api('download-start', { source: sourceNow, title: state.detail.title, episodes: resolved });
-        toast('已开始下载到手机');
+        toast(`判定[源=${sourceNow} 通道=${proxyModeNow}] 已开始下载到手机（手机直连解析）`);
       }
     }
     hideDownloadSheet();
