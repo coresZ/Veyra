@@ -106,6 +106,7 @@ final class DownloadManager {
                         .put("id", id).put("source", source).put("title", title)
                         .put("status", status).put("doneCount", doneCount).put("totalCount", totalCount)
                         .put("percent", percent).put("detail", detail)
+                        .put("nasTaskId", nasTaskId)
                         .put("output", output).put("error", error).put("debug", debug).put("createdAt", createdAt);
             } catch (Exception e) { return new JSONObject(); }
         }
@@ -122,6 +123,7 @@ final class DownloadManager {
                             .put("status", t.status).put("percent", t.percent)
                             .put("doneCount", t.doneCount).put("totalCount", t.totalCount)
                             .put("detail", t.detail).put("output", t.output).put("error", t.error).put("debug", t.debug)
+                            .put("nasTaskId", t.nasTaskId)
                             .put("episodes", t.episodes)
                             .put("createdAt", t.createdAt));
                 }
@@ -150,6 +152,7 @@ final class DownloadManager {
                 t.totalCount = Math.max(o.optInt("totalCount", 0), 1);
                 t.output = o.optString("output", "");
                 t.debug = o.optString("debug", "");
+                t.nasTaskId = o.optString("nasTaskId", "");
                 // 恢复分集列表（episodes 为 final JSONArray，用 put 拷贝），否则重试恢复的任务分集数=0
                 JSONArray saved = o.optJSONArray("episodes");
                 if (saved != null) {

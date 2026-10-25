@@ -829,7 +829,9 @@ async function renderLibraryDownloads() {
   syncDownloadsTimer([...phone, ...nas]);
   processForwardTasks(phone, nas);   // 转发模式：NAS 完成自动拉取合并（不阻塞渲染）
   const phoneTasks = phone.map(t => Object.assign({}, t, { kind: 'phone' }));
-  const nasTasks = nas.map(t => Object.assign({}, t, { kind: 'nas' }));
+  // 手机转发任务关联的 NAS 任务不在下载页单独显示（由"下载到手机"触发，属内部步骤；主动下载到 NAS 的任务正常显示）
+  const forwardNas = new Set(phone.filter(t => t.nasTaskId).map(t => String(t.nasTaskId)));
+  const nasTasks = nas.filter(t => !forwardNas.has(String(t.id))).map(t => Object.assign({}, t, { kind: 'nas' }));
   list.innerHTML = renderDownloadList([...phoneTasks, ...nasTasks]);
 }
 
@@ -845,6 +847,7 @@ async function processForwardTasks(phoneTasks, nasTasks) {
   if (forwardProcessing) return;
   const fwd = (phoneTasks || []).find(t => t.status === 'pulling');
   if (!fwd) return;
+  if (!fwd.nasTaskId) return;   // 旧任务无关联 NAS id（持久化前版本），跳过等用户重下
   const nas = (nasTasks || []).find(t => String(t.id) === String(fwd.nasTaskId));
   if (!nas) return;
   if (!['done', 'ready'].includes(nas.status)) return;   // 等 NAS 下载完成
@@ -906,7 +909,9 @@ async function refreshDownloads(token, keepTimer) {
   if (keepTimer) syncDownloadsTimer([...phone, ...nas]);
   processForwardTasks(phone, nas);   // 转发模式：NAS 完成自动拉取合并（不阻塞渲染）
   const phoneTasks = phone.map(t => Object.assign({}, t, { kind: 'phone' }));
-  const nasTasks = nas.map(t => Object.assign({}, t, { kind: 'nas' }));
+  // 手机转发任务关联的 NAS 任务不在下载页单独显示（由"下载到手机"触发，属内部步骤；主动下载到 NAS 的任务正常显示）
+  const forwardNas = new Set(phone.filter(t => t.nasTaskId).map(t => String(t.nasTaskId)));
+  const nasTasks = nas.filter(t => !forwardNas.has(String(t.id))).map(t => Object.assign({}, t, { kind: 'nas' }));
   list.innerHTML = renderDownloadList([...phoneTasks, ...nasTasks]);
 }
 
