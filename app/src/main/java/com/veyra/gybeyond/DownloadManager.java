@@ -304,6 +304,19 @@ final class DownloadManager {
         return new File(context.getFilesDir(), "downloads/" + id);
     }
 
+    /** 分集/整剧产物目录：Download/Veyra/<剧名>/（转码成功的分集与合并产物都放这里，
+     *  不是任务 ID 目录）；不可写时回退应用私有目录。 */
+    @SuppressWarnings("deprecation")
+    private File episodeDir(String title) {
+        String sub = (title == null || title.isEmpty()) ? "download" : title.replaceAll("[\\\\/:*?\"<>|]", "_");
+        File pub = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Veyra/" + sub);
+        try {
+            pub.mkdirs();
+            if (pub.isDirectory()) return pub;
+        } catch (Exception ignored) { }
+        return new File(context.getFilesDir(), "downloads/" + sub);
+    }
+
     private void run(Task task) {
         File dir = dlDir(task.id);
         boolean mergedOk = false;
@@ -323,7 +336,8 @@ final class DownloadManager {
                     JSONObject ep = task.episodes.optJSONObject(idx);
                     String url = ep.optString("url");
                     String key = ep.optString("key", "");
-                    File out = new File(dir, String.format(Locale.US, "ep%03d.mp4", idx + 1));
+                    // 转码成功分集落位剧集目录（Download/Veyra/<剧名>/），任务 ID 目录只放 ts/临时文件
+                    File out = new File(episodeDir(task.title), String.format(Locale.US, "ep%03d.mp4", idx + 1));
                     // 重试/复用：仅复用「v0.13.8+ 新格式」分集（dlv=raw-v2，原始密文/明文，合并时由 C 层 ffmpeg
                     // 原生解密重封装保持 CFR）。旧版分集（MediaMuxer 重封装产物，帧率被弄成 VFR）一律不复用，
                     // 强制重新下载，避免"快切鬼畜/MPV 卡顿"翻回来。
@@ -526,7 +540,9 @@ final class DownloadManager {
             int n = task.episodes.length();
             List<File> plain = new ArrayList<>();
             for (int i = 0; i < n; i++) {
-                File f = new File(dir, String.format(Locale.US, "ep%03d.mp4", i + 1));
+                File f = new File(episodeDir(task.title), String.format(Locale.US, "ep%03d.mp4", i + 1));
+                // 兼容旧任务：分集可能还在任务 ID 目录（dl_<id>）
+                if (!(f.exists() && f.length() > 0)) f = new File(dir, String.format(Locale.US, "ep%03d.mp4", i + 1));
                 if (f.exists() && f.length() > 0) plain.add(f);
             }
             if (plain.size() != n) throw new java.io.IOException("分集不完整（" + plain.size() + "/" + n + "），请重新下载");
@@ -1112,9 +1128,12 @@ final class DownloadManager {
             if (kb.length != 16) throw new java.io.IOException("KEY 文件异常: " + k + " len=" + kb.length);
             keyBytes.put(k, kb);
         }
-        // 2) 逐片解密 → full.ts（字节级拼接，源 pts 天然连续；失败保留密文可重试）
-        File full = new File(work, "full.ts");
-        try (FileOutputStream fos = new FileOutputStream(full)) {
+        // 2) 逐片解密 → 单分片明文 ts（dec-%04d.ts）。不拼接 full.ts：
+        //    字节拼接后 Android MediaExtractor 只解析第一分片（后续分片 PAT/PMT 或 PID 变化被忽略），
+        //    实测产物只有前几秒；每个分片独立 ts（自带 PAT/PMT/SPS/PPS），单独解析可靠。
+        dbg.append("逐片解密 ").append(segNames.size()).append(" 片…\n");
+        File[] decFiles = new File[segNames.size()];
+        try {
             for (int i = 0; i < segNames.size(); i++) {
                 File seg = new File(work, segNames.get(i));
                 if (!seg.exists() || seg.length() == 0) throw new java.io.IOException("分片缺失: " + segNames.get(i));
@@ -1122,79 +1141,126 @@ final class DownloadManager {
                 byte[] key = keyBytes.get(segKeys.get(i));
                 if (key == null) throw new java.io.IOException("缺少分片 KEY: " + segNames.get(i));
                 byte[] iv = ivForSeg(segIVs, i, mediaSeq);
+                byte[] dec;
                 try {
                     Cipher c = Cipher.getInstance("AES/CBC/NoPadding");
                     c.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
-                    byte[] dec = c.doFinal(enc);
-                    fos.write(dec);
+                    dec = c.doFinal(enc);
                 } catch (Exception ce) {
                     throw new java.io.IOException("分片解密失败 " + segNames.get(i) + ": " + ce);
                 }
+                File df = new File(work, String.format(Locale.US, "dec-%04d.ts", i));
+                java.nio.file.Files.write(df.toPath(), dec);
+                decFiles[i] = df;
             }
+        } catch (Exception e) {
+            for (File df : decFiles) if (df != null) df.delete();
+            throw e;
         }
-        dbg.append("解密拼接完成 ").append(segNames.size()).append(" 片 → full.ts ").append(full.length()).append("B\n");
-        // 3) MediaExtractor 打开 full.ts → 音视频轨
-        MediaExtractor ex = new MediaExtractor();
-        ex.setDataSource(full.getAbsolutePath());
-        int vIdx = -1, aIdx = -1;
-        for (int t = 0; t < ex.getTrackCount(); t++) {
-            String mime = ex.getTrackFormat(t).getString(MediaFormat.KEY_MIME);
-            if (mime != null && mime.startsWith("video/")) vIdx = t;
-            else if (mime != null && mime.startsWith("audio/")) aIdx = t;
-        }
-        if (vIdx < 0) { ex.release(); throw new java.io.IOException("合并产物没有视频轨道"); }
-        MediaFormat vf = ex.getTrackFormat(vIdx);
-        MediaFormat af = aIdx >= 0 ? ex.getTrackFormat(aIdx) : null;
-        ex.release();
-        // 视频 csd 缺失（avc3/hev1 内联参数集）→ 流式扫描首关键帧提取 SPS/PPS（HEVC 含 VPS）
-        String vmime = vf.getString(MediaFormat.KEY_MIME);
-        if (!vf.containsKey("csd-0")) {
-            List<byte[]> nal = null;
-            MediaExtractor se = new MediaExtractor();
-            try {
-                se.setDataSource(full.getAbsolutePath());
-                se.selectTrack(vIdx);
-                boolean hevc = vmime != null && vmime.startsWith("video/hevc");
-                while (se.advance()) {
-                    if ((se.getSampleFlags() & MediaCodec.BUFFER_FLAG_KEY_FRAME) == 0) continue;
-                    long sz = se.getSampleSize();
-                    if (sz <= 0 || sz > 4 * 1024 * 1024) continue;
-                    ByteBuffer bb = ByteBuffer.allocate((int) sz);
-                    int n = se.readSampleData(bb, 0);
-                    if (n <= 0) continue;
-                    bb.position(0); bb.limit(n);
-                    List<byte[]> p = extractParameterSets(bb, hevc);
-                    if (!p.isEmpty()) { nal = p; break; }
-                }
-            } finally { se.release(); }
-            if (nal == null) throw new java.io.IOException("无法提取视频参数集(csd)");
-            int total = 0; for (byte[] b : nal) total += b.length;
-            ByteBuffer csd = ByteBuffer.allocate(total);
-            for (byte[] b : nal) csd.put(b);
-            csd.position(0);
-            vf.setByteBuffer("csd-0", csd);
-        }
-        // 音频 csd 缺失 → 从首个 ADTS 帧构造 AudioSpecificConfig
-        if (af != null && !af.containsKey("csd-0")) {
-            ByteBuffer asc = extractAacAsc(full, aIdx);
-            if (asc == null) throw new java.io.IOException("无法构造音频 csd(ADTS)");
-            af.setByteBuffer("csd-0", asc);
-        }
-        // 4) 音视频各自归零基准 + 流式交错写 mp4（与 normalizeEpisode 一致）
-        long vFirst = Math.max(0, firstSamplePts(full, vIdx));
-        long aFirst = af != null ? Math.max(0, firstSamplePts(full, aIdx)) : vFirst;
+
+        // 3) 逐分片 MediaExtractor → 同一 MediaMuxer：每个分片是独立合法 ts（自带 PAT/PMT），
+        //    单独解析可靠（拼接 full.ts 只读第一分片的坑在这里规避）。
+        //    PTS：分片内归零（t-basePts）+ 跨分片偏移（vOff/aOff 按轨累加前分片时长），全局时间轴连续。
+        dbg.append("MediaExtractor 逐分片重封装 ").append(decFiles.length).append(" 片…\n");
         MediaMuxer muxer = new MediaMuxer(out.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+        boolean started = false;
+        int vTrack = -1, aTrack = -1;
+        long vOff = 0, aOff = 0;
+        ByteBuffer buf = ByteBuffer.allocateDirect(2 * 1024 * 1024);
+        MediaCodec.BufferInfo bi = new MediaCodec.BufferInfo();
         try {
-            int vt = muxer.addTrack(vf);
-            int at = af != null ? muxer.addTrack(af) : -1;
-            muxer.start();
-            writeInterleavedStream(full, vIdx, aIdx, muxer, vt, at, vFirst, aFirst);
-            muxer.stop();
-        } finally { muxer.release(); }
+            for (int p = 0; p < decFiles.length; p++) {
+                MediaExtractor ex = new MediaExtractor();
+                int ev = -1, ea = -1;
+                try {
+                    ex.setDataSource(decFiles[p].getAbsolutePath());
+                    for (int t = 0; t < ex.getTrackCount(); t++) {
+                        String mime = ex.getTrackFormat(t).getString(MediaFormat.KEY_MIME);
+                        if (mime == null) continue;
+                        if (mime.startsWith("video/") && ev < 0) ev = t;
+                        else if (mime.startsWith("audio/") && ea < 0) ea = t;
+                    }
+                    if (ev < 0) throw new java.io.IOException("分片无视频轨: " + segNames.get(p));
+                    MediaFormat fv = ex.getTrackFormat(ev);
+                    MediaFormat fa = ea >= 0 ? ex.getTrackFormat(ea) : null;
+                    if (!started) {
+                        // 视频 csd 缺失（avc3/hev1 内联参数集）→ 扫描首关键帧提取 SPS/PPS（HEVC 含 VPS）
+                        String vmime = fv.getString(MediaFormat.KEY_MIME);
+                        if (!fv.containsKey("csd-0")) {
+                            List<byte[]> nal = null;
+                            MediaExtractor se = new MediaExtractor();
+                            try {
+                                se.setDataSource(decFiles[p].getAbsolutePath());
+                                se.selectTrack(ev);
+                                boolean hevc = vmime != null && vmime.startsWith("video/hevc");
+                                while (se.advance()) {
+                                    if ((se.getSampleFlags() & MediaCodec.BUFFER_FLAG_KEY_FRAME) == 0) continue;
+                                    long sz = se.getSampleSize();
+                                    if (sz <= 0 || sz > 4 * 1024 * 1024) continue;
+                                    ByteBuffer bb = ByteBuffer.allocate((int) sz);
+                                    int n = se.readSampleData(bb, 0);
+                                    if (n <= 0) continue;
+                                    bb.position(0); bb.limit(n);
+                                    List<byte[]> p2 = extractParameterSets(bb, hevc);
+                                    if (!p2.isEmpty()) { nal = p2; break; }
+                                }
+                            } finally { se.release(); }
+                            if (nal == null) throw new java.io.IOException("无法提取视频参数集(csd)");
+                            int total = 0; for (byte[] b : nal) total += b.length;
+                            ByteBuffer csd = ByteBuffer.allocate(total);
+                            for (byte[] b : nal) csd.put(b);
+                            csd.position(0);
+                            fv.setByteBuffer("csd-0", csd);
+                        }
+                        // 音频 csd 缺失 → 从首个 ADTS 帧构造 AudioSpecificConfig
+                        if (fa != null && !fa.containsKey("csd-0")) {
+                            ByteBuffer asc = extractAacAsc(decFiles[p], ea);
+                            if (asc == null) throw new java.io.IOException("无法构造音频 csd(ADTS)");
+                            fa.setByteBuffer("csd-0", asc);
+                        }
+                        vTrack = muxer.addTrack(fv);
+                        aTrack = fa != null ? muxer.addTrack(fa) : -1;
+                        muxer.start();
+                        started = true;
+                    }
+                    if (ev >= 0) ex.selectTrack(ev);
+                    if (ea >= 0) ex.selectTrack(ea);
+                    long vBase = -1, aBase = -1, vMax = 0, aMax = 0;
+                    while (true) {
+                        long sz = ex.getSampleSize();
+                        if (sz <= 0) break;
+                        if (buf.capacity() < sz) buf = ByteBuffer.allocateDirect((int) sz + 65536);
+                        buf.clear();
+                        int n = ex.readSampleData(buf, 0);
+                        if (n < 0) break;
+                        int track = ex.getSampleTrackIndex();
+                        long t = ex.getSampleTime();
+                        int flags = ex.getSampleFlags();
+                        buf.position(0); buf.limit(n);
+                        if (track == ev) {
+                            if (vBase < 0) vBase = t;
+                            if (t > vMax) vMax = t;
+                            bi.set(0, n, t - vBase + vOff, flags);
+                            muxer.writeSampleData(vTrack, buf, bi);
+                        } else if (track == ea) {
+                            if (aBase < 0) aBase = t;
+                            if (t > aMax) aMax = t;
+                            bi.set(0, n, t - aBase + aOff, flags);
+                            muxer.writeSampleData(aTrack, buf, bi);
+                        }
+                        ex.advance();
+                    }
+                    if (vBase >= 0) vOff += (vMax - vBase);
+                    if (aBase >= 0) aOff += (aMax - aBase);
+                } finally { ex.release(); }
+            }
+            if (started) muxer.stop();
+        } finally {
+            muxer.release();
+            for (File df : decFiles) if (df != null) df.delete();
+        }
         dbg.append("合并完成 ").append(out.length()).append("B 耗时 ").append((System.currentTimeMillis() - t0) / 1000).append("s\n");
     }
-
-    /** 分片 IV：显式 IV（segIVs 里 0x…）优先；无显式 IV 时 HLS 默认 = 媒体序列号（mediaSeq+i，16 字节大端）。 */
     private static byte[] ivForSeg(List<String> segIVs, int i, int mediaSeq) {
         String ivs = (i < segIVs.size()) ? segIVs.get(i) : null;
         if (ivs != null && !ivs.isEmpty()) {
@@ -1616,6 +1682,15 @@ final class DownloadManager {
             File dir = dlDir(t.id);
             if (dir.exists()) {
                 File[] kids = dir.listFiles();
+                if (kids != null) for (File f : kids) {
+                    String n = f.getName();
+                    if (f.isFile() && (n.startsWith("ep") || n.startsWith("norm_"))) f.delete();
+                }
+            }
+            // 剧集目录（新位置）里的分集也清理
+            File edir = episodeDir(t.title);
+            if (edir.exists() && !edir.equals(dir)) {
+                File[] kids = edir.listFiles();
                 if (kids != null) for (File f : kids) {
                     String n = f.getName();
                     if (f.isFile() && (n.startsWith("ep") || n.startsWith("norm_"))) f.delete();
