@@ -776,13 +776,13 @@ final class DownloadManager {
 
     private void downloadToFile(String url, File out, AtomicLong dlBytes, AtomicLong totalBytes) throws Exception {
         url = curlSafeUrl(url);
-        // 单片 2 分钟硬超时 + 最多 3 次自动重试（换新连接）：源站/代理流式挂起时不再无限卡，正常分片 2 分钟必完
+        // 单片 90s 硬超时 + 最多 2 次自动重试（换新连接）：源站/代理流式挂起时快速失败报错可重试，不无限卡
         Exception lastErr = null;
-        for (int attempt = 1; attempt <= 3; attempt++) {
+        for (int attempt = 1; attempt <= 2; attempt++) {
             try {
                 HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-                conn.setConnectTimeout(15_000);
-                conn.setReadTimeout(60_000);
+                conn.setConnectTimeout(10_000);
+                conn.setReadTimeout(30_000);
                 conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36");
                 try {
                     int code = conn.getResponseCode();
@@ -798,8 +798,8 @@ final class DownloadManager {
                             received += k;
                             dlBytes.addAndGet(k);
                             // 单片硬超时：源站/代理流式挂起（持续小数据不触发 readTimeout）时强制放弃重试
-                            if (System.currentTimeMillis() - startMs > 120_000) {
-                                throw new java.io.IOException("分片下载超时（>2分钟）");
+                            if (System.currentTimeMillis() - startMs > 90_000) {
+                                throw new java.io.IOException("分片下载超时（>90秒）");
                             }
                         }
                     }
@@ -808,7 +808,7 @@ final class DownloadManager {
             } catch (Exception e) {
                 lastErr = e;
                 out.delete();
-                if (attempt < 3) Thread.sleep(600L * attempt);
+                if (attempt < 2) Thread.sleep(400L * attempt);
             }
         }
         throw lastErr;
@@ -874,6 +874,10 @@ final class DownloadManager {
                         while (!task.canceled) {
                             int idx = nextSeg.getAndIncrement();
                             if (idx >= segN) break;
+                            final int curIdx = idx;
+                            // 先显示"正在下载第 X/N 片"，卡住时用户能看出在等哪一片（避免误判成合并卡）
+                            task.detail = "下载中 第 " + (idx + 1) + "/" + segN + " 片…";
+                            task.debug = "第 " + n + " 集：正在下载第 " + (idx + 1) + "/" + segN + " 片…";
                             String name = String.format(Locale.US, "seg-%04d.ts", idx);
                             downloadToFile(segUris.get(idx), new File(work, name), dlBytes, totalBytes);
                             segFiles[idx] = name;
@@ -889,7 +893,7 @@ final class DownloadManager {
                                 + String.format(Locale.US, " · %.1fMB/s", mbps);
                         }
                     } catch (Exception e) {
-                        throw new RuntimeException(e);
+                        throw new RuntimeException("第 " + (curIdx + 1) + "/" + segN + " 片下载失败: " + e.getMessage(), e);
                     }
                 }));
             }
