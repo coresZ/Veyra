@@ -174,8 +174,11 @@ final class FFmpegConcat {
             }, false);
             AVDictionary opts = new AVDictionary();
             org.bytedeco.ffmpeg.global.avutil.av_dict_set(opts, "allowed_extensions", "ALL", 0);
-            AVFormatContext inCtx = new AVFormatContext();
-            int rc = org.bytedeco.ffmpeg.global.avformat.avformat_open_input(inCtx, playlistPath, null, opts);
+            // 标准 JavaCPP 输出参数用法：C 端 avformat_open_input 分配 ctx 并通过 AVFormatContext**
+            // 写回，必须用 PointerPointer 接收（直接用 new AVFormatContext() 传结构指针会被 C 端
+            // 当作 ** 解引用，读到 av_class 垃圾导致 rc=-22 打不开任何 playlist）
+            org.bytedeco.javacpp.PointerPointer inPp = new org.bytedeco.javacpp.PointerPointer(1);
+            int rc = org.bytedeco.ffmpeg.global.avformat.avformat_open_input(inPp, playlistPath, null, new org.bytedeco.javacpp.PointerPointer(opts));
             if (rc < 0) {
                 // 附上本地 playlist 头部，报错可直接定位为什么 hls 解析失败（-22=无法识别为合法 HLS）
                 StringBuilder head = new StringBuilder();
@@ -190,11 +193,13 @@ final class FFmpegConcat {
                 } catch (Throwable ignored) { }
                 return "打开 m3u8 失败 rc=" + rc + "\nplaylist 头部:\n" + head;
             }
+            AVFormatContext inCtx = new AVFormatContext(inPp.get(0));
             rc = org.bytedeco.ffmpeg.global.avformat.avformat_find_stream_info(inCtx, (AVDictionary) null);
             if (rc < 0) { org.bytedeco.ffmpeg.global.avformat.avformat_free_context(inCtx); return "读取流信息失败 rc=" + rc; }
-            AVFormatContext outCtx = new AVFormatContext();
-            rc = org.bytedeco.ffmpeg.global.avformat.avformat_alloc_output_context2(outCtx, null, "mp4", outputPath);
+            org.bytedeco.javacpp.PointerPointer outPp = new org.bytedeco.javacpp.PointerPointer(1);
+            rc = org.bytedeco.ffmpeg.global.avformat.avformat_alloc_output_context2(outPp, null, "mp4", outputPath);
             if (rc < 0) { org.bytedeco.ffmpeg.global.avformat.avformat_free_context(inCtx); return "创建输出上下文失败 rc=" + rc; }
+            AVFormatContext outCtx = new AVFormatContext(outPp.get(0));
             for (int i = 0; i < inCtx.nb_streams(); i++) {
                 AVStream is = inCtx.streams(i);
                 AVStream os = org.bytedeco.ffmpeg.global.avformat.avformat_new_stream(outCtx, null);
@@ -206,13 +211,16 @@ final class FFmpegConcat {
                 }
                 os.codecpar().codec_tag(0);
             }
-            AVIOContext io = outCtx.pb();
-            rc = org.bytedeco.ffmpeg.global.avformat.avio_open(io, outputPath, org.bytedeco.ffmpeg.global.avformat.AVIO_FLAG_WRITE);
+            // avio_open 同样是输出参数（AVIOContext**），用 PointerPointer 接收并把 io 写回 outCtx.pb
+            org.bytedeco.javacpp.PointerPointer ioPp = new org.bytedeco.javacpp.PointerPointer(1);
+            rc = org.bytedeco.ffmpeg.global.avformat.avio_open(ioPp, outputPath, org.bytedeco.ffmpeg.global.avformat.AVIO_FLAG_WRITE);
             if (rc < 0) {
                 org.bytedeco.ffmpeg.global.avformat.avformat_free_context(inCtx);
                 org.bytedeco.ffmpeg.global.avformat.avformat_free_context(outCtx);
                 return "打开输出文件失败 rc=" + rc;
             }
+            AVIOContext io = new AVIOContext(ioPp.get(0));
+            outCtx.pb(io);
             rc = org.bytedeco.ffmpeg.global.avformat.avformat_write_header(outCtx, (AVDictionary) null);
             if (rc < 0) {
                 org.bytedeco.ffmpeg.global.avformat.avio_close(io);
