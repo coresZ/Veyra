@@ -3,6 +3,13 @@ package com.veyra.gybeyond;
 import java.io.File;
 import java.util.List;
 
+import org.bytedeco.ffmpeg.avcodec.AVPacket;
+import org.bytedeco.ffmpeg.avformat.AVFormatContext;
+import org.bytedeco.ffmpeg.avformat.AVIOContext;
+import org.bytedeco.ffmpeg.avformat.AVStream;
+import org.bytedeco.ffmpeg.avutil.AVDictionary;
+import org.bytedeco.ffmpeg.avutil.AVRational;
+
 /**
  * 自写合并引擎：Java 只调一个 native 函数，concat 全部逻辑在 C 层直调 ffmpeg C API，
  * 1:1 复刻后端 server/downloader.js 的 concat 阶段：
@@ -120,18 +127,18 @@ final class FFmpegConcat {
 
     /** 本地 HLS(m3u8) → MP4 重封装：等价 CLI `ffmpeg -allowed_extensions ALL -i playlist.m3u8 -c copy -f mp4 -y out`。
      *  playlist 与分片/KEY 同目录（相对路径），hls demuxer 原生处理 AES-128 解密。
-     *  用于黄果源手机本地下载：APK 拉 m3u8/分片到本地后直接转成可播 mp4，不依赖后端转码。 */
+     *  用于黄果源手机本地下载：APK 拉 m3u8/分片到本地后直接转成可播 mp4，不依赖后端转码。
+     *  实现走 JavaCPP ffmpeg（libs/ffmpeg-*.jar 内置 arm64 so）：jniLibs 预编译 libffconcat.so
+     *  是 v0.13.33 旧版，只有 nativeConcat 没有 nativeM3u8ToMp4（v0.18.1 引入但从未重编 so），
+     *  因此 nativeM3u8ToMp4 调用必崩 UnsatisfiedLinkError——这里改为纯 JavaCPP 实现。 */
     static void m3u8ToMp4(File playlist, File output, StringBuilder debug, File nativeLog) throws Exception {
-        if (LOAD_ERROR != null) {
-            throw new java.io.IOException("ffmpeg 库加载失败: " + LOAD_ERROR, LOAD_ERROR);
-        }
         if (nativeLog != null) {
             try {
                 java.nio.file.Files.write(nativeLog.toPath(), new byte[0]);
             } catch (Exception ignored) { }
         }
         debug.append("m3u8 remux: ").append(playlist.getAbsolutePath()).append(" → ").append(output.getAbsolutePath()).append('\n');
-        String err = nativeM3u8ToMp4(playlist.getAbsolutePath(), output.getAbsolutePath(),
+        String err = jcpM3u8ToMp4(playlist.getAbsolutePath(), output.getAbsolutePath(),
                 nativeLog != null ? nativeLog.getAbsolutePath() : "");
         if (nativeLog != null && nativeLog.exists()) {
             try {
@@ -143,5 +150,82 @@ final class FFmpegConcat {
         if (!output.exists() || output.length() == 0) throw new java.io.IOException("m3u8 转 mp4 产物为空");
     }
 
-    private static native String nativeM3u8ToMp4(String playlistPath, String outputPath, String logPath);
+    /**
+     * JavaCPP ffmpeg 版 m3u8→mp4 重封装：avformat 直调，等价
+     *   ffmpeg -allowed_extensions ALL -i playlist.m3u8 -c copy -f mp4 -y out
+     * hls demuxer 原生处理 AES-128 解密与相对路径分片（分片/KEY 与 playlist 同目录）。
+     * @return null=成功；非 null=失败消息（含失败阶段与 rc）。
+     */
+    private static String jcpM3u8ToMp4(String playlistPath, String outputPath, String logPath) {
+        try {
+            org.bytedeco.javacpp.Loader.load(org.bytedeco.ffmpeg.global.avformat.class);
+            AVDictionary opts = new AVDictionary();
+            org.bytedeco.ffmpeg.global.avutil.av_dict_set(opts, "allowed_extensions", "ALL", 0);
+            AVFormatContext inCtx = new AVFormatContext();
+            int rc = org.bytedeco.ffmpeg.global.avformat.avformat_open_input(inCtx, playlistPath, null, opts);
+            if (rc < 0) return "打开 m3u8 失败 rc=" + rc;
+            rc = org.bytedeco.ffmpeg.global.avformat.avformat_find_stream_info(inCtx, (AVDictionary) null);
+            if (rc < 0) { org.bytedeco.ffmpeg.global.avformat.avformat_free_context(inCtx); return "读取流信息失败 rc=" + rc; }
+            AVFormatContext outCtx = new AVFormatContext();
+            rc = org.bytedeco.ffmpeg.global.avformat.avformat_alloc_output_context2(outCtx, null, "mp4", outputPath);
+            if (rc < 0) { org.bytedeco.ffmpeg.global.avformat.avformat_free_context(inCtx); return "创建输出上下文失败 rc=" + rc; }
+            for (int i = 0; i < inCtx.nb_streams(); i++) {
+                AVStream is = inCtx.streams(i);
+                AVStream os = org.bytedeco.ffmpeg.global.avformat.avformat_new_stream(outCtx, null);
+                rc = org.bytedeco.ffmpeg.global.avcodec.avcodec_parameters_copy(os.codecpar(), is.codecpar());
+                if (rc < 0) {
+                    org.bytedeco.ffmpeg.global.avformat.avformat_free_context(inCtx);
+                    org.bytedeco.ffmpeg.global.avformat.avformat_free_context(outCtx);
+                    return "复制流参数失败 rc=" + rc;
+                }
+                os.codecpar().codec_tag(0);
+            }
+            AVIOContext io = outCtx.pb();
+            rc = org.bytedeco.ffmpeg.global.avformat.avio_open(io, outputPath, org.bytedeco.ffmpeg.global.avformat.AVIO_FLAG_WRITE);
+            if (rc < 0) {
+                org.bytedeco.ffmpeg.global.avformat.avformat_free_context(inCtx);
+                org.bytedeco.ffmpeg.global.avformat.avformat_free_context(outCtx);
+                return "打开输出文件失败 rc=" + rc;
+            }
+            rc = org.bytedeco.ffmpeg.global.avformat.avformat_write_header(outCtx, (AVDictionary) null);
+            if (rc < 0) {
+                org.bytedeco.ffmpeg.global.avformat.avio_close(io);
+                org.bytedeco.ffmpeg.global.avformat.avformat_free_context(inCtx);
+                org.bytedeco.ffmpeg.global.avformat.avformat_free_context(outCtx);
+                return "写文件头失败 rc=" + rc;
+            }
+            AVPacket pkt = org.bytedeco.ffmpeg.global.avcodec.av_packet_alloc();
+            while (true) {
+                rc = org.bytedeco.ffmpeg.global.avformat.av_read_frame(inCtx, pkt);
+                if (rc < 0) break;
+                int si = pkt.stream_index();
+                if (si >= 0 && si < inCtx.nb_streams()) {
+                    AVRational inTb = inCtx.streams(si).time_base();
+                    AVRational outTb = outCtx.streams(si).time_base();
+                    pkt.pts(org.bytedeco.ffmpeg.global.avutil.av_rescale_q(pkt.pts(), inTb, outTb));
+                    pkt.dts(org.bytedeco.ffmpeg.global.avutil.av_rescale_q(pkt.dts(), inTb, outTb));
+                    pkt.duration(org.bytedeco.ffmpeg.global.avutil.av_rescale_q(pkt.duration(), inTb, outTb));
+                    pkt.pos(-1);
+                    rc = org.bytedeco.ffmpeg.global.avformat.av_interleaved_write_frame(outCtx, pkt);
+                    if (rc < 0) {
+                        org.bytedeco.ffmpeg.global.avcodec.av_packet_unref(pkt);
+                        org.bytedeco.ffmpeg.global.avformat.av_write_trailer(outCtx);
+                        org.bytedeco.ffmpeg.global.avformat.avio_close(io);
+                        org.bytedeco.ffmpeg.global.avformat.avformat_free_context(inCtx);
+                        org.bytedeco.ffmpeg.global.avformat.avformat_free_context(outCtx);
+                        return "写帧失败 rc=" + rc;
+                    }
+                }
+                org.bytedeco.ffmpeg.global.avcodec.av_packet_unref(pkt);
+            }
+            org.bytedeco.ffmpeg.global.avformat.av_write_trailer(outCtx);
+            org.bytedeco.ffmpeg.global.avformat.avio_close(io);
+            org.bytedeco.ffmpeg.global.avcodec.av_packet_free(pkt);
+            org.bytedeco.ffmpeg.global.avformat.avformat_free_context(inCtx);
+            org.bytedeco.ffmpeg.global.avformat.avformat_free_context(outCtx);
+            return null;
+        } catch (Throwable t) {
+            return "m3u8 remux 异常: " + (t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName());
+        }
+    }
 }

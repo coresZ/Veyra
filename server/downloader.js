@@ -734,7 +734,7 @@ async function runTask(task) {
               }
               if (task.source === 'huangguo') {
                 // 黄果（私密）源：每集页面解析 videoSrc(m3u8) → 分片下载 → ffmpeg 封装（一次完成）
-                task.progress.detail = `第 ${idx + 1} 集取流合并`;
+                task.progress.detail = `第 ${idx + 1} 集处理中`;
                 touch(task);
                 await huangguoDownloadEpisode(task.seriesId, idx + 1, dir, plainFile);
               } else if (ep.key) {
