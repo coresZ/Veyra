@@ -730,7 +730,7 @@ final class DownloadManager {
         if (depth > 6) throw new java.io.IOException("m3u8 层级过深");
         if (++expandCount > 400) throw new java.io.IOException("m3u8 展开条目过多（>400），疑似变种列表循环");
         task.detail = "解析 m3u8 播放列表… 条目 " + expandCount + "、分片 " + segs.size();
-        task.debug = "第 " + n + " 集：解析 m3u8… 条目 " + expandCount + "、分片 " + segs.size();
+        task.debug = "第 " + n + " 集：解析 m3u8… 条目 " + expandCount + "、分片 " + segs.size() + " → " + shortUrl(url);
         String text = new String(fetchBytes(url), StandardCharsets.UTF_8);
         String currentKey = null;
         String currentIV = "";
@@ -780,6 +780,14 @@ final class DownloadManager {
                 .replace("{", "%7B").replace("}", "%7D");
     }
 
+    /** 截断 URL 用于进度/错误显示（去协议头，保留域名+路径前缀）。 */
+    private static String shortUrl(String url) {
+        if (url == null) return "";
+        String u = url.replace("https://", "").replace("http://", "");
+        if (u.length() > 46) u = u.substring(0, 46) + "…";
+        return u;
+    }
+
     /** 解析阶段取小文件（master/子流/playlist）：connect/read 超时外再套 25s 硬超时，
      *  DNS 解析/TLS 握手黑洞时 HttpURLConnection 超时不覆盖，硬超时保证快速失败可重试。 */
     private byte[] fetchBytes(String url) throws Exception {
@@ -790,7 +798,7 @@ final class DownloadManager {
                 return f.get(25, TimeUnit.SECONDS);
             } catch (TimeoutException te) {
                 f.cancel(true);
-                throw new java.io.IOException("请求超时(25s)");
+                throw new java.io.IOException("请求超时(25s) " + shortUrl(url));
             }
         } finally { pool.shutdownNow(); }
     }
