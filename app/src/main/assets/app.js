@@ -1108,26 +1108,18 @@ async function submitDownloadTo(target) {
         try { const fresh = await api('content-status'); if (fresh && fresh.source) sourceNow = fresh.source; } catch (ignore) {}
         if (sourceNow !== 'huangguo' && sourceNow !== 'hongguo') sourceNow = contentSource;
       }
-      // 走后端转发(proxyMode=3)仅对黄果/私密源生效：NAS 后端全权下载（解析/分片/解密/转码全在后端，复用已验证稳定链路），
-      // 完成后手机拉取 mp4 → 删 NAS 原文件 → 手机合并导出。手机端不再碰 m3u8 解析/分片/remux。
-      // 红果源保持手机直连，不受影响。
-      // 通道模式实时问原生端持久化值（杜绝重启后内存未初始化/设置页时序降级导致误判手机直连）
+      // 下载到手机：黄果/红果一律手机本地（黄果经后端代理拉 m3u8/ts → 本地合并单集 mp4）。
+      // 原"走后端转发"(proxyMode=3：NAS 全权下载→手机拉→手机合并)已废弃：手机本地 ts→mp4
+      // 合并（含源显式 IV 保留）修好后，转发无需 NAS 下载合并，与代理/直连同一条链路；
+      // NAS 端"下载到 NAS"入口仍保留（主动下载到 NAS 用）。
       let proxyModeNow = Number(state.proxyMode) || 3;
       try { const pmv = await api('get-proxy-mode'); if (pmv !== null && pmv !== undefined && pmv !== '') proxyModeNow = Number(pmv) || 3; } catch (ignore) {}
-      const willForward = sourceNow === 'huangguo' && proxyModeNow === 3;
-      console.log(`[dl-judge] source=${sourceNow} proxyMode=${proxyModeNow} forward=${willForward} role=${state.account?.role}`);
-      if (willForward) {
-        const r = await api('nas-download-start', { source: sourceNow, title: state.detail.title, seriesId: String(state.detail.seriesId || state.detail.id), episodes });
-        const nasTaskId = String((r && r.task && r.task.id) || (r && r.id) || '');
-        if (!nasTaskId) throw new Error('NAS 任务创建失败');
-        await api('download-forward-prepare', { title: state.detail.title, count: episodes.length, nasTaskId });
-        toast(`判定[黄果+转发→NAS] 已提交 NAS 下载，完成后自动拉到手机合并`);
-      } else {
-        // 直连/仅代理：手机直接拉源站（现有逻辑）
+      console.log(`[dl-judge] source=${sourceNow} proxyMode=${proxyModeNow} role=${state.account?.role}`);
+      {
         const resolved = await resolveEpisodesForDownload(episodes);
         if (!resolved.length) throw new Error('没有可下载的分集');
         await api('download-start', { source: sourceNow, title: state.detail.title, episodes: resolved });
-        toast(`判定[源=${sourceNow} 通道=${proxyModeNow}] 已开始下载到手机（手机直连解析）`);
+        toast(`判定[源=${sourceNow} 通道=${proxyModeNow}] 已开始下载到手机（手机经代理拉源合并）`);
       }
     }
     hideDownloadSheet();

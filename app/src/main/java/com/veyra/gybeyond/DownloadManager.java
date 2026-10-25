@@ -682,19 +682,25 @@ final class DownloadManager {
                 || url.contains("video.225600.xyz");   // 仅直连模式下 episode source 是源站 m3u8 直链，兜底识别
     }
 
-    /** 递归展开 m3u8（代理已把 URI 重写为绝对代理 URL）：收集分片与每段对应 KEY。 */
-    private void expandM3u8(String url, List<String> segs, List<String> segKeys, int depth) throws Exception {
+    /** 递归展开 m3u8（代理已把 URI 重写为绝对代理 URL）：收集分片、每段对应 KEY URL 与显式 IV。 */
+    private void expandM3u8(String url, List<String> segs, List<String> segKeys, List<String> segIVs, int depth) throws Exception {
         if (depth > 6) throw new java.io.IOException("m3u8 层级过深");
         if (++expandCount > 400) throw new java.io.IOException("m3u8 展开条目过多（>400），疑似变种列表循环");
         String text = new String(fetchBytes(url), StandardCharsets.UTF_8);
         String currentKey = null;
+        String currentIV = "";
         boolean expectSub = false;
         java.util.regex.Matcher keyMatcher = java.util.regex.Pattern.compile("URI=\"([^\"]+)\"").matcher("");
+        java.util.regex.Matcher ivMatcher = java.util.regex.Pattern.compile("IV=([0-9a-fA-Fx]+)").matcher("");
         for (String raw : text.split("\r?\n")) {
             String line = raw.trim();
             if (line.startsWith("#EXT-X-KEY")) {
                 keyMatcher.reset(line);
                 if (keyMatcher.find()) currentKey = resolveUri(keyMatcher.group(1), url);
+                // 源带显式 IV（如 IV=0x...）必须原样保留：本地 playlist 丢 IV 时 hls demuxer 会用
+                // 媒体序列号作默认 IV 解密，与源不符 → 解密数据全错 → 产物损坏/合并卡死
+                ivMatcher.reset(line);
+                currentIV = ivMatcher.find() ? ivMatcher.group(1) : "";
             } else if (line.startsWith("#EXT-X-STREAM-INF")) {
                 expectSub = true;
             } else if (line.startsWith("#EXT-X-MEDIA")) {
@@ -707,11 +713,11 @@ final class DownloadManager {
                     String subText = new String(fetchBytes(uri), StandardCharsets.UTF_8);
                     if (!subText.contains("#EXT")) {
                         // 非播放列表：该 URL 实际是分片，直接纳入分片列表
-                        segs.add(uri); segKeys.add(currentKey);
+                        segs.add(uri); segKeys.add(currentKey); segIVs.add(currentIV);
                     } else {
-                        expandM3u8(uri, segs, segKeys, depth + 1);
+                        expandM3u8(uri, segs, segKeys, segIVs, depth + 1);
                     }
-                } else { segs.add(uri); segKeys.add(currentKey); }
+                } else { segs.add(uri); segKeys.add(currentKey); segIVs.add(currentIV); }
                 expectSub = false;
             }
         }
@@ -816,6 +822,7 @@ final class DownloadManager {
         try {
             List<String> segUris = new ArrayList<>();
             List<String> segKeys = new ArrayList<>();
+            List<String> segIVs = new ArrayList<>();
             expandCount = 0;   // 每集重置解析计数
             task.detail = "解析 m3u8 播放列表…";
             task.debug = "第 " + n + " 集：解析 m3u8 播放列表…";
@@ -824,7 +831,7 @@ final class DownloadManager {
             ExecutorService expandPool = Executors.newSingleThreadExecutor();
             try {
                 Future<?> fe = expandPool.submit(() -> {
-                    try { expandM3u8(url, segUris, segKeys, 0); }
+                    try { expandM3u8(url, segUris, segKeys, segIVs, 0); }
                     catch (Throwable t) { throw new RuntimeException(t); }
                 });
                 try {
@@ -837,14 +844,18 @@ final class DownloadManager {
             if (segUris.isEmpty()) throw new java.io.IOException("m3u8 无分片");
             task.detail = "解析完成，共 " + segUris.size() + " 个分片，开始下载";
             task.debug = "第 " + n + " 集：m3u8 含 " + segUris.size() + " 个分片，开始下载";
-            // 去重 KEY → 本地 key 文件
+            // 去重 KEY → 本地 key 文件 + 每 KEY 对应显式 IV（源带 IV 时 playlist 原样保留）
             LinkedHashMap<String, String> keyFiles = new LinkedHashMap<>();
+            LinkedHashMap<String, String> keyIVs = new LinkedHashMap<>();
             {
                 int keyIdx = 0;
-                for (String ku : segKeys) {
+                for (int i = 0; i < segKeys.size(); i++) {
+                    String ku = segKeys.get(i);
                     if (ku == null || keyFiles.containsKey(ku)) continue;
                     downloadToFile(ku, new File(work, "key-" + keyIdx + ".key"), dlBytes, totalBytes);
                     keyFiles.put(ku, "key-" + keyIdx + ".key");
+                    if (i < segIVs.size() && segIVs.get(i) != null && !segIVs.get(i).isEmpty())
+                        keyIVs.put(ku, segIVs.get(i));
                     keyIdx++;
                 }
             }
@@ -906,7 +917,11 @@ final class DownloadManager {
                     String ku = segKeys.get(i);
                     String kn = ku != null ? keyFiles.get(ku) : null;
                     if (kn != null && !kn.equals(lastKeyName)) {
-                        sb.append("#EXT-X-KEY:METHOD=AES-128,URI=\"").append(kn).append("\"\n");
+                        sb.append("#EXT-X-KEY:METHOD=AES-128,URI=\"").append(kn).append("\"");
+                        // 源显式 IV 原样保留（IV=0x...），缺失时 hls demuxer 用序列号默认 IV → 解密错
+                        String iv = ku != null ? keyIVs.get(ku) : null;
+                        if (iv != null && !iv.isEmpty()) sb.append(",IV=").append(iv);
+                        sb.append('\n');
                         lastKeyName = kn;
                     }
                     sb.append("#EXTINF:4.0,\n").append(segFiles[i]).append('\n');
