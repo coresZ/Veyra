@@ -163,7 +163,14 @@ final class FFmpegConcat {
             try { System.loadLibrary("avformat"); } catch (Throwable ignored) { }
             try { System.loadLibrary("avcodec"); } catch (Throwable ignored) { }
             try { System.loadLibrary("avutil"); } catch (Throwable ignored) { }
-            org.bytedeco.javacpp.Loader.load(org.bytedeco.ffmpeg.global.avformat.class);
+            // deps=false：只加载 avformat/avcodec/avutil 三个类，跳过 JavaCPP 依赖图里的 swresample 类
+            // （android-arm64 jar 缺 libjniswresample.so 桥，触发 <clinit> failed；本实现不调用任何
+            //   swresample 方法，原生依赖 libswresample.so 由 avcodec/avformat 的 DT_NEEDED 自动加载）
+            org.bytedeco.javacpp.Loader.load(new Class[]{
+                org.bytedeco.ffmpeg.global.avformat.class,
+                org.bytedeco.ffmpeg.global.avcodec.class,
+                org.bytedeco.ffmpeg.global.avutil.class
+            }, false);
             AVDictionary opts = new AVDictionary();
             org.bytedeco.ffmpeg.global.avutil.av_dict_set(opts, "allowed_extensions", "ALL", 0);
             AVFormatContext inCtx = new AVFormatContext();
