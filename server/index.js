@@ -945,6 +945,13 @@ app.get('/api/download/files/:id/:index', requireAdminOrAccountAdmin, (req, res)
     const t = downloader.getRawTask(req.params.id, ADMIN_OWNER, true);
     if (!t) return res.status(404).json({ error: '任务不存在' });
     const idx = parseInt(req.params.index, 10);
+    if (idx === 0) {
+      // index=0：拉取 NAS 合并产物（<title>_全N集.mp4，任务目录内唯一非分集 mp4）
+      const dir = downloader.taskDirOf(t);
+      const merged = require('fs').readdirSync(dir).find(k => k.endsWith('.mp4') && !/^第\d+集\.mp4$/.test(k));
+      if (!merged) return res.status(404).json({ error: '合并产物不存在' });
+      return res.sendFile(downloader.safeJoin(dir, merged));
+    }
     if (!(idx >= 1 && idx <= t.episodes.length)) return res.status(400).json({ error: '集数非法' });
     const f = downloader.safeJoin(downloader.taskDirOf(t), downloader.epName(idx));
     if (!require('fs').existsSync(f)) return res.status(404).json({ error: `第 ${idx} 集文件不存在` });

@@ -628,6 +628,11 @@ public final class MainActivity extends Activity {
                 byte[] bytes = account.getBytes("api/download/files/" + nasId + "/" + index);
                 return DownloadManager.get(this).forwardPull(args.optString("id"), index, bytes);
             }
+            case "download-forward-pull-merged": {
+                String nasId = args.optString("nasTaskId");
+                byte[] bytes = account.getBytes("api/download/files/" + nasId + "/0");
+                return DownloadManager.get(this).forwardPullMerged(args.optString("id"), bytes);
+            }
             case "input-edit": setInputEditing(args.optBoolean("active")); return new JSONObject().put("ok", true);
             case "open-url": {
                 String url = args.optString("url");

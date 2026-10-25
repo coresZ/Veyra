@@ -851,18 +851,17 @@ async function processForwardTasks(phoneTasks, nasTasks) {
   const nas = (nasTasks || []).find(t => String(t.id) === String(fwd.nasTaskId));
   if (!nas) return;
   if (!['done', 'ready'].includes(nas.status)) return;   // 等 NAS 下载完成
+  if (nas.status === 'ready') {
+    // NAS 已下载未合并：触发 NAS 端合并（merging/done 状态后端会拒绝，忽略即可，继续等）
+    try { await withTimeout(api('nas-download-merge', { id: fwd.nasTaskId }), 8000); } catch (ignore) {}
+    return;
+  }
   forwardProcessing = true;
   try {
-    toast(`NAS 下载完成，正在拉到手机（${fwd.title}）`);
-    const info = await withTimeout(api('nas-download-episodes', { id: fwd.nasTaskId }), 8000);
-    const eps = asArray(info && info.episodes).filter(e => e.exists && e.size > 0);
-    if (!eps.length) throw new Error('NAS 没有可用分集文件');
-    for (const e of eps) {
-      await api('download-forward-pull', { id: fwd.id, nasTaskId: fwd.nasTaskId, index: e.index });
-    }
-    await api('download-merge', { id: fwd.id });
+    toast(`NAS 已合并，正在拉到手机（${fwd.title}）`);
+    await api('download-forward-pull-merged', { id: fwd.id, nasTaskId: fwd.nasTaskId });
     try { await api('nas-download-cancel', { id: fwd.nasTaskId }); } catch (ignore) {}  // 清理 NAS 原文件
-    toast('已拉到手机，开始合并导出');
+    toast('已拉到手机完整成品');
   } catch (error) {
     toast(`转发拉取失败：${error.message}`, true);
   } finally {

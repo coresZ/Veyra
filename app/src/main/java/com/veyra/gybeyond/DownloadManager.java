@@ -434,6 +434,26 @@ final class DownloadManager {
         return found.snapshot();
     }
 
+    /** 转发模式：拉取 NAS 合并产物（单文件完整成品）。保存为 <title>_全N集.mp4，任务直接完成。 */
+    JSONObject forwardPullMerged(String id, byte[] bytes) throws Exception {
+        Task found = null;
+        synchronized (tasks) { for (Task t : tasks) if (t.id.equals(id)) { found = t; break; } }
+        if (found == null) throw new IllegalStateException("任务不存在");
+        if (bytes == null || bytes.length == 0) throw new java.io.IOException("拉取内容为空");
+        File dir = new File(context.getFilesDir(), "downloads/" + id);
+        if (!dir.exists() && !dir.mkdirs()) throw new java.io.IOException("无法创建任务目录");
+        String safe = (found.title == null ? "" : found.title).replaceAll("[\\\\/:*?\"<>|]", "_");
+        int n = found.episodes.length();
+        File out = new File(dir, safe + "_全" + n + "集.mp4");
+        try (FileOutputStream fos = new FileOutputStream(out)) { fos.write(bytes); }
+        found.status = "done";
+        found.detail = "已从 NAS 拉取完整成品";
+        found.percent = 100;
+        found.output = out.getAbsolutePath();
+        persist();
+        return found.snapshot();
+    }
+
     /** 手动合并：等待合并信号后执行（任务须处于 ready/failed 状态；合并失败保留分集可重试）。 */
     JSONObject merge(String id) {
         Task found = null;
