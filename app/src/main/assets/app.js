@@ -1014,7 +1014,7 @@ function renderDownloadSheet() {
   if (!sheet) return;
   const episodes = asArray(state.detail.episodes);
   if (downloadMode === 'parsing') {
-    sheet.innerHTML = `<p class="download-parsing">正在解析播放地址…<br><small>红果需要逐集解析，请稍候</small></p>`;
+    sheet.innerHTML = `<p class="download-parsing">正在解析播放地址…<br><small>需要逐集解析，请稍候</small></p>`;
     return;
   }
   if (downloadMode === 'target') {
@@ -1095,11 +1095,14 @@ async function submitDownloadTo(target) {
       toast('已提交 NAS 下载任务（后端自行解析取流）');
     } else {
       // 下载到手机。
+      // 先实时问原生端当前内容模式（不依赖可能过期的全局 contentSource，避免进私密模式后判定失误走手机本地）。
+      let sourceNow = contentSource;
+      try { const fresh = await api('content-status'); if (fresh && fresh.source) sourceNow = fresh.source; } catch (ignore) {}
       // 走后端转发(proxyMode=3)仅对黄果/私密源生效：NAS 后端全权下载（解析/分片/解密/转码全在后端，复用已验证稳定链路），
       // 完成后手机拉取 mp4 → 删 NAS 原文件 → 手机合并导出。手机端不再碰 m3u8 解析/分片/remux。
       // 红果源保持手机直连，不受影响。
-      if (privateMode() && state.proxyMode === 3) {
-        const r = await api('nas-download-start', { source: contentSource, title: state.detail.title, seriesId: String(state.detail.seriesId || state.detail.id), episodes });
+      if (sourceNow === 'huangguo' && state.proxyMode === 3) {
+        const r = await api('nas-download-start', { source: sourceNow, title: state.detail.title, seriesId: String(state.detail.seriesId || state.detail.id), episodes });
         const nasTaskId = String((r && r.task && r.task.id) || (r && r.id) || '');
         if (!nasTaskId) throw new Error('NAS 任务创建失败');
         await api('download-forward-prepare', { title: state.detail.title, count: episodes.length, nasTaskId });
@@ -1108,7 +1111,7 @@ async function submitDownloadTo(target) {
         // 直连/仅代理：手机直接拉源站（现有逻辑）
         const resolved = await resolveEpisodesForDownload(episodes);
         if (!resolved.length) throw new Error('没有可下载的分集');
-        await api('download-start', { source: contentSource, title: state.detail.title, episodes: resolved });
+        await api('download-start', { source: sourceNow, title: state.detail.title, episodes: resolved });
         toast('已开始下载到手机');
       }
     }
