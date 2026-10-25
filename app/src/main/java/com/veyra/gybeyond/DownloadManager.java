@@ -888,7 +888,15 @@ final class DownloadManager {
         File work = new File(out.getParentFile(), "m3u8-w" + n);
         work.mkdirs();
         boolean segOk = false;
+        File playlist = new File(work, "play.m3u8");
+        // 关键：分片/KEY/本地 playlist 早已下载好时（上次合并失败/中断），直接跳过解析与下载进合并——
+        // 不重新拉源 master（源/代理卡死时也能合并），合并不依赖源站。
+        boolean haveLocal = playlist.exists() && playlist.length() > 0;
         try {
+            if (haveLocal) {
+                task.detail = "第 " + n + " 集：本地分片已就绪，直接合并…";
+                task.debug = "第 " + n + " 集：复用本地分片（playlist+ts+key 齐全），跳过解析与下载";
+            } else {
             List<String> segUris = new ArrayList<>();
             List<String> segKeys = new ArrayList<>();
             List<String> segIVs = new ArrayList<>();
@@ -1011,23 +1019,17 @@ final class DownloadManager {
                 sb.append("#EXT-X-ENDLIST\n");
                 java.nio.file.Files.write(playlist.toPath(), sb.toString().getBytes(StandardCharsets.UTF_8));
             }
+            }   // else：本地已有 playlist → 跳过解析/下载，直接进合并
             StringBuilder dbg = new StringBuilder();
             File tmpOut = new File(work, "ep.mp4");
             // 方案2（无 ffmpeg）：Cipher 解密 ts → full.ts 字节拼接 → MediaExtractor/MediaMuxer 重封装。
-            // 独立子线程 + 120s 硬超时：偶发卡死时任务报"合并超时"可重试，不再永久卡住
+            // 合并完全基于本地 work（play.m3u8 + ts + key），不依赖源站；独立子线程 + 120s 硬超时。
             task.detail = "第 " + n + " 集合并中…";
             task.debug = "第 " + n + " 集：解密合并中…";
-            int msq = 0;
-            try {
-                java.util.regex.Matcher ms = java.util.regex.Pattern.compile("#EXT-X-MEDIA-SEQUENCE:\\s*(\\d+)")
-                        .matcher(new String(java.nio.file.Files.readAllBytes(playlist.toPath()), StandardCharsets.UTF_8));
-                if (ms.find()) msq = Integer.parseInt(ms.group(1));
-            } catch (Exception ignored) {}
-            final int mediaSeq = msq;
             ExecutorService remuxPool = Executors.newSingleThreadExecutor();
             try {
                 Future<?> fr = remuxPool.submit(() -> {
-                    try { mergeTsToMp4(work, segFiles, segKeys, segIVs, keyFiles, mediaSeq, tmpOut, dbg); }
+                    try { mergeTsToMp4(work, tmpOut, dbg); }
                     catch (Throwable t) { throw new RuntimeException(t); }
                 });
                 try {
@@ -1064,30 +1066,62 @@ final class DownloadManager {
     /** 方案2（彻底移除 ffmpeg/JavaCPP）：Cipher AES-128-CBC 解密每个 ts → 字节级拼 full.ts →
      *  MediaExtractor/MediaMuxer 重封装单集 mp4。HLS 标准：分片 16 字节对齐，NoPadding 解密；
      *  显式 IV 按分片（segIVs），无显式 IV 时用媒体序列号（mediaSeq+i 大端 16B）。
-     *  成功后删密文 ts + full.ts；失败保留密文 ts（可重试，文件管理器可见分片）。
+     *  输入仅依赖本地 work 目录：从 play.m3u8 自解析分片/KEY/IV/序列号，完全不需要源站，
+     *  分片早已下载好时（合并失败重试）直接合并。成功后删密文 ts + full.ts；失败保留可重试。
      *  视频/音频 csd 缺失走提取/构造兜底（复用 normalizeEpisode 同款逻辑）。 */
-    private static void mergeTsToMp4(File work, String[] segFiles, List<String> segKeys, List<String> segIVs,
-            Map<String, String> keyFiles, int mediaSeq, File out, StringBuilder dbg) throws Exception {
+    private static void mergeTsToMp4(File work, File out, StringBuilder dbg) throws Exception {
         long t0 = System.currentTimeMillis();
         dbg.append("方案2：Cipher 解密 + MediaExtractor/MediaMuxer 合并\n");
-        // 1) KEY 字节（KEY URL → 16B）
+        File playlist = new File(work, "play.m3u8");
+        if (!playlist.exists()) throw new java.io.IOException("缺少本地 playlist（play.m3u8）");
+        String text = new String(java.nio.file.Files.readAllBytes(playlist.toPath()), StandardCharsets.UTF_8);
+        // 从本地 playlist 解析：分片相对路径 / 当前 KEY URI / 显式 IV / MEDIA-SEQUENCE
+        List<String> segNames = new ArrayList<>();
+        List<String> segKeys = new ArrayList<>();
+        List<String> segIVs = new ArrayList<>();
+        int mediaSeq = 0;
+        String curKey = null, curIV = "";
+        java.util.regex.Matcher km = java.util.regex.Pattern.compile("URI=\"([^\"]+)\"").matcher("");
+        java.util.regex.Matcher im = java.util.regex.Pattern.compile("IV=([0-9a-fA-Fx]+)").matcher("");
+        for (String raw : text.split("\r?\n")) {
+            String line = raw.trim();
+            if (line.startsWith("#EXT-X-KEY")) {
+                km.reset(line);
+                curKey = km.find() ? km.group(1) : null;
+                im.reset(line);
+                curIV = im.find() ? im.group(1) : "";
+            } else if (line.startsWith("#EXT-X-MEDIA-SEQUENCE")) {
+                int p = line.indexOf(':');
+                if (p >= 0) {
+                    try { mediaSeq = Integer.parseInt(line.substring(p + 1).trim()); } catch (Exception ignored) {}
+                }
+            } else if (!line.isEmpty() && !line.startsWith("#")) {
+                segNames.add(line);
+                segKeys.add(curKey);
+                segIVs.add(curIV);
+            }
+        }
+        if (segNames.isEmpty()) throw new java.io.IOException("playlist 无分片");
+        dbg.append("本地 playlist: ").append(segNames.size()).append(" 片\n");
+        // 1) KEY 字节（KEY URI 相对 work，16B）
         Map<String, byte[]> keyBytes = new HashMap<>();
-        for (Map.Entry<String, String> e : keyFiles.entrySet()) {
-            File kf = new File(work, e.getValue());
-            if (!kf.exists() || kf.length() == 0) throw new java.io.IOException("KEY 文件缺失: " + e.getValue());
+        for (String k : segKeys) {
+            if (k == null || keyBytes.containsKey(k)) continue;
+            File kf = new File(work, k);
+            if (!kf.exists() || kf.length() == 0) throw new java.io.IOException("KEY 文件缺失: " + k);
             byte[] kb = java.nio.file.Files.readAllBytes(kf.toPath());
-            if (kb.length != 16) throw new java.io.IOException("KEY 文件异常: " + e.getValue() + " len=" + kb.length);
-            keyBytes.put(e.getKey(), kb);
+            if (kb.length != 16) throw new java.io.IOException("KEY 文件异常: " + k + " len=" + kb.length);
+            keyBytes.put(k, kb);
         }
         // 2) 逐片解密 → full.ts（字节级拼接，源 pts 天然连续；失败保留密文可重试）
         File full = new File(work, "full.ts");
         try (FileOutputStream fos = new FileOutputStream(full)) {
-            for (int i = 0; i < segFiles.length; i++) {
-                File seg = new File(work, segFiles[i]);
-                if (!seg.exists() || seg.length() == 0) throw new java.io.IOException("分片缺失: " + segFiles[i]);
+            for (int i = 0; i < segNames.size(); i++) {
+                File seg = new File(work, segNames.get(i));
+                if (!seg.exists() || seg.length() == 0) throw new java.io.IOException("分片缺失: " + segNames.get(i));
                 byte[] enc = java.nio.file.Files.readAllBytes(seg.toPath());
                 byte[] key = keyBytes.get(segKeys.get(i));
-                if (key == null) throw new java.io.IOException("缺少分片 KEY: " + segFiles[i]);
+                if (key == null) throw new java.io.IOException("缺少分片 KEY: " + segNames.get(i));
                 byte[] iv = ivForSeg(segIVs, i, mediaSeq);
                 try {
                     Cipher c = Cipher.getInstance("AES/CBC/NoPadding");
