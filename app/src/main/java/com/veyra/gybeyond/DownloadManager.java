@@ -268,6 +268,8 @@ final class DownloadManager {
     // ---- 执行 ----
     // 并发下载数：一次最多同时下载 N 集（与后端 worker 并发思路一致），跑完一集线程池自动接下一集
     private static final int DL_CONCURRENCY = 10;
+    /** m3u8 递归展开总请求计数（防变种列表指数爆炸，每集开始前重置） */
+    private int expandCount = 0;
 
     private void run(Task task) {
         File dir = new File(context.getFilesDir(), "downloads/" + task.id);
@@ -615,6 +617,7 @@ final class DownloadManager {
     /** 递归展开 m3u8（代理已把 URI 重写为绝对代理 URL）：收集分片与每段对应 KEY。 */
     private void expandM3u8(String url, List<String> segs, List<String> segKeys, int depth) throws Exception {
         if (depth > 6) throw new java.io.IOException("m3u8 层级过深");
+        if (++expandCount > 400) throw new java.io.IOException("m3u8 展开条目过多（>400），疑似变种列表循环");
         String text = new String(fetchBytes(url), StandardCharsets.UTF_8);
         String currentKey = null;
         boolean expectSub = false;
@@ -662,17 +665,38 @@ final class DownloadManager {
         url = curlSafeUrl(url);
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setConnectTimeout(15_000);
-        conn.setReadTimeout(90_000);
+        conn.setReadTimeout(60_000);
         conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36");
         try {
             int code = conn.getResponseCode();
             if (code != 200) throw new java.io.IOException("下载失败 HTTP " + code);
+            byte[] body;
             try (InputStream in = conn.getInputStream(); ByteArrayOutputStream bo = new ByteArrayOutputStream()) {
                 byte[] buf = new byte[64 * 1024];
-                int k;
-                while ((k = in.read(buf)) > 0) bo.write(buf, 0, k);
-                return bo.toByteArray();
+                int k; long total = 0;
+                while ((k = in.read(buf)) > 0) {
+                    bo.write(buf, 0, k);
+                    total += k;
+                    if (total > 8 * 1024 * 1024) throw new java.io.IOException("响应体超限（>8MB），疑似非播放列表");
+                }
+                body = bo.toByteArray();
             }
+            String enc = conn.getContentEncoding();
+            if (enc != null && enc.toLowerCase().contains("gzip")) {
+                // 黄果源 master 常见 gzip 乱码（无编码头），解压后再返回
+                try (java.util.zip.GZIPInputStream gz = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(body))) {
+                    ByteArrayOutputStream out = new ByteArrayOutputStream();
+                    byte[] buf = new byte[64 * 1024];
+                    int k; long total = 0;
+                    while ((k = gz.read(buf)) > 0) {
+                        out.write(buf, 0, k);
+                        total += k;
+                        if (total > 8 * 1024 * 1024) throw new java.io.IOException("解压后响应体超限（>8MB）");
+                    }
+                    return out.toByteArray();
+                }
+            }
+            return body;
         } finally { conn.disconnect(); }
     }
 
@@ -707,9 +731,24 @@ final class DownloadManager {
         try {
             List<String> segUris = new ArrayList<>();
             List<String> segKeys = new ArrayList<>();
+            expandCount = 0;   // 每集重置解析计数
             task.detail = "解析 m3u8 播放列表…";
             task.debug = "第 " + n + " 集：解析 m3u8 播放列表…";
-            expandM3u8(url, segUris, segKeys, 0);
+            // 解析放独立子线程 + 90s 硬超时：黄果源 master 是变种列表（子流套子流），
+            // 递归展开可能数百个串行请求，无超时保护会永久卡死在"解析 m3u8 播放列表…"
+            ExecutorService expandPool = Executors.newSingleThreadExecutor();
+            try {
+                Future<?> fe = expandPool.submit(() -> {
+                    try { expandM3u8(url, segUris, segKeys, 0); }
+                    catch (Throwable t) { throw new RuntimeException(t); }
+                });
+                try {
+                    fe.get(90, TimeUnit.SECONDS);
+                } catch (TimeoutException te) {
+                    fe.cancel(true);
+                    throw new java.io.IOException("第 " + n + " 集 m3u8 解析超时（90s），请重试");
+                }
+            } finally { expandPool.shutdownNow(); }
             if (segUris.isEmpty()) throw new java.io.IOException("m3u8 无分片");
             task.detail = "解析完成，共 " + segUris.size() + " 个分片，开始下载";
             task.debug = "第 " + n + " 集：m3u8 含 " + segUris.size() + " 个分片，开始下载";
