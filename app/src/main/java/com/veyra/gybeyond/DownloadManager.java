@@ -408,7 +408,13 @@ final class DownloadManager {
                 // 内部（如合并失败）已写详细 task.error 时保留，不覆盖成短消息
                 if (task.error == null || task.error.isEmpty())
                     task.error = e.getMessage() == null ? "下载失败" : e.getMessage();
-                task.detail = "失败";
+                String msg = e.getMessage();
+                if (msg != null) {
+                    int cut = msg.indexOf('\n');
+                    if (cut > 0) msg = msg.substring(0, cut);
+                    if (msg.length() > 34) msg = msg.substring(0, 34) + "…";
+                    task.detail = "失败：" + msg;
+                } else task.detail = "失败";
             }
         } finally {
             persist();
@@ -774,7 +780,22 @@ final class DownloadManager {
                 .replace("{", "%7B").replace("}", "%7D");
     }
 
+    /** 解析阶段取小文件（master/子流/playlist）：connect/read 超时外再套 25s 硬超时，
+     *  DNS 解析/TLS 握手黑洞时 HttpURLConnection 超时不覆盖，硬超时保证快速失败可重试。 */
     private byte[] fetchBytes(String url) throws Exception {
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            Future<byte[]> f = pool.submit(() -> doFetchBytes(url));
+            try {
+                return f.get(25, TimeUnit.SECONDS);
+            } catch (TimeoutException te) {
+                f.cancel(true);
+                throw new java.io.IOException("请求超时(25s)");
+            }
+        } finally { pool.shutdownNow(); }
+    }
+
+    private byte[] doFetchBytes(String url) throws Exception {
         url = curlSafeUrl(url);
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setConnectTimeout(15_000);
