@@ -714,10 +714,15 @@ final class DownloadManager {
             try (InputStream in = conn.getInputStream(); FileOutputStream fos = new FileOutputStream(out)) {
                 byte[] buffer = new byte[128 * 1024];
                 int k; long received = 0;
+                long startMs = System.currentTimeMillis();
                 while ((k = in.read(buffer)) > 0) {
                     fos.write(buffer, 0, k);
                     received += k;
                     dlBytes.addAndGet(k);
+                    // 单片硬超时：源站/代理流式挂起（持续小数据不触发 readTimeout）时强制放弃，避免任务永远卡住
+                    if (System.currentTimeMillis() - startMs > 300_000) {
+                        throw new java.io.IOException("分片下载超时（>5分钟），请重试");
+                    }
                 }
             }
         } finally { conn.disconnect(); }
@@ -778,12 +783,10 @@ final class DownloadManager {
                             String name = String.format(Locale.US, "seg-%04d.ts", idx);
                             downloadToFile(segUris.get(idx), new File(work, name), dlBytes, totalBytes);
                             segFiles[idx] = name;
-                            // 分片进度反馈：每 3 片或最后一片刷新一次，避免界面看起来卡死
+                            // 分片进度反馈：每片完成即刷新，用户实时看到进度推进
                             int done = Math.min(nextSeg.get(), segN);
-                            if (idx % 3 == 0 || idx == segN - 1) {
-                                task.detail = "下载中 " + done + "/" + segN + " 片";
-                                task.debug = "第 " + n + " 集：下载分片 " + done + "/" + segN;
-                            }
+                            task.detail = "下载中 " + done + "/" + segN + " 片";
+                            task.debug = "第 " + n + " 集：下载分片 " + done + "/" + segN;
                         }
                     } catch (Exception e) {
                         throw new RuntimeException(e);
