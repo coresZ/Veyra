@@ -922,6 +922,35 @@ app.delete('/api/download/tasks/:id', requireAdminOrAccountAdmin, (req, res) => 
     return res.status(404).json({ error: '任务不存在' });
   res.json({ ok: true });
 });
+// 任务分集文件信息（供手机拉取：转发模式 = NAS 下载完 → 手机拉 mp4 → 删 NAS 原文件）
+app.get('/api/download/tasks/:id/episodes', requireAdminOrAccountAdmin, (req, res) => {
+  try {
+    const t = downloader.getRawTask(req.params.id, ADMIN_OWNER, true);
+    if (!t) return res.status(404).json({ error: '任务不存在' });
+    const dir = downloader.taskDirOf(t);
+    const fs2 = require('fs');
+    const eps = [];
+    for (let i = 0; i < t.episodes.length; i++) {
+      const f = downloader.safeJoin(dir, downloader.epName(i + 1));
+      let size = 0, exists = false;
+      try { exists = fs2.existsSync(f); if (exists) size = fs2.statSync(f).size; } catch { /* ignore */ }
+      eps.push({ index: i + 1, name: downloader.epName(i + 1), exists, size });
+    }
+    res.json({ taskId: t.id, title: t.title, episodes: eps });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+// 单集文件流式下载（鉴权 + 路径安全校验）
+app.get('/api/download/files/:id/:index', requireAdminOrAccountAdmin, (req, res) => {
+  try {
+    const t = downloader.getRawTask(req.params.id, ADMIN_OWNER, true);
+    if (!t) return res.status(404).json({ error: '任务不存在' });
+    const idx = parseInt(req.params.index, 10);
+    if (!(idx >= 1 && idx <= t.episodes.length)) return res.status(400).json({ error: '集数非法' });
+    const f = downloader.safeJoin(downloader.taskDirOf(t), downloader.epName(idx));
+    if (!require('fs').existsSync(f)) return res.status(404).json({ error: `第 ${idx} 集文件不存在` });
+    res.sendFile(f);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
 app.post('/api/download/merge', requireAdminOrAccountAdmin, (req, res) => {
   try {
     const task = downloader.mergeTask(String(req.body.id || ''), ADMIN_OWNER, true);

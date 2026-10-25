@@ -379,6 +379,23 @@ final class AccountService {
         call("DELETE", path, null, true);
     }
 
+    /** 登录态二进制下载（转发模式：手机从 NAS 拉取已下载的单集 mp4）。 */
+    byte[] getBytes(String path) throws Exception {
+        if (!isLoggedIn()) throw new IllegalStateException("请先登录");
+        Request.Builder builder = new Request.Builder().url(baseUrl + path);
+        builder.header("Authorization", "Bearer " + prefs.getString("token", ""));
+        try (Response response = client.newCall(builder.build()).execute()) {
+            if (!response.isSuccessful()) {
+                String message = "";
+                try { if (response.body() != null) message = new JSONObject(response.body().string()).optString("error", ""); } catch (Exception ignored) { }
+                if (message.isEmpty()) message = "拉取失败（HTTP " + response.code() + "）";
+                throw new AccountApiException(response.code(), message);
+            }
+            if (response.body() == null) throw new java.io.IOException("拉取内容为空");
+            return response.body().bytes();
+        }
+    }
+
     private byte[] download(String address) throws Exception {
         Request request = new Request.Builder().url(address).build();
         try (Response response = client.newCall(request).execute()) {

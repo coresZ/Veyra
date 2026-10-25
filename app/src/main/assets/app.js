@@ -825,14 +825,44 @@ async function renderLibraryDownloads() {
   const list = document.getElementById('library-downloads');
   if (!list) return;
   syncDownloadsTimer([...phone, ...nas]);
+  processForwardTasks(phone, nas);   // 转发模式：NAS 完成自动拉取合并（不阻塞渲染）
   const phoneTasks = phone.map(t => Object.assign({}, t, { kind: 'phone' }));
   const nasTasks = nas.map(t => Object.assign({}, t, { kind: 'nas' }));
   list.innerHTML = renderDownloadList([...phoneTasks, ...nasTasks]);
 }
 
-// 下载任务是否仍在进行（手机端 running；NAS 端 queued/downloading/merging）
+// 下载任务是否仍在进行（手机端 running/pulling；NAS 端 queued/downloading/merging）
 function downloadTaskActive(task) {
-  return ['queued', 'downloading', 'merging', 'running'].includes(task && task.status);
+  return ['queued', 'downloading', 'merging', 'running', 'pulling'].includes(task && task.status);
+}
+
+// 转发模式（proxyMode=3）：NAS 下载完成后自动逐集拉到手机 → 合并 → 删除 NAS 原文件。
+// 防重入：处理中置 forwardProcessing，避免 2s 轮询重复触发。
+let forwardProcessing = false;
+async function processForwardTasks(phoneTasks, nasTasks) {
+  if (forwardProcessing) return;
+  const fwd = (phoneTasks || []).find(t => t.status === 'pulling');
+  if (!fwd) return;
+  const nas = (nasTasks || []).find(t => String(t.id) === String(fwd.nasTaskId));
+  if (!nas) return;
+  if (!['done', 'ready'].includes(nas.status)) return;   // 等 NAS 下载完成
+  forwardProcessing = true;
+  try {
+    toast(`NAS 下载完成，正在拉到手机（${fwd.title}）`);
+    const info = await withTimeout(api('nas-download-episodes', { id: fwd.nasTaskId }), 8000);
+    const eps = asArray(info && info.episodes).filter(e => e.exists && e.size > 0);
+    if (!eps.length) throw new Error('NAS 没有可用分集文件');
+    for (const e of eps) {
+      await api('download-forward-pull', { id: fwd.id, nasTaskId: fwd.nasTaskId, index: e.index });
+    }
+    await api('download-merge', { id: fwd.id });
+    try { await api('nas-download-cancel', { id: fwd.nasTaskId }); } catch (ignore) {}  // 清理 NAS 原文件
+    toast('已拉到手机，开始合并导出');
+  } catch (error) {
+    toast(`转发拉取失败：${error.message}`, true);
+  } finally {
+    forwardProcessing = false;
+  }
 }
 
 // 有进行中任务则维持 2s 轮询，全部终态则停止；避免反复 stop/start 重置定时器
@@ -872,6 +902,7 @@ async function refreshDownloads(token, keepTimer) {
   const list = document.getElementById('downloads-list');
   if (!list) return;
   if (keepTimer) syncDownloadsTimer([...phone, ...nas]);
+  processForwardTasks(phone, nas);   // 转发模式：NAS 完成自动拉取合并（不阻塞渲染）
   const phoneTasks = phone.map(t => Object.assign({}, t, { kind: 'phone' }));
   const nasTasks = nas.map(t => Object.assign({}, t, { kind: 'nas' }));
   list.innerHTML = renderDownloadList([...phoneTasks, ...nasTasks]);
@@ -927,6 +958,11 @@ function downloadTaskRow(task, kind) {
 
 function downloadStatusText(task, kind) {
   const failedCount = (task.failedEpisodes || []).length;
+  if (task.status === 'pulling') {
+    const d = task.detail || '';
+    if (d.includes('拉取')) return d.replace(/已从 NAS /, '从 NAS ');
+    return '等待 NAS 下载';
+  }
   if (task.status === 'ready') return failedCount > 0 ? `已下载 · 失败${failedCount}集` : '已下载 · 待合并';
   if (task.status === 'done') {
     if (kind === 'nas') return '已下载 · 已合并';
@@ -1058,13 +1094,22 @@ async function submitDownloadTo(target) {
       await api('nas-download-start', { source: contentSource, title: state.detail.title, seriesId: String(state.detail.seriesId || state.detail.id), episodes });
       toast('已提交 NAS 下载任务（后端自行解析取流）');
     } else {
-      // 下载到手机 = 手机本地下载任务（文件落在手机）。
-      // 直连/仅代理：手机直接拉源站；走后端转发：取流经 NAS 代理中转（/api/huangguo-proxy），
-      // 但下载与 remux 都在手机本地完成，任务不转交 NAS。
-      const resolved = await resolveEpisodesForDownload(episodes);
-      if (!resolved.length) throw new Error('没有可下载的分集');
-      await api('download-start', { source: contentSource, title: state.detail.title, episodes: resolved });
-      toast('已开始下载到手机');
+      // 下载到手机。
+      // 黄果源 + 走后端转发(proxyMode=3)：NAS 后端全权下载（解析/分片/解密/转码全在后端，复用已验证稳定链路），
+      // 完成后手机拉取 mp4 → 删 NAS 原文件 → 手机合并导出。手机端不再碰 m3u8 解析/分片/remux。
+      if (privateMode() && state.proxyMode === 3) {
+        const r = await api('nas-download-start', { source: contentSource, title: state.detail.title, seriesId: String(state.detail.seriesId || state.detail.id), episodes });
+        const nasTaskId = String((r && r.task && r.task.id) || (r && r.id) || '');
+        if (!nasTaskId) throw new Error('NAS 任务创建失败');
+        await api('download-forward-prepare', { title: state.detail.title, count: episodes.length, nasTaskId });
+        toast('已提交 NAS 下载，完成后自动拉到手机合并');
+      } else {
+        // 直连/仅代理：手机直接拉源站（现有逻辑）
+        const resolved = await resolveEpisodesForDownload(episodes);
+        if (!resolved.length) throw new Error('没有可下载的分集');
+        await api('download-start', { source: contentSource, title: state.detail.title, episodes: resolved });
+        toast('已开始下载到手机');
+      }
     }
     hideDownloadSheet();
   } catch (error) {

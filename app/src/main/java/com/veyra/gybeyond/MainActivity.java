@@ -621,6 +621,13 @@ public final class MainActivity extends Activity {
             case "download-delete": DownloadManager.get(this).delete(args.optString("id")); return new JSONObject().put("ok", true);
             case "download-retry": DownloadManager.get(this).retry(args.optString("id")); return new JSONObject().put("ok", true);
             case "download-merge": return DownloadManager.get(this).merge(args.optString("id"));
+            case "download-forward-prepare": return DownloadManager.get(this).forwardPrepare(args.optString("title"), args.optInt("count"), args.optString("nasTaskId"));
+            case "download-forward-pull": {
+                String nasId = args.optString("nasTaskId");
+                int index = args.optInt("index");
+                byte[] bytes = account.getBytes("api/download/files/" + nasId + "/" + index);
+                return DownloadManager.get(this).forwardPull(args.optString("id"), index, bytes);
+            }
             case "input-edit": setInputEditing(args.optBoolean("active")); return new JSONObject().put("ok", true);
             case "open-url": {
                 String url = args.optString("url");
@@ -655,6 +662,7 @@ public final class MainActivity extends Activity {
                 return account.postJson("api/download/tasks", body);
             }
             case "nas-download-list": return account.getJson("api/download/tasks");
+            case "nas-download-episodes": return account.getJson("api/download/tasks/" + args.optString("id") + "/episodes");
             case "nas-download-cancel": account.deleteJson("api/download/tasks/" + args.optString("id")); return new JSONObject().put("ok", true);
             case "nas-download-merge": return account.postJson("api/download/merge", new JSONObject().put("id", args.optString("id")));
             case "nas-download-retry-failed": return account.postJson("api/download/retry-failed", new JSONObject().put("id", args.optString("id")));

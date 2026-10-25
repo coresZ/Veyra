@@ -958,6 +958,15 @@ function getTask(id, owner, isAdmin) {
   if (!isAdmin && t.owner && t.owner !== owner) return null;
   return publicTask(t);
 }
+/** 原始任务（含 episodes 明细/文件路径信息），供手机拉取分集文件使用 */
+function getRawTask(id, owner, isAdmin) {
+  const t = tasks[id];
+  if (!t) return null;
+  if (!isAdmin && t.owner && t.owner !== owner) return null;
+  return t;
+}
+/** 任务工作目录（DOWNLOAD_DIR/<sanitize title>） */
+function taskDirOf(t) { return taskDir(t); }
 function deleteTask(id, owner, isAdmin) {
   const t = tasks[id];
   if (!t) return false;
@@ -1002,4 +1011,4 @@ function status() {
 loadTasks();
 ensureDirs();
 
-module.exports = { createTask, listTasks, getTask, deleteTask, mergeTask, retryFailedEpisodes, status, DOWNLOAD_DIR, mergeEpisodes };
+module.exports = { createTask, listTasks, getTask, getRawTask, taskDirOf, deleteTask, mergeTask, retryFailedEpisodes, status, DOWNLOAD_DIR, mergeEpisodes, epName, safeJoin };

@@ -91,6 +91,7 @@ final class DownloadManager {
         volatile String output = "";
         volatile String error = "";
         volatile String debug = "";   // 合并/下载详细排查日志（多行，UI 换行展示）
+        volatile String nasTaskId = "";   // 转发模式：NAS 后端任务 id
         final long createdAt = System.currentTimeMillis();
         volatile boolean canceled = false;
 
@@ -384,6 +385,50 @@ final class DownloadManager {
                 }
             } catch (Exception ignored) {}
         }
+    }
+
+    /** 转发模式（proxyMode=3）：创建"NAS 下载→手机拉取"任务。文件由 forwardPull 逐集写入
+     *  downloads/<id>/epNNN.mp4，拉满自动置 ready，可直接走 merge() 合并导出。 */
+    JSONObject forwardPrepare(String title, int count, String nasTaskId) throws Exception {
+        if (title == null || title.trim().isEmpty() || count <= 0) throw new IllegalArgumentException("参数无效");
+        String id = "fwd-" + Long.toHexString(System.currentTimeMillis());
+        JSONArray eps = new JSONArray();
+        for (int i = 0; i < count; i++) eps.put(new JSONObject().put("index", i + 1));
+        Task t = new Task(id, "huangguo", title, eps);
+        t.status = "pulling";
+        t.detail = "等待 NAS 下载完成";
+        t.percent = 3;
+        t.nasTaskId = nasTaskId == null ? "" : nasTaskId;
+        synchronized (tasks) { tasks.add(t); }
+        persist();
+        return t.snapshot();
+    }
+
+    /** 转发模式：写入一集从 NAS 拉取的 mp4（epNNN.mp4）。全部拉满置 ready 可合并。 */
+    JSONObject forwardPull(String id, int index, byte[] bytes) throws Exception {
+        Task found = null;
+        synchronized (tasks) { for (Task t : tasks) if (t.id.equals(id)) { found = t; break; } }
+        if (found == null) throw new IllegalStateException("任务不存在");
+        if (bytes == null || bytes.length == 0) throw new java.io.IOException("拉取内容为空");
+        File dir = new File(context.getFilesDir(), "downloads/" + id);
+        if (!dir.exists() && !dir.mkdirs()) throw new java.io.IOException("无法创建任务目录");
+        File out = new File(dir, String.format(Locale.US, "ep%03d.mp4", index));
+        try (FileOutputStream fos = new FileOutputStream(out)) { fos.write(bytes); }
+        int n = found.episodes.length();
+        int pulled = 0;
+        for (int i = 0; i < n; i++) {
+            File f = new File(dir, String.format(Locale.US, "ep%03d.mp4", i + 1));
+            if (f.exists() && f.length() > 0) pulled++;
+        }
+        found.detail = "已从 NAS 拉取 " + pulled + "/" + n + " 集";
+        found.percent = 8 + Math.round(80f * pulled / n);
+        if (pulled == n) {
+            found.status = "ready";
+            found.detail = "已拉取全部 " + n + " 集，可合并";
+            found.percent = 90;
+        }
+        persist();
+        return found.snapshot();
     }
 
     /** 手动合并：等待合并信号后执行（任务须处于 ready/failed 状态；合并失败保留分集可重试）。 */
