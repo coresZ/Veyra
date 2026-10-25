@@ -882,7 +882,11 @@ final class DownloadManager {
                 for (int i = 0; i < segKeys.size(); i++) {
                     String ku = segKeys.get(i);
                     if (ku == null || keyFiles.containsKey(ku)) continue;
-                    downloadToFile(ku, new File(work, "key-" + keyIdx + ".key"), dlBytes, totalBytes);
+                    File kf = new File(work, "key-" + keyIdx + ".key");
+                    // KEY 复用：重试时已存在且非空直接跳过
+                    if (!(kf.exists() && kf.length() > 0)) {
+                        downloadToFile(ku, kf, dlBytes, totalBytes);
+                    }
                     keyFiles.put(ku, "key-" + keyIdx + ".key");
                     if (i < segIVs.size() && segIVs.get(i) != null && !segIVs.get(i).isEmpty())
                         keyIVs.put(ku, segIVs.get(i));
@@ -910,7 +914,11 @@ final class DownloadManager {
                             task.detail = "下载中 第 " + (idx + 1) + "/" + segN + " 片…";
                             task.debug = "第 " + n + " 集：正在下载第 " + (idx + 1) + "/" + segN + " 片…";
                             String name = String.format(Locale.US, "seg-%04d.ts", idx);
-                            downloadToFile(segUris.get(idx), new File(work, name), dlBytes, totalBytes);
+                            File segFile = new File(work, name);
+                            // 分片复用：重试时已存在且非空的分片直接跳过（合并失败保留的 ts 不再重复下载）
+                            if (!(segFile.exists() && segFile.length() > 0)) {
+                                downloadToFile(segUris.get(idx), segFile, dlBytes, totalBytes);
+                            }
                             segFiles[idx] = name;
                             // 进度=真正完成片数（精确），并显示实时下载速度
                             int done = segDone.incrementAndGet();
