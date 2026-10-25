@@ -1095,9 +1095,9 @@ async function submitDownloadTo(target) {
       toast('已提交 NAS 下载任务（后端自行解析取流）');
     } else {
       // 下载到手机。
-      // 黄果源 + 走后端转发(proxyMode=3)：NAS 后端全权下载（解析/分片/解密/转码全在后端，复用已验证稳定链路），
+      // 走后端转发(proxyMode=3)：红果/黄果都走 NAS 后端全权下载（解析/分片/解密/转码全在后端，复用已验证稳定链路），
       // 完成后手机拉取 mp4 → 删 NAS 原文件 → 手机合并导出。手机端不再碰 m3u8 解析/分片/remux。
-      if (privateMode() && state.proxyMode === 3) {
+      if (state.proxyMode === 3) {
         const r = await api('nas-download-start', { source: contentSource, title: state.detail.title, seriesId: String(state.detail.seriesId || state.detail.id), episodes });
         const nasTaskId = String((r && r.task && r.task.id) || (r && r.id) || '');
         if (!nasTaskId) throw new Error('NAS 任务创建失败');
