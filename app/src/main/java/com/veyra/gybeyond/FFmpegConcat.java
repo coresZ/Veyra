@@ -1,6 +1,7 @@
 package com.veyra.gybeyond;
 
 import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import org.bytedeco.ffmpeg.avcodec.AVPacket;
@@ -175,7 +176,20 @@ final class FFmpegConcat {
             org.bytedeco.ffmpeg.global.avutil.av_dict_set(opts, "allowed_extensions", "ALL", 0);
             AVFormatContext inCtx = new AVFormatContext();
             int rc = org.bytedeco.ffmpeg.global.avformat.avformat_open_input(inCtx, playlistPath, null, opts);
-            if (rc < 0) return "打开 m3u8 失败 rc=" + rc;
+            if (rc < 0) {
+                // 附上本地 playlist 头部，报错可直接定位为什么 hls 解析失败（-22=无法识别为合法 HLS）
+                StringBuilder head = new StringBuilder();
+                try {
+                    File pf = new File(playlistPath);
+                    if (pf.exists()) {
+                        String s = new String(java.nio.file.Files.readAllBytes(pf.toPath()), StandardCharsets.UTF_8);
+                        String[] lines = s.split("\r?\n");
+                        for (int li = 0; li < Math.min(15, lines.length); li++) head.append("|").append(lines[li]).append('\n');
+                        head.append("...共").append(lines.length).append("行 ").append(pf.length()).append("B");
+                    } else head.append("playlist 不存在");
+                } catch (Throwable ignored) { }
+                return "打开 m3u8 失败 rc=" + rc + "\nplaylist 头部:\n" + head;
+            }
             rc = org.bytedeco.ffmpeg.global.avformat.avformat_find_stream_info(inCtx, (AVDictionary) null);
             if (rc < 0) { org.bytedeco.ffmpeg.global.avformat.avformat_free_context(inCtx); return "读取流信息失败 rc=" + rc; }
             AVFormatContext outCtx = new AVFormatContext();
