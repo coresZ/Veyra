@@ -768,13 +768,15 @@ final class DownloadManager {
                     keyIdx++;
                 }
             }
-            // 并发下载分片
+            // 并发下载分片（12 并发提速）
             final int segN = segUris.size();
             final String[] segFiles = new String[segN];
             final AtomicInteger nextSeg = new AtomicInteger();
-            ExecutorService pool = Executors.newFixedThreadPool(Math.min(6, Math.max(1, segN)));
+            final AtomicLong lastBytes = new AtomicLong();
+            final AtomicLong lastTime = new AtomicLong(System.currentTimeMillis());
+            ExecutorService pool = Executors.newFixedThreadPool(Math.min(12, Math.max(1, segN)));
             List<Future<?>> futs = new ArrayList<>();
-            for (int i = 0; i < Math.min(6, segN); i++) {
+            for (int i = 0; i < Math.min(12, segN); i++) {
                 futs.add(pool.submit(() -> {
                     try {
                         while (!task.canceled) {
@@ -783,10 +785,16 @@ final class DownloadManager {
                             String name = String.format(Locale.US, "seg-%04d.ts", idx);
                             downloadToFile(segUris.get(idx), new File(work, name), dlBytes, totalBytes);
                             segFiles[idx] = name;
-                            // 分片进度反馈：每片完成即刷新，用户实时看到进度推进
+                            // 分片进度反馈：每片完成即刷新，并显示实时下载速度，用户能看到在推进
                             int done = Math.min(nextSeg.get(), segN);
-                            task.detail = "下载中 " + done + "/" + segN + " 片";
-                            task.debug = "第 " + n + " 集：下载分片 " + done + "/" + segN;
+                            long now = System.currentTimeMillis();
+                            long lb = lastBytes.getAndSet(dlBytes.get());
+                            long lt = lastTime.getAndSet(now);
+                            long dt = now - lt;
+                            double mbps = dt > 0 ? (dlBytes.get() - lb) / 1024.0 / 1024.0 / (dt / 1000.0) : 0;
+                            task.detail = String.format(Locale.US, "下载中 %d/%d 片 · %.1fMB/s", done, segN, mbps);
+                            task.debug = "第 " + n + " 集：下载分片 " + done + "/" + segN
+                                + String.format(Locale.US, " · %.1fMB/s", mbps);
                         }
                     } catch (Exception e) {
                         throw new RuntimeException(e);
