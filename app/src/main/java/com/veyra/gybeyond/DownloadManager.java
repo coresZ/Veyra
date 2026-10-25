@@ -702,30 +702,42 @@ final class DownloadManager {
 
     private void downloadToFile(String url, File out, AtomicLong dlBytes, AtomicLong totalBytes) throws Exception {
         url = curlSafeUrl(url);
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setConnectTimeout(15_000);
-        conn.setReadTimeout(90_000);
-        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36");
-        try {
-            int code = conn.getResponseCode();
-            if (code != 200) throw new java.io.IOException("下载失败 HTTP " + code);
-            long total = conn.getContentLengthLong();
-            totalBytes.addAndGet(Math.max(total, 0));
-            try (InputStream in = conn.getInputStream(); FileOutputStream fos = new FileOutputStream(out)) {
-                byte[] buffer = new byte[128 * 1024];
-                int k; long received = 0;
-                long startMs = System.currentTimeMillis();
-                while ((k = in.read(buffer)) > 0) {
-                    fos.write(buffer, 0, k);
-                    received += k;
-                    dlBytes.addAndGet(k);
-                    // 单片硬超时：源站/代理流式挂起（持续小数据不触发 readTimeout）时强制放弃，避免任务永远卡住
-                    if (System.currentTimeMillis() - startMs > 300_000) {
-                        throw new java.io.IOException("分片下载超时（>5分钟），请重试");
+        // 单片 2 分钟硬超时 + 最多 3 次自动重试（换新连接）：源站/代理流式挂起时不再无限卡，正常分片 2 分钟必完
+        Exception lastErr = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+                conn.setConnectTimeout(15_000);
+                conn.setReadTimeout(60_000);
+                conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36");
+                try {
+                    int code = conn.getResponseCode();
+                    if (code != 200) throw new java.io.IOException("下载失败 HTTP " + code);
+                    long total = conn.getContentLengthLong();
+                    totalBytes.addAndGet(Math.max(total, 0));
+                    try (InputStream in = conn.getInputStream(); FileOutputStream fos = new FileOutputStream(out)) {
+                        byte[] buffer = new byte[128 * 1024];
+                        int k; long received = 0;
+                        long startMs = System.currentTimeMillis();
+                        while ((k = in.read(buffer)) > 0) {
+                            fos.write(buffer, 0, k);
+                            received += k;
+                            dlBytes.addAndGet(k);
+                            // 单片硬超时：源站/代理流式挂起（持续小数据不触发 readTimeout）时强制放弃重试
+                            if (System.currentTimeMillis() - startMs > 120_000) {
+                                throw new java.io.IOException("分片下载超时（>2分钟）");
+                            }
+                        }
                     }
-                }
+                } finally { conn.disconnect(); }
+                return;   // 成功
+            } catch (Exception e) {
+                lastErr = e;
+                out.delete();
+                if (attempt < 3) Thread.sleep(600L * attempt);
             }
-        } finally { conn.disconnect(); }
+        }
+        throw lastErr;
     }
 
     /** 黄果 m3u8 下载：展开 → 拉 KEY/分片（并发）→ 本地 playlist → ffmpeg remux mp4 → 清理。
@@ -772,6 +784,7 @@ final class DownloadManager {
             final int segN = segUris.size();
             final String[] segFiles = new String[segN];
             final AtomicInteger nextSeg = new AtomicInteger();
+            final AtomicInteger segDone = new AtomicInteger();   // 真正完成的片数（进度精确，不再用"已分配"误导）
             final AtomicLong lastBytes = new AtomicLong();
             final AtomicLong lastTime = new AtomicLong(System.currentTimeMillis());
             ExecutorService pool = Executors.newFixedThreadPool(Math.min(12, Math.max(1, segN)));
@@ -785,15 +798,15 @@ final class DownloadManager {
                             String name = String.format(Locale.US, "seg-%04d.ts", idx);
                             downloadToFile(segUris.get(idx), new File(work, name), dlBytes, totalBytes);
                             segFiles[idx] = name;
-                            // 分片进度反馈：每片完成即刷新，并显示实时下载速度，用户能看到在推进
-                            int done = Math.min(nextSeg.get(), segN);
+                            // 进度=真正完成片数（精确），并显示实时下载速度
+                            int done = segDone.incrementAndGet();
                             long now = System.currentTimeMillis();
                             long lb = lastBytes.getAndSet(dlBytes.get());
                             long lt = lastTime.getAndSet(now);
                             long dt = now - lt;
                             double mbps = dt > 0 ? (dlBytes.get() - lb) / 1024.0 / 1024.0 / (dt / 1000.0) : 0;
-                            task.detail = String.format(Locale.US, "下载中 %d/%d 片 · %.1fMB/s", done, segN, mbps);
-                            task.debug = "第 " + n + " 集：下载分片 " + done + "/" + segN
+                            task.detail = String.format(Locale.US, "下载中 已完成 %d/%d 片 · %.1fMB/s", done, segN, mbps);
+                            task.debug = "第 " + n + " 集：已完成 " + done + "/" + segN + " 片"
                                 + String.format(Locale.US, " · %.1fMB/s", mbps);
                         }
                     } catch (Exception e) {
@@ -813,6 +826,8 @@ final class DownloadManager {
             if (task.canceled) return;
             for (int i = 0; i < segN; i++) {
                 if (segFiles[i] == null) throw new java.io.IOException("分片下载不完整（第 " + (i + 1) + "/" + segN + " 片缺失）");
+                File sf = new File(work, segFiles[i]);
+                if (!sf.exists() || sf.length() == 0) throw new java.io.IOException("分片文件无效（第 " + (i + 1) + "/" + segN + " 片大小异常）");
             }
             // 本地 playlist（相对路径；每段按需写 KEY 行，ffmpeg 原生 AES-128 解密）
             File playlist = new File(work, "play.m3u8");
