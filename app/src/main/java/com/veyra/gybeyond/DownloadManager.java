@@ -871,14 +871,25 @@ final class DownloadManager {
 
     private void downloadToFile(String url, File out, AtomicLong dlBytes, AtomicLong totalBytes) throws Exception {
         url = curlSafeUrl(url);
-        // 单片 90s 硬超时 + 最多 2 次自动重试（换新连接）：源站/代理流式挂起时快速失败报错可重试，不无限卡
+        // 单片 60s 绝对硬超时（看门狗强制断开连接，覆盖部分 ROM readTimeout 对流式挂起失效——read 阻塞时
+        // 永不返回，进度卡死）+ 最多 2 次自动重试（换新连接）。每片最多 ~2 分钟，绝不无限卡。
         Exception lastErr = null;
         for (int attempt = 1; attempt <= 2; attempt++) {
+            final HttpURLConnection[] connRef = new HttpURLConnection[1];
+            Thread wd = null;
             try {
                 HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+                connRef[0] = conn;
                 conn.setConnectTimeout(10_000);
                 conn.setReadTimeout(30_000);
                 conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36");
+                // 看门狗：60s 后强制 disconnect（阻塞的 in.read 立刻抛 SocketException → 走重试）
+                wd = new Thread(() -> {
+                    try { Thread.sleep(60_000); HttpURLConnection c = connRef[0]; if (c != null) try { c.disconnect(); } catch (Exception ignored) {} }
+                    catch (InterruptedException ignored) {}
+                });
+                wd.setDaemon(true);
+                wd.start();
                 try {
                     int code = conn.getResponseCode();
                     if (code != 200) throw new java.io.IOException("下载失败 HTTP " + code);
@@ -892,9 +903,9 @@ final class DownloadManager {
                             fos.write(buffer, 0, k);
                             received += k;
                             dlBytes.addAndGet(k);
-                            // 单片硬超时：源站/代理流式挂起（持续小数据不触发 readTimeout）时强制放弃重试
-                            if (System.currentTimeMillis() - startMs > 90_000) {
-                                throw new java.io.IOException("分片下载超时（>90秒）");
+                            // 收到数据时也检查硬超时：持续小数据流（不触发 readTimeout）时强制放弃重试
+                            if (System.currentTimeMillis() - startMs > 55_000) {
+                                throw new java.io.IOException("分片下载超时（>55秒）");
                             }
                         }
                     }
@@ -904,6 +915,8 @@ final class DownloadManager {
                 lastErr = e;
                 out.delete();
                 if (attempt < 2) Thread.sleep(400L * attempt);
+            } finally {
+                if (wd != null) wd.interrupt();
             }
         }
         throw lastErr;
