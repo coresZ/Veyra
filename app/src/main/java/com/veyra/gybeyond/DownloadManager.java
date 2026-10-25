@@ -350,7 +350,10 @@ final class DownloadManager {
                     }
                     try {
                         if ("hongguo".equals(task.source)) downloadHongguo(task, url, key, out, idx, dlBytes, totalBytes, n);
-                        else if (isHuangguoM3u8Url(url)) downloadM3u8(task, url, out, dlBytes, totalBytes, idx + 1);
+                        else if (isHuangguoM3u8Url(url)) {
+                            downloadM3u8(task, url, out, dlBytes, totalBytes, idx + 1);
+                            ep.put("src", "hg");   // 黄果标记：单集已是方案2合并的标准 mp4，跳过后续 concat 转码
+                        }
                         else downloadPlain(task, url, out, dlBytes, totalBytes, n);
                         ep.put("dlv", "raw-v2");   // 标记新格式（随任务持久化，重试时据此判定可复用）
                         plainArr[idx] = out;
@@ -390,9 +393,17 @@ final class DownloadManager {
                 task.doneCount = i + 1;
                 JSONObject ep = task.episodes.optJSONObject(i);
                 String key = ep != null ? ep.optString("key", "") : "";
+                boolean isHg = ep != null && "hg".equals(ep.optString("src", ""));
                 try {
                     File norm = new File(dir, "norm_" + (i + 1) + ".mp4");
-                    if (!norm.exists() || norm.length() == 0) {
+                    if (isHg) {
+                        // 黄果：单集已是方案2合并的标准 mp4，直接复制导出，跳过 native concat
+                        //（libffconcat 对 h264 输入 + hev1 输出会卡死，UI 停在合并中）
+                        if (!norm.exists() || norm.length() == 0) {
+                            java.nio.file.Files.copy(plain.get(i).toPath(), norm.toPath(),
+                                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                        }
+                    } else if (!norm.exists() || norm.length() == 0) {
                         List<File> single = new ArrayList<>();
                         single.add(plain.get(i));
                         List<String> singleKey = new ArrayList<>();
