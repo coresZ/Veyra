@@ -717,10 +717,14 @@ final class DownloadManager {
                 || url.contains("video.225600.xyz");   // 仅直连模式下 episode source 是源站 m3u8 直链，兜底识别
     }
 
-    /** 递归展开 m3u8（代理已把 URI 重写为绝对代理 URL）：收集分片、每段对应 KEY URL 与显式 IV。 */
-    private void expandM3u8(String url, List<String> segs, List<String> segKeys, List<String> segIVs, int depth) throws Exception {
+    /** 递归展开 m3u8（代理已把 URI 重写为绝对代理 URL）：收集分片、每段对应 KEY URL 与显式 IV。
+     *  每次拉取后刷新 task.detail，让"解析 m3u8 播放列表…"有实时进度（已展开条目/已收集分片），
+     *  避免用户面对无进度转圈；fetchBytes 已有 connect/read 超时兜底。 */
+    private void expandM3u8(String url, List<String> segs, List<String> segKeys, List<String> segIVs, int depth, Task task, int n) throws Exception {
         if (depth > 6) throw new java.io.IOException("m3u8 层级过深");
         if (++expandCount > 400) throw new java.io.IOException("m3u8 展开条目过多（>400），疑似变种列表循环");
+        task.detail = "解析 m3u8 播放列表… 条目 " + expandCount + "、分片 " + segs.size();
+        task.debug = "第 " + n + " 集：解析 m3u8… 条目 " + expandCount + "、分片 " + segs.size();
         String text = new String(fetchBytes(url), StandardCharsets.UTF_8);
         String currentKey = null;
         String currentIV = "";
@@ -750,7 +754,7 @@ final class DownloadManager {
                         // 非播放列表：该 URL 实际是分片，直接纳入分片列表
                         segs.add(uri); segKeys.add(currentKey); segIVs.add(currentIV);
                     } else {
-                        expandM3u8(uri, segs, segKeys, segIVs, depth + 1);
+                        expandM3u8(uri, segs, segKeys, segIVs, depth + 1, task, n);
                     }
                 } else { segs.add(uri); segKeys.add(currentKey); segIVs.add(currentIV); }
                 expectSub = false;
@@ -774,7 +778,7 @@ final class DownloadManager {
         url = curlSafeUrl(url);
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setConnectTimeout(15_000);
-        conn.setReadTimeout(60_000);
+        conn.setReadTimeout(20_000);   // 解析阶段都是小文件；过长会掩盖源/代理卡死
         conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36");
         try {
             int code = conn.getResponseCode();
@@ -867,7 +871,7 @@ final class DownloadManager {
             ExecutorService expandPool = Executors.newSingleThreadExecutor();
             try {
                 Future<?> fe = expandPool.submit(() -> {
-                    try { expandM3u8(url, segUris, segKeys, segIVs, 0); }
+                    try { expandM3u8(url, segUris, segKeys, segIVs, 0, task, n); }
                     catch (Throwable t) { throw new RuntimeException(t); }
                 });
                 try {
