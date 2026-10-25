@@ -178,7 +178,7 @@ final class FFmpegConcat {
             // 写回，必须用 PointerPointer 接收（直接用 new AVFormatContext() 传结构指针会被 C 端
             // 当作 ** 解引用，读到 av_class 垃圾导致 rc=-22 打不开任何 playlist）
             org.bytedeco.javacpp.PointerPointer inPp = new org.bytedeco.javacpp.PointerPointer(1);
-            int rc = org.bytedeco.ffmpeg.global.avformat.avformat_open_input(inPp, playlistPath, null, new org.bytedeco.javacpp.PointerPointer(opts));
+            int rc = org.bytedeco.ffmpeg.global.avformat.avformat_open_input(inPp, new org.bytedeco.javacpp.BytePointer(playlistPath), null, new org.bytedeco.javacpp.PointerPointer(opts));
             if (rc < 0) {
                 // 附上本地 playlist 头部，报错可直接定位为什么 hls 解析失败（-22=无法识别为合法 HLS）
                 StringBuilder head = new StringBuilder();
@@ -197,7 +197,7 @@ final class FFmpegConcat {
             rc = org.bytedeco.ffmpeg.global.avformat.avformat_find_stream_info(inCtx, (AVDictionary) null);
             if (rc < 0) { org.bytedeco.ffmpeg.global.avformat.avformat_free_context(inCtx); return "读取流信息失败 rc=" + rc; }
             org.bytedeco.javacpp.PointerPointer outPp = new org.bytedeco.javacpp.PointerPointer(1);
-            rc = org.bytedeco.ffmpeg.global.avformat.avformat_alloc_output_context2(outPp, null, "mp4", outputPath);
+            rc = org.bytedeco.ffmpeg.global.avformat.avformat_alloc_output_context2(outPp, null, new org.bytedeco.javacpp.BytePointer("mp4"), new org.bytedeco.javacpp.BytePointer(outputPath));
             if (rc < 0) { org.bytedeco.ffmpeg.global.avformat.avformat_free_context(inCtx); return "创建输出上下文失败 rc=" + rc; }
             AVFormatContext outCtx = new AVFormatContext(outPp.get(0));
             for (int i = 0; i < inCtx.nb_streams(); i++) {
@@ -213,7 +213,7 @@ final class FFmpegConcat {
             }
             // avio_open 同样是输出参数（AVIOContext**），用 PointerPointer 接收并把 io 写回 outCtx.pb
             org.bytedeco.javacpp.PointerPointer ioPp = new org.bytedeco.javacpp.PointerPointer(1);
-            rc = org.bytedeco.ffmpeg.global.avformat.avio_open(ioPp, outputPath, org.bytedeco.ffmpeg.global.avformat.AVIO_FLAG_WRITE);
+            rc = org.bytedeco.ffmpeg.global.avformat.avio_open(ioPp, new org.bytedeco.javacpp.BytePointer(outputPath), org.bytedeco.ffmpeg.global.avformat.AVIO_FLAG_WRITE);
             if (rc < 0) {
                 org.bytedeco.ffmpeg.global.avformat.avformat_free_context(inCtx);
                 org.bytedeco.ffmpeg.global.avformat.avformat_free_context(outCtx);
