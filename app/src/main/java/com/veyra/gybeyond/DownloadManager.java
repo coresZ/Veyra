@@ -1223,7 +1223,7 @@ final class DownloadManager {
                         }
                         // 编码/音频校验（对齐红果 normalizeEpisode 口径）：记录源编码与音频参数
                         String vmime2 = fv.getString(MediaFormat.KEY_MIME);
-                        String vmimeOk = (vmime2 != null && (vmime2.startsWith("video/avc") || vmime2.startsWith("video/hevc")));
+                        boolean vmimeOk = (vmime2 != null && (vmime2.startsWith("video/avc") || vmime2.startsWith("video/hevc")));
                         dbg.append("视频: ").append(vmime2 == null ? "?" : vmime2)
                             .append(' ').append(fv.getInteger(MediaFormat.KEY_WIDTH)).append('x').append(fv.getInteger(MediaFormat.KEY_HEIGHT))
                             .append(" csd=").append(fv.containsKey("csd-0") ? "内置" : "提取")
