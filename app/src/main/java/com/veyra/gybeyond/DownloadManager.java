@@ -1059,6 +1059,8 @@ final class DownloadManager {
                 java.nio.file.Files.write(playlist.toPath(), sb.toString().getBytes(StandardCharsets.UTF_8));
             }
             }   // else：本地已有 playlist → 跳过解析/下载，直接进合并
+            // 下载/复用后：把密文 TS 统一解密为明文（TS 文件可直接播放；合并检测 0x47 直接用明文）
+            try { decryptTsToPlain(work, playlist); } catch (Exception de) { /* 解密失败保留密文，合并时再试 */ }
             StringBuilder dbg = new StringBuilder();
             File tmpOut = new File(work, "ep.mp4");
             // 方案2（无 ffmpeg）：Cipher 解密 ts → full.ts 字节拼接 → MediaExtractor/MediaMuxer 重封装。
@@ -1087,18 +1089,86 @@ final class DownloadManager {
                     throw new RuntimeException(cause);
                 }
             } finally { remuxPool.shutdownNow(); }
-            task.debug = "第 " + n + " 集：合并完成";
-            // 产物移到正式分集路径；移动失败则复制（跨目录 rename 一般可成）
-            if (!tmpOut.renameTo(out)) {
-                java.nio.file.Files.copy(tmpOut.toPath(), out.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                tmpOut.delete();
+            task.debug = "第 " + n + " 集：合并完成，移动产物…";
+            // 产物移动/落位/清理全部带分段日志与异常兜底：任何一步慢/失败都不让任务永久卡在"合并中"
+            boolean moved = tmpOut.renameTo(out);
+            if (!moved) {
+                task.debug = "第 " + n + " 集：移动失败，复制产物…";
+                try {
+                    java.nio.file.Files.copy(tmpOut.toPath(), out.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    tmpOut.delete();
+                    moved = true;
+                } catch (Exception ce) {
+                    task.debug = "第 " + n + " 集：产物落位失败: " + ce.getMessage();
+                }
             }
-            if (!out.exists() || out.length() < 1024) throw new java.io.IOException("m3u8 转 mp4 产物无效");
-            segOk = true;   // 本集合并成功，产物已落位
+            if (moved && out.exists() && out.length() >= 1024) {
+                segOk = true;   // 本集合并成功，产物已落位
+                task.debug = "第 " + n + " 集：合并完成（产物 " + out.length() + "B）";
+            } else {
+                task.debug = "第 " + n + " 集：合并完成但产物未落位，请重试";
+                throw new java.io.IOException("第 " + n + " 集合并产物未落位");
+            }
         } finally {
             // 合并成功后清理本集临时目录（ts/KEY/playlist/半成品）；失败保留 ts，
             // 文件管理器可见已下载分片（下多少存多少，与后端落盘一致）
-            if (segOk) deleteRecursively(work);
+            if (segOk) {
+                try { deleteRecursively(work); } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    /** 下载完成后把密文 TS 解密为明文（0x47 开头）：TS 文件可直接播放（用户要求"之前版本可播"），
+     *  合并也直接用明文（mergeTsToMp4 检测 0x47 跳过再解密）。已明文的片跳过；解密失败保留密文
+     *  （合并时再尝试），不阻塞下载。IV 规则与 mergeTsToMp4 一致（显式 IV / mediaSeq 大端 fallback）。 */
+    private static void decryptTsToPlain(File work, File playlist) throws Exception {
+        String text = new String(java.nio.file.Files.readAllBytes(playlist.toPath()), StandardCharsets.UTF_8);
+        List<String> segNames = new ArrayList<>();
+        List<String> segKeys = new ArrayList<>();
+        List<String> segIVs = new ArrayList<>();
+        int mediaSeq = 0;
+        String curKey = null, curIV = "";
+        java.util.regex.Matcher km = java.util.regex.Pattern.compile("URI=\"([^\"]+)\"").matcher("");
+        java.util.regex.Matcher im = java.util.regex.Pattern.compile("IV=([0-9a-fA-Fx]+)").matcher("");
+        for (String raw : text.split("\r?\n")) {
+            String line = raw.trim();
+            if (line.startsWith("#EXT-X-KEY")) {
+                km.reset(line); curKey = km.find() ? km.group(1) : null;
+                im.reset(line); curIV = im.find() ? im.group(1) : "";
+            } else if (line.startsWith("#EXT-X-MEDIA-SEQUENCE")) {
+                int p = line.indexOf(':');
+                if (p >= 0) { try { mediaSeq = Integer.parseInt(line.substring(p + 1).trim()); } catch (Exception ignored) {} }
+            } else if (!line.isEmpty() && !line.startsWith("#")) {
+                segNames.add(line); segKeys.add(curKey); segIVs.add(curIV);
+            }
+        }
+        Map<String, byte[]> keyBytes = new HashMap<>();
+        for (String k : segKeys) {
+            if (k == null || keyBytes.containsKey(k)) continue;
+            File kf = new File(work, k);
+            if (kf.exists() && kf.length() > 0) keyBytes.put(k, java.nio.file.Files.readAllBytes(kf.toPath()));
+        }
+        int decOk = 0;
+        for (int i = 0; i < segNames.size(); i++) {
+            File seg = new File(work, segNames.get(i));
+            if (!seg.exists() || seg.length() == 0) continue;
+            byte[] head = new byte[2];
+            try (java.io.FileInputStream fis = new java.io.FileInputStream(seg)) {
+                if (fis.read(head) == 2 && (head[0] & 0xFF) == 0x47 && (head[1] & 0xFF) == 0x40) continue;   // 已明文
+            }
+            byte[] key = keyBytes.get(segKeys.get(i));
+            if (key == null || key.length != 16) continue;
+            try {
+                byte[] enc = java.nio.file.Files.readAllBytes(seg.toPath());
+                Cipher c = Cipher.getInstance("AES/CBC/NoPadding");
+                c.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(ivForSeg(segIVs, i, mediaSeq)));
+                byte[] dec = c.doFinal(enc);
+                java.nio.file.Files.write(seg.toPath(), dec);
+                decOk++;
+            } catch (Exception ignored) {}
+        }
+        if (decOk > 0) {
+            // 记录解密成功（合并日志可见；失败保留密文合并时再试）
         }
     }
 
@@ -1164,14 +1234,19 @@ final class DownloadManager {
                 byte[] enc = java.nio.file.Files.readAllBytes(seg.toPath());
                 byte[] key = keyBytes.get(segKeys.get(i));
                 if (key == null) throw new java.io.IOException("缺少分片 KEY: " + segNames.get(i));
-                byte[] iv = ivForSeg(segIVs, i, mediaSeq);
                 byte[] dec;
-                try {
-                    Cipher c = Cipher.getInstance("AES/CBC/NoPadding");
-                    c.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
-                    dec = c.doFinal(enc);
-                } catch (Exception ce) {
-                    throw new java.io.IOException("分片解密失败 " + segNames.get(i) + ": " + ce);
+                // 已明文（下载后 decryptTsToPlain 解密过，0x47 开头）→ 直接复用；密文才走 Cipher
+                if (enc.length >= 1 && (enc[0] & 0xFF) == 0x47 && (enc.length < 2 || (enc[1] & 0xFF) == 0x40)) {
+                    dec = enc;
+                } else {
+                    byte[] iv = ivForSeg(segIVs, i, mediaSeq);
+                    try {
+                        Cipher c = Cipher.getInstance("AES/CBC/NoPadding");
+                        c.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
+                        dec = c.doFinal(enc);
+                    } catch (Exception ce) {
+                        throw new java.io.IOException("分片解密失败 " + segNames.get(i) + ": " + ce);
+                    }
                 }
                 File df = new File(work, String.format(Locale.US, "dec-%04d.ts", i));
                 java.nio.file.Files.write(df.toPath(), dec);
