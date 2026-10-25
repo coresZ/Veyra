@@ -397,7 +397,13 @@ final class DownloadManager {
             persist();
             return;
         } catch (Exception e) {
-            if (!task.canceled) { task.status = "failed"; task.error = e.getMessage() == null ? "下载失败" : e.getMessage(); task.detail = "失败"; }
+            if (!task.canceled) {
+                task.status = "failed";
+                // 内部（如合并失败）已写详细 task.error 时保留，不覆盖成短消息
+                if (task.error == null || task.error.isEmpty())
+                    task.error = e.getMessage() == null ? "下载失败" : e.getMessage();
+                task.detail = "失败";
+            }
         } finally {
             persist();
             // 调试模式：保留已下载分集（ep*.mp4）与合并产物副本，供换版本后直接重新合并；
@@ -973,7 +979,16 @@ final class DownloadManager {
                     fr.get(120, TimeUnit.SECONDS);
                 } catch (TimeoutException te) {
                     fr.cancel(true);
+                    // 超时也要留合并日志，用户能看卡在哪
+                    task.error = "第 " + n + " 集 m3u8 合并超时（120s）\n" + dbg;
+                    task.debug = "第 " + n + " 集：合并超时（120s），详见合并日志";
                     throw new java.io.IOException("第 " + n + " 集 m3u8 合并超时（120s），请重试");
+                } catch (java.util.concurrent.ExecutionException ee) {
+                    // 合并失败：把 m3u8ToMp4 详细日志写进任务，不再让 debug 残留下载阶段的"已完成 X/Y 片"
+                    Throwable cause = ee.getCause() != null ? ee.getCause() : ee;
+                    task.error = "第 " + n + " 集合并失败: " + cause + "\n" + dbg;
+                    task.debug = "第 " + n + " 集：合并失败，详见合并日志";
+                    throw new RuntimeException(cause);
                 }
             } finally { remuxPool.shutdownNow(); }
             task.debug = "第 " + n + " 集：合并完成";
