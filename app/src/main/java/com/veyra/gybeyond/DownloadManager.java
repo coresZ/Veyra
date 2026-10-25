@@ -1244,8 +1244,9 @@ final class DownloadManager {
                         muxer.start();
                         started = true;
                     }
-                    if (ev >= 0) ex.selectTrack(ev);
-                    if (ea >= 0) ex.selectTrack(ea);
+                    // 不调用 selectTrack：MediaExtractor 一次只能选一个轨，双 select 只读到最后
+                    // 选中的轨（视频轨 0 样本 → MediaMuxer 内部报错被吞，stop() 才抛 would have stopped already）。
+                    // 不 select 时 extractor 交错返回全部轨，getSampleTrackIndex() 分流视频/音频。
                     long vBase = -1, aBase = -1, vMax = 0, aMax = 0;
                     while (true) {
                         long sz = ex.getSampleSize();
