@@ -1221,6 +1221,23 @@ final class DownloadManager {
                             if (asc == null) throw new java.io.IOException("无法构造音频 csd(ADTS)");
                             fa.setByteBuffer("csd-0", asc);
                         }
+                        // 编码/音频校验（对齐红果 normalizeEpisode 口径）：记录源编码与音频参数
+                        String vmime2 = fv.getString(MediaFormat.KEY_MIME);
+                        String vmimeOk = (vmime2 != null && (vmime2.startsWith("video/avc") || vmime2.startsWith("video/hevc")));
+                        dbg.append("视频: ").append(vmime2 == null ? "?" : vmime2)
+                            .append(' ').append(fv.getInteger(MediaFormat.KEY_WIDTH)).append('x').append(fv.getInteger(MediaFormat.KEY_HEIGHT))
+                            .append(" csd=").append(fv.containsKey("csd-0") ? "内置" : "提取")
+                            .append(vmimeOk ? "" : " [编码非 H264/HEVC，播放兼容性未知]")
+                            .append('\n');
+                        if (fa != null) {
+                            String amime = fa.getString(MediaFormat.KEY_MIME);
+                            boolean aOk = amime != null && (amime.startsWith("audio/mp4a") || amime.startsWith("audio/aac"));
+                            dbg.append("音频: ").append(amime == null ? "?" : amime)
+                                .append(" 采样率=").append(fa.getInteger(MediaFormat.KEY_SAMPLE_RATE))
+                                .append(" 声道=").append(fa.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
+                                .append(aOk ? "" : " [音频非 AAC，播放兼容性未知]")
+                                .append('\n');
+                        } else dbg.append("音频: 无音频轨（仅视频）\n");
                         vTrack = muxer.addTrack(fv);
                         aTrack = fa != null ? muxer.addTrack(fa) : -1;
                         muxer.start();
@@ -1255,6 +1272,20 @@ final class DownloadManager {
                             long pts = aLast + rel;
                             if (pts <= aLast) pts = aLast + 1;
                             aLast = pts;
+                            // TS 音频 sample 是 ADTS 帧（含头），mp4 的 AAC 轨必须 raw AAC——剥头。
+                            // 头长：protection_absent=1 → 7B，=0 → 9B（第 6 字节 bit0）
+                            if (n > 7 && (buf.get(0) & 0xFF) == 0xFF && (buf.get(1) & 0xF0) == 0xF0) {
+                                int hlen = ((buf.get(6) & 0x01) == 0) ? 9 : 7;
+                                if (n - hlen > 0) {
+                                    buf.position(0);
+                                    bi.set(hlen, n - hlen, pts, flags);
+                                    muxer.writeSampleData(aTrack, buf, bi);
+                                    aCnt++;
+                                    ex.advance();
+                                    continue;
+                                }
+                            }
+                            buf.position(0);
                             bi.set(0, n, pts, flags);
                             muxer.writeSampleData(aTrack, buf, bi);
                             aCnt++;
