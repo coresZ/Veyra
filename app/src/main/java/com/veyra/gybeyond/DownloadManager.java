@@ -161,16 +161,24 @@ final class DownloadManager {
                 tasks.add(t);
             }
         } catch (Exception ignored) { }
-        // 孤儿目录清理：files/downloads/ 下已无任务记录的历史目录（旧版 delete 只删产物不删分集，
-        // 遗留大量 ep*.mp4 密文分集 + seg_v6 规范化缓存 + merged.mp4，导致存储膨胀）一次性删除。
+        // 孤儿目录清理：downloads/ 与公共 Download/Veyra 下已无任务记录的历史目录
+        // （旧版 delete 只删产物不删分集，遗留大量 ep*.mp4 密文分集 + seg_v6 规范化缓存 + merged.mp4，
+        //  导致存储膨胀）一次性删除。
         try {
             File base = new File(context.getFilesDir(), "downloads");
-            File[] dirs = base.listFiles();
-            if (dirs != null) {
+            File basePub = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Veyra");
+            File[] bases = { base, basePub };
+            for (File base2 : bases) {
+                File[] dirs = base2.listFiles();
+                if (dirs == null) continue;
                 HashSet<String> alive = new HashSet<>();
                 synchronized (tasks) { for (Task t : tasks) alive.add(t.id); }
                 for (File d : dirs) {
-                    if (d.isDirectory() && !alive.contains(d.getName())) deleteRecursive(d);
+                    if (!d.isDirectory()) continue;
+                    String name = d.getName();
+                    // 公共目录任务目录带 dl_ 前缀，私有目录直接用任务 id
+                    String id2 = name.startsWith("dl_") ? name.substring(3) : name;
+                    if (!alive.contains(id2)) deleteRecursive(d);
                 }
             }
         } catch (Exception ignored) { }
@@ -260,8 +268,11 @@ final class DownloadManager {
                     //（含 MediaStore 同名冲突时系统自动加 "_时间戳" 后缀的孤儿文件、空文件夹）
                     purgePublicExports(t);
                     // 删除整个分集/缓存目录（含正在合并的 merged.mp4、seg_v6 缓存、native.log）
-                    File dir = new File(context.getFilesDir(), "downloads/" + t.id);
+                    // 任务目录可能在公共 Download/Veyra 或私有 downloads，两处都清
+                    File dir = dlDir(t.id);
                     if (dir.exists()) deleteRecursive(dir);
+                    File dirPriv = new File(context.getFilesDir(), "downloads/" + t.id);
+                    if (dirPriv.exists()) deleteRecursive(dirPriv);
                     break;
                 }
             }
@@ -275,8 +286,20 @@ final class DownloadManager {
     /** m3u8 递归展开总请求计数（防变种列表指数爆炸，每集开始前重置） */
     private int expandCount = 0;
 
+    /** 分集/分片任务目录：优先公共 Download/Veyra（文件管理器实时可见，ts 下多少存多少，
+     *  与后端落盘一致）；公共目录不可写（老系统无权限等）时回退应用私有目录。 */
+    @SuppressWarnings("deprecation")
+    private File dlDir(String id) {
+        File pub = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Veyra/dl_" + id);
+        try {
+            pub.mkdirs();
+            if (pub.isDirectory()) return pub;
+        } catch (Exception ignored) { }
+        return new File(context.getFilesDir(), "downloads/" + id);
+    }
+
     private void run(Task task) {
-        File dir = new File(context.getFilesDir(), "downloads/" + task.id);
+        File dir = dlDir(task.id);
         boolean mergedOk = false;
         try {
             dir.mkdirs();
@@ -413,7 +436,7 @@ final class DownloadManager {
         synchronized (tasks) { for (Task t : tasks) if (t.id.equals(id)) { found = t; break; } }
         if (found == null) throw new IllegalStateException("任务不存在");
         if (bytes == null || bytes.length == 0) throw new java.io.IOException("拉取内容为空");
-        File dir = new File(context.getFilesDir(), "downloads/" + id);
+        File dir = dlDir(id);
         if (!dir.exists() && !dir.mkdirs()) throw new java.io.IOException("无法创建任务目录");
         File out = new File(dir, String.format(Locale.US, "ep%03d.mp4", index));
         try (FileOutputStream fos = new FileOutputStream(out)) { fos.write(bytes); }
@@ -440,7 +463,7 @@ final class DownloadManager {
         synchronized (tasks) { for (Task t : tasks) if (t.id.equals(id)) { found = t; break; } }
         if (found == null) throw new IllegalStateException("任务不存在");
         if (bytes == null || bytes.length == 0) throw new java.io.IOException("拉取内容为空");
-        File dir = new File(context.getFilesDir(), "downloads/" + id);
+        File dir = dlDir(id);
         if (!dir.exists() && !dir.mkdirs()) throw new java.io.IOException("无法创建任务目录");
         String safe = (found.title == null ? "" : found.title).replaceAll("[\\\\/:*?\"<>|]", "_");
         int n = found.episodes.length();
@@ -479,7 +502,7 @@ final class DownloadManager {
     }
 
     private void runMerge(Task task) {
-        File dir = new File(context.getFilesDir(), "downloads/" + task.id);
+        File dir = dlDir(task.id);
         boolean mergedOk = false;
         try {
             int n = task.episodes.length();
@@ -819,6 +842,7 @@ final class DownloadManager {
     private void downloadM3u8(Task task, String url, File out, AtomicLong dlBytes, AtomicLong totalBytes, int n) throws Exception {
         File work = new File(out.getParentFile(), "m3u8-w" + n);
         work.mkdirs();
+        boolean segOk = false;
         try {
             List<String> segUris = new ArrayList<>();
             List<String> segKeys = new ArrayList<>();
@@ -959,9 +983,11 @@ final class DownloadManager {
                 tmpOut.delete();
             }
             if (!out.exists() || out.length() < 1024) throw new java.io.IOException("m3u8 转 mp4 产物无效");
+            segOk = true;   // 本集合并成功，产物已落位
         } finally {
-            // 清理本集临时目录（含分片/KEY/playlist/半成品）
-            deleteRecursively(work);
+            // 合并成功后清理本集临时目录（ts/KEY/playlist/半成品）；失败保留 ts，
+            // 文件管理器可见已下载分片（下多少存多少，与后端落盘一致）
+            if (segOk) deleteRecursively(work);
         }
     }
 
@@ -1337,7 +1363,7 @@ final class DownloadManager {
      *  只保留合并产物。合并失败/未合并不动，保证可重试。 */
     private void deleteEpisodesAfterMerge(Task t, String subDir) {
         try {
-            File dir = new File(context.getFilesDir(), "downloads/" + t.id);
+            File dir = dlDir(t.id);
             if (dir.exists()) {
                 File[] kids = dir.listFiles();
                 if (kids != null) for (File f : kids) {

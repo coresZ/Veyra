@@ -2,6 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Android 9 及以下写公共 Download 目录需要；Android 10+ scoped storage 下 app 自建文件豁免 -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
     <application
         android:name=".HuangGuoApp"
         android:allowBackup="false"
@@ -10,6 +14,7 @@
         android:label="Veyra"
         android:theme="@style/AppTheme"
         android:networkSecurityConfig="@xml/network_security_config"
+        android:requestLegacyExternalStorage="true"
         android:usesCleartextTraffic="true">
         <provider
             android:name="androidx.core.content.FileProvider"
