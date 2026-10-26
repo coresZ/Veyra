@@ -772,12 +772,19 @@ final class DownloadManager {
         for (String raw : text.split("\r?\n")) {
             String line = raw.trim();
             if (line.startsWith("#EXT-X-KEY")) {
-                keyMatcher.reset(line);
-                if (keyMatcher.find()) currentKey = resolveUri(keyMatcher.group(1), url);
-                // 源带显式 IV（如 IV=0x...）必须原样保留：本地 playlist 丢 IV 时 hls demuxer 会用
-                // 媒体序列号作默认 IV 解密，与源不符 → 解密数据全错 → 产物损坏/合并卡死
-                ivMatcher.reset(line);
-                currentIV = ivMatcher.find() ? ivMatcher.group(1) : "";
+                // METHOD=NONE = 从这一行起分片不加密：必须把上一段的 KEY 清空，
+                // 否则明文分片会被当密文解密（解出垃圾 → 合并报"分片解密结果无效"）
+                if (line.contains("METHOD=NONE")) {
+                    currentKey = null;
+                    currentIV = "";
+                } else {
+                    keyMatcher.reset(line);
+                    if (keyMatcher.find()) currentKey = resolveUri(keyMatcher.group(1), url);
+                    // 源带显式 IV（如 IV=0x...）必须原样保留：本地 playlist 丢 IV 时 hls demuxer 会用
+                    // 媒体序列号作默认 IV 解密，与源不符 → 解密数据全错 → 产物损坏/合并卡死
+                    ivMatcher.reset(line);
+                    currentIV = ivMatcher.find() ? ivMatcher.group(1) : "";
+                }
             } else if (line.startsWith("#EXT-X-MEDIA-SEQUENCE")) {
                 // 记录真实媒体序列号：无显式 IV 的分片用 mediaSeq+i 大端作默认 IV，
                 // 本地 playlist 写死 0 会导致这类分片解密错乱（第 2 集 TS 不可播的根因）
@@ -964,6 +971,252 @@ final class DownloadManager {
         throw lastErr;
     }
 
+    // ---- AES-128 KEY 获取（严格 16 字节校验 + 诊断）----
+    // 历史事故：KEY 走通用 downloadToFile，只判"非空即成功"，源站返回的 HTML/风控页/播放列表
+    // （用户实测 11545 字节）被当成密钥落盘；复用逻辑又认"非空即已下载"，于是坏 KEY 永久留在
+    // work 目录，每集每次都报"KEY 文件异常"，点一万次重试都没用。这里彻底改掉：
+    // 只接受 16 字节裸密钥，失败绝不落盘，并把源站真实响应（状态码/长度/内容类型/前 64 字节）记进诊断。
+    private static final int KEY_LEN = 16;
+    private static final int KEY_MAX_BYTES = 64 * 1024;
+    private static final String UA_DESKTOP = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36";
+
+    /** 取 KEY 字节：先按 m3u8 给的地址（多半是本站代理 URL）取；不行再解包代理直连真实 KEY 地址，
+     *  再不行带上 CDN 自身 Referer 重试（部分 CDN 对 KEY 有防盗链，缺 Referer 会返回 HTML 风控页）。
+     *  每次失败的原因都追加到 diag（调用方落盘 key-diag.txt + 写进 debug）。 */
+    private byte[] fetchKeyBytes(String url, StringBuilder diag) throws Exception {
+        String direct = unwrapProxyUrl(url);
+        boolean hasDirect = !direct.equals(url);
+        List<String[]> cands = new ArrayList<>();   // {URL, Referer}
+        cands.add(new String[]{url, null});
+        if (hasDirect) {
+            cands.add(new String[]{direct, null});
+            cands.add(new String[]{direct, originOf(direct)});
+        }
+        Exception lastErr = null;
+        for (int ci = 0; ci < cands.size(); ci++) {
+            String cu = cands.get(ci)[0];
+            String ref = cands.get(ci)[1];
+            int tries = ci == 0 ? 3 : 1;
+            for (int attempt = 1; attempt <= tries; attempt++) {
+                try {
+                    return fetchKeyOnce(cu, ref, diag);
+                } catch (Exception e) {
+                    lastErr = e;
+                    // 退避：源站在展开 m3u8 的几十个请求之后紧接着收到 KEY 请求时容易直接甩限流页，
+                    // 隔一会儿重试往往就正常了（KEY 只有 16 字节，重试成本极低）
+                    if (attempt < tries) Thread.sleep(700L * attempt);
+                }
+            }
+        }
+        throw lastErr != null ? lastErr : new java.io.IOException("KEY 下载失败");
+    }
+
+    private static String originOf(String url) {
+        try {
+            URL u = new URL(url);
+            return u.getProtocol() + "://" + u.getHost() + "/";
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private byte[] fetchKeyOnce(String url, String referer, StringBuilder diag) throws Exception {
+        String u = curlSafeUrl(url);
+        HttpURLConnection conn = (HttpURLConnection) new URL(u).openConnection();
+        conn.setConnectTimeout(10_000);
+        conn.setReadTimeout(15_000);
+        conn.setRequestProperty("User-Agent", UA_DESKTOP);
+        conn.setRequestProperty("Accept", "*/*");
+        // 强制不压缩：源站对 KEY 也可能返回 gzip（无 Content-Encoding 头），拿到必是乱码
+        conn.setRequestProperty("Accept-Encoding", "identity");
+        if (referer != null) conn.setRequestProperty("Referer", referer);
+        try {
+            int code = conn.getResponseCode();
+            String ct = String.valueOf(conn.getContentType());
+            if (code != 200) {
+                diag.append("KEY ").append(shortUrl(url)).append(" → HTTP ").append(code).append('\n');
+                throw new java.io.IOException("KEY 请求失败 HTTP " + code + "（" + shortUrl(url) + "）");
+            }
+            byte[] body;
+            try (InputStream in = conn.getInputStream(); ByteArrayOutputStream bo = new ByteArrayOutputStream()) {
+                byte[] buf = new byte[8192];
+                int k;
+                while ((k = in.read(buf)) > 0) {
+                    bo.write(buf, 0, k);
+                    if (bo.size() > KEY_MAX_BYTES) throw new java.io.IOException("KEY 响应体超限（>" + KEY_MAX_BYTES + "B），不是密钥");
+                }
+                body = bo.toByteArray();
+            }
+            body = maybeInflate(body);
+            if (body.length == KEY_LEN) return body;
+            diag.append("KEY ").append(shortUrl(url))
+                    .append(" → bytes=").append(body.length)
+                    .append(" ct=").append(ct)
+                    .append(" head=").append(hexPreview(body, 64))
+                    .append(looksLikeM3u8(body) ? " [疑似 m3u8 播放列表]"
+                            : looksLikeHtml(body) ? " [疑似 HTML/风控页]" : "")
+                    .append('\n');
+            throw new java.io.IOException("KEY 不是 16 字节（len=" + body.length + "，源站返回的不是 AES 密钥）");
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    /** 解包本站/源站的 huangguo-proxy 包装，拿到真实目标地址。 */
+    private static String unwrapProxyUrl(String url) {
+        try {
+            int q = url.indexOf("/api/huangguo-proxy?");
+            if (q < 0) return url;
+            String qs = url.substring(q + "/api/huangguo-proxy?".length());
+            for (String kv : qs.split("&")) {
+                int e = kv.indexOf('=');
+                if (e <= 0 || !"url".equals(kv.substring(0, e))) continue;
+                String v = kv.substring(e + 1);
+                for (int i = 0; i < 3; i++) {   // 源站有时双层编码
+                    String d = java.net.URLDecoder.decode(v, "UTF-8");
+                    if (d.equals(v)) break;
+                    v = d;
+                }
+                return v;
+            }
+        } catch (Exception ignored) {}
+        return url;
+    }
+
+    /** gzip/deflate 魔数兜底解压（源站偶发无视 Accept-Encoding 返回压缩体）。 */
+    private static byte[] maybeInflate(byte[] b) {
+        if (b == null || b.length < 4) return b;
+        try {
+            if ((b[0] & 0xFF) == 0x1f && (b[1] & 0xFF) == 0x8b) {
+                try (java.util.zip.GZIPInputStream gz = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(b))) {
+                    ByteArrayOutputStream o = new ByteArrayOutputStream();
+                    byte[] buf = new byte[8192];
+                    int k;
+                    while ((k = gz.read(buf)) > 0) o.write(buf, 0, k);
+                    return o.toByteArray();
+                }
+            }
+            if ((b[0] & 0xFF) == 0x78) {
+                try (java.util.zip.InflaterInputStream inf = new java.util.zip.InflaterInputStream(new java.io.ByteArrayInputStream(b))) {
+                    ByteArrayOutputStream o = new ByteArrayOutputStream();
+                    byte[] buf = new byte[8192];
+                    int k;
+                    while ((k = inf.read(buf)) > 0) o.write(buf, 0, k);
+                    return o.toByteArray();
+                }
+            }
+        } catch (Exception ignored) {}
+        return b;
+    }
+
+    private static boolean looksLikeM3u8(byte[] b) {
+        if (b == null || b.length < 7) return false;
+        try { return new String(b, 0, Math.min(b.length, 16), StandardCharsets.UTF_8).startsWith("#EXTM3U"); }
+        catch (Exception e) { return false; }
+    }
+
+    private static boolean looksLikeHtml(byte[] b) {
+        if (b == null || b.length == 0) return false;
+        String s = new String(b, 0, Math.min(b.length, 64), StandardCharsets.UTF_8).trim().toLowerCase();
+        return s.startsWith("<") || s.contains("<html") || s.contains("<!doctype") || s.startsWith("{");
+    }
+
+    /** 诊断用：前 n 字节的十六进制 + 可打印预览（HTML/m3u8 一眼能认出来）。 */
+    private static String hexPreview(byte[] b, int n) {
+        if (b == null) return "";
+        int len = Math.min(b.length, n);
+        StringBuilder hex = new StringBuilder();
+        StringBuilder txt = new StringBuilder();
+        for (int i = 0; i < len; i++) {
+            int v = b[i] & 0xFF;
+            hex.append(String.format(Locale.US, "%02x", v));
+            txt.append(v >= 32 && v < 127 ? (char) v : '.');
+        }
+        if (b.length > len) hex.append("…");
+        return "hex=" + hex + " txt=" + txt;
+    }
+
+    /** TS 判定：首字节必须是 sync byte 0x47，长度够时再按 188/192/204 包长二次校验（防 1/256 误判）。 */
+    private static boolean looksLikeTs(byte[] b) {
+        if (b == null || b.length < 1) return false;
+        if ((b[0] & 0xFF) != 0x47) return false;
+        if (b.length <= 188) return true;
+        return (b.length > 188 && (b[188] & 0xFF) == 0x47)
+                || (b.length > 192 && (b[192] & 0xFF) == 0x47)
+                || (b.length > 204 && (b[204] & 0xFF) == 0x47);
+    }
+
+    private static byte[] readHead(File f, int n) {
+        byte[] buf = new byte[n];
+        try (java.io.FileInputStream fis = new java.io.FileInputStream(f)) {
+            int off = 0;
+            while (off < n) {
+                int k = fis.read(buf, off, n - off);
+                if (k <= 0) break;
+                off += k;
+            }
+            if (off == n) return buf;
+            byte[] r = new byte[off];
+            System.arraycopy(buf, 0, r, 0, off);
+            return r;
+        } catch (Exception e) {
+            return new byte[0];
+        }
+    }
+
+    /** 复用本地 work 前检查：playlist 里引用的 KEY 文件必须都存在且为 16 字节，否则删掉坏的并返回说明
+     *  （调用方据此放弃本地复用、重新解析下载）。没有 KEY 行（明文剧）返回 null。 */
+    private static String dropInvalidLocalKeys(File work, File playlist) {
+        try {
+            String text = new String(java.nio.file.Files.readAllBytes(playlist.toPath()), StandardCharsets.UTF_8);
+            java.util.regex.Matcher km = java.util.regex.Pattern.compile("URI=\"([^\"]+)\"").matcher("");
+            java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+            for (String raw : text.split("\r?\n")) {
+                String line = raw.trim();
+                if (!line.startsWith("#EXT-X-KEY") || line.contains("METHOD=NONE")) continue;
+                km.reset(line);
+                if (km.find()) names.add(km.group(1));
+            }
+            StringBuilder bad = new StringBuilder();
+            for (String k : names) {
+                File kf = new File(work, k);
+                boolean missing = !kf.exists();
+                long len = missing ? -1 : kf.length();
+                if (missing || len != KEY_LEN) {
+                    if (!missing) kf.delete();
+                    if (bad.length() > 0) bad.append('、');
+                    bad.append(k).append(missing ? " 缺失" : " len=" + len);
+                }
+            }
+            return bad.length() == 0 ? null : bad.toString();
+        } catch (Exception e) {
+            return null;   // playlist 读不了就交给后面的合并流程报错
+        }
+    }
+
+    /** 密文分片但 KEY 不可用时的错误信息：带上 KEY 下载阶段的诊断，直接说明源站返回了什么。 */
+    private static String keyUnavailableMessage(File work, String segName, String keyName, Map<String, Integer> badLen) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("分片不是明文且没有可用 KEY: ").append(segName);
+        if (keyName == null) {
+            sb.append("（playlist 未给该分片配 KEY，源可能未加密但分片内容异常）");
+        } else {
+            Integer len = badLen == null ? null : badLen.get(keyName);
+            sb.append("（KEY=").append(keyName)
+              .append(len == null ? " 未下载" : (len < 0 ? " 文件缺失" : " len=" + len))
+              .append("，合法 AES-128 密钥必须是 16 字节）");
+        }
+        try {
+            File d = new File(work, "key-diag.txt");
+            if (d.exists() && d.length() > 0) {
+                String t = new String(java.nio.file.Files.readAllBytes(d.toPath()), StandardCharsets.UTF_8).trim();
+                if (t.length() > 600) t = t.substring(0, 600) + "…";
+                if (!t.isEmpty()) sb.append("\nKEY 诊断:\n").append(t);
+            }
+        } catch (Exception ignored) {}
+        return sb.toString();
+    }
+
     /** 黄果 m3u8 下载：展开 → 拉 KEY/分片（并发）→ 本地 playlist → ffmpeg remux mp4 → 清理。
      *  临时文件放每集独立子目录（多集并发时不互相覆盖），产物最终落到 out。 */
     private void downloadM3u8(Task task, String url, File out, AtomicLong dlBytes, AtomicLong totalBytes, int n) throws Exception {
@@ -973,7 +1226,18 @@ final class DownloadManager {
         File playlist = new File(work, "play.m3u8");
         // 关键：分片/KEY/本地 playlist 早已下载好时（上次合并失败/中断），直接跳过解析与下载进合并——
         // 不重新拉源 master（源/代理卡死时也能合并），合并不依赖源站。
+        // 本地复用前提：playlist 存在，且它引用的 KEY 文件（若有）都是 16 字节合法密钥。
+        // 历史 bug：只要 playlist 非空就复用 → 之前下到的坏 KEY 永久留在 work 目录，
+        // 每次重试都跳过下载直接进合并 → 每集都报同一个"KEY 文件异常"，重试完全无效。
         boolean haveLocal = playlist.exists() && playlist.length() > 0;
+        if (haveLocal) {
+            String bad = dropInvalidLocalKeys(work, playlist);
+            if (bad != null) {
+                // 有坏 KEY：删掉并强制重新解析下载（重走 fetchKeyBytes 的严格 16 字节校验）
+                haveLocal = false;
+                task.debug = "第 " + n + " 集：本地 KEY 损坏已删除（" + bad + "），重新解析并下载 KEY";
+            }
+        }
         try {
             if (haveLocal) {
                 task.detail = "第 " + n + " 集：本地分片已就绪，直接合并…";
@@ -1004,23 +1268,45 @@ final class DownloadManager {
             if (segUris.isEmpty()) throw new java.io.IOException("m3u8 无分片");
             task.detail = "解析完成，共 " + segUris.size() + " 个分片，开始下载";
             task.debug = "第 " + n + " 集：m3u8 含 " + segUris.size() + " 个分片，开始下载";
-            // 去重 KEY → 本地 key 文件 + 每 KEY 对应显式 IV（源带 IV 时 playlist 原样保留）
-            LinkedHashMap<String, String> keyFiles = new LinkedHashMap<>();
-            LinkedHashMap<String, String> keyIVs = new LinkedHashMap<>();
+            // 去重 KEY → 本地 key 文件。KEY 必须是严格 16 字节（见 fetchKeyBytes）：不足/超长/像 HTML/像
+            // m3u8 一律判失败，且失败绝不落盘（历史 bug：11545 字节的风控页被当成密钥存下，又因"非空即
+            // 已下载"永久复用，导致每集都报同一个 KEY 异常）。
+            // 拿不到 KEY 不在这里中断下载——分片可能本来就是明文，不需要 KEY；真正遇到密文分片在合并阶段报错。
+            LinkedHashMap<String, String> keyNames = new LinkedHashMap<>();
+            StringBuilder keyDiag = new StringBuilder();
             {
                 int keyIdx = 0;
                 for (int i = 0; i < segKeys.size(); i++) {
                     String ku = segKeys.get(i);
-                    if (ku == null || keyFiles.containsKey(ku)) continue;
-                    File kf = new File(work, "key-" + keyIdx + ".key");
-                    // KEY 复用：重试时已存在且非空直接跳过
-                    if (!(kf.exists() && kf.length() > 0)) {
-                        downloadToFile(ku, kf, dlBytes, totalBytes);
+                    if (ku == null || keyNames.containsKey(ku)) continue;
+                    String kname = "key-" + keyIdx + ".key";
+                    File kf = new File(work, kname);
+                    // KEY 复用：只有 16 字节的合法密钥才复用；长度不对一律删掉重下
+                    if (kf.exists() && kf.length() != KEY_LEN) {
+                        keyDiag.append("丢弃历史坏 KEY ").append(kname).append(" len=").append(kf.length()).append('\n');
+                        kf.delete();
                     }
-                    keyFiles.put(ku, "key-" + keyIdx + ".key");
-                    if (i < segIVs.size() && segIVs.get(i) != null && !segIVs.get(i).isEmpty())
-                        keyIVs.put(ku, segIVs.get(i));
+                    if (!(kf.exists() && kf.length() == KEY_LEN)) {
+                        kf.delete();
+                        try {
+                            java.nio.file.Files.write(kf.toPath(), fetchKeyBytes(ku, keyDiag));
+                        } catch (Exception ke) {
+                            keyDiag.append("KEY 下载失败 ").append(kname).append(": ").append(ke.getMessage()).append('\n');
+                        }
+                    }
+                    // 不论下载成败都登记文件名：playlist 里仍然写真实 key 文件名（不写 METHOD=NONE），
+                    // 这样万一分片本来是明文照样能过（合并阶段按需取 KEY），真遇到密文时错误信息能指名道姓
+                    keyNames.put(ku, kname);
                     keyIdx++;
+                }
+                if (keyDiag.length() > 0) {
+                    // 诊断落盘一份（文件管理器可查），同时进 debug，用户能直接看到源站到底返回了什么
+                    try {
+                        java.nio.file.Files.write(new File(work, "key-diag.txt").toPath(),
+                                keyDiag.toString().getBytes(StandardCharsets.UTF_8));
+                    } catch (Exception ignored) {}
+                    task.debug = (task.debug == null ? "" : task.debug + "\n")
+                            + "[KEY] " + keyDiag.toString().trim().replace('\n', ' ');
                 }
             }
             // 并发下载分片（8 并发：多集任务并发后对源/代理压力可控，过高易触发 502/限流）
@@ -1047,7 +1333,18 @@ final class DownloadManager {
                             File segFile = new File(work, name);
                             // 分片复用：重试时已存在且非空的分片直接跳过（合并失败保留的 ts 不再重复下载）
                             if (!(segFile.exists() && segFile.length() > 0)) {
-                                downloadToFile(segUris.get(idx), segFile, dlBytes, totalBytes);
+                                // 先写 .part 再改名：下载超时/断流留下的半截 ts 不会被下次当成"完整分片"复用
+                                // （半截 ts 会被判为已下载 → 产物缺尾/解密校验失败，而且永远自愈不了）
+                                File part = new File(work, name + ".part");
+                                try {
+                                    downloadToFile(segUris.get(idx), part, dlBytes, totalBytes);
+                                    if (!part.renameTo(segFile)) {
+                                        java.nio.file.Files.copy(part.toPath(), segFile.toPath(),
+                                                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                                    }
+                                } finally {
+                                    if (part.exists()) part.delete();
+                                }
                             }
                             segFiles[idx] = name;
                             // 进度=真正完成片数（精确），并显示实时下载速度
@@ -1088,16 +1385,28 @@ final class DownloadManager {
             {
                 StringBuilder sb = new StringBuilder("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:").append(mediaSeqRef.get()).append("\n");
                 String lastKeyName = null;
+                String lastIV = "";
                 for (int i = 0; i < segN; i++) {
                     String ku = segKeys.get(i);
-                    String kn = ku != null ? keyFiles.get(ku) : null;
-                    if (kn != null && !kn.equals(lastKeyName)) {
+                    String kn = ku != null ? keyNames.get(ku) : null;
+                    // 逐片 IV：同一个 KEY 下不同分片可能带不同显式 IV，按 (KEY, IV) 变化才写 KEY 行。
+                    // 旧实现按 KEY URL 去重、只写一次 IV，第 2 片起的显式 IV 全被丢掉 → 解密错。
+                    String iv = (i < segIVs.size() && segIVs.get(i) != null) ? segIVs.get(i) : "";
+                    if (kn == null) {
+                        // 该段源上就没有 KEY（METHOD=NONE）：显式写 NONE 把上一段的 KEY 关掉，
+                        // 否则解析本地 playlist 时会沿用上一段的密钥去解明文分片
+                        if (lastKeyName != null) {
+                            sb.append("#EXT-X-KEY:METHOD=NONE\n");
+                            lastKeyName = null;
+                            lastIV = "";
+                        }
+                    } else if (!kn.equals(lastKeyName) || !iv.equals(lastIV)) {
                         sb.append("#EXT-X-KEY:METHOD=AES-128,URI=\"").append(kn).append("\"");
-                        // 源显式 IV 原样保留（IV=0x...），缺失时 hls demuxer 用序列号默认 IV → 解密错
-                        String iv = ku != null ? keyIVs.get(ku) : null;
-                        if (iv != null && !iv.isEmpty()) sb.append(",IV=").append(iv);
+                        // 源显式 IV 原样保留（IV=0x...）；缺失则不写，由解析器用媒体序列号算默认 IV
+                        if (!iv.isEmpty()) sb.append(",IV=").append(iv);
                         sb.append('\n');
                         lastKeyName = kn;
+                        lastIV = iv;
                     }
                     sb.append("#EXTINF:4.0,\n").append(segFiles[i]).append('\n');
                 }
@@ -1186,19 +1495,20 @@ final class DownloadManager {
         for (String k : segKeys) {
             if (k == null || keyBytes.containsKey(k)) continue;
             File kf = new File(work, k);
-            if (kf.exists() && kf.length() > 0) keyBytes.put(k, java.nio.file.Files.readAllBytes(kf.toPath()));
+            // 只有 16 字节才是合法 AES-128 密钥；其他长度（源站 HTML/风控页）一律不参与解密
+            if (kf.exists() && kf.length() == KEY_LEN) keyBytes.put(k, java.nio.file.Files.readAllBytes(kf.toPath()));
         }
         int decOk = 0;
+        int decBad = 0;
         int total = segNames.size();
         for (int i = 0; i < total; i++) {
             File seg = new File(work, segNames.get(i));
             if (!seg.exists() || seg.length() == 0) continue;
-            byte[] head = new byte[2];
-            try (java.io.FileInputStream fis = new java.io.FileInputStream(seg)) {
-                if (fis.read(head) == 2 && (head[0] & 0xFF) == 0x47 && (head[1] & 0xFF) == 0x40) { decOk++; continue; }   // 已明文
-            }
+            byte[] head = readHead(seg, 376);
+            // 已明文（TS sync byte 0x47，并二次校验第 188 字节）：直接跳过，避免重复解密把明文再解一次
+            if (looksLikeTs(head)) { decOk++; continue; }
             byte[] key = keyBytes.get(segKeys.get(i));
-            if (key == null || key.length != 16) continue;
+            if (key == null || key.length != KEY_LEN) continue;
             // 逐片进度：65 片大分片解密可达 1-2 分钟，无进度会被误判成卡死
             if (task != null) {
                 task.detail = "第 " + n + " 集解密 " + (i + 1) + "/" + total + " 片…";
@@ -1209,13 +1519,17 @@ final class DownloadManager {
                 Cipher c = Cipher.getInstance("AES/CBC/NoPadding");
                 c.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(ivForSeg(segIVs, i, mediaSeq)));
                 byte[] dec = c.doFinal(enc);
+                // 解出来的必须是明文 TS 才覆盖原文件：IV/KEY 不对时解出的垃圾一旦写回，密文就被永久毁掉，
+                // 下次再解密等于二次解密 → 整集报废且无法自愈（旧实现缺这层校验，直接回写）
+                if (!looksLikeTs(dec)) { decBad++; continue; }
                 java.nio.file.Files.write(seg.toPath(), dec);
                 decOk++;
             } catch (Exception ignored) {}
         }
         if (task != null) {
             task.detail = "第 " + n + " 集解密完成 " + decOk + "/" + total + " 片";
-            task.debug = "第 " + n + " 集：解密完成 " + decOk + "/" + total + " 片";
+            task.debug = "第 " + n + " 集：解密完成 " + decOk + "/" + total + " 片"
+                    + (decBad > 0 ? "（" + decBad + " 片解出非 TS 数据，已保留密文待合并阶段重判）" : "");
         }
     }
 
@@ -1260,14 +1574,18 @@ final class DownloadManager {
         }
         if (segNames.isEmpty()) throw new java.io.IOException("playlist 无分片");
         dbg.append("本地 playlist: ").append(segNames.size()).append(" 片\n");
-        // 1) KEY 字节（KEY URI 相对 work，16B）
+        // 1) KEY 字节（KEY URI 相对 work，16B）。
+        //    这里不做"缺失/长度不对就直接抛"的强制校验：分片可能本来就是明文（不需要 KEY），
+        //    旧实现先无条件校验 KEY，导致"KEY 坏 + 分片明文"的集也被判失败。改成按需取用，
+        //    真遇到密文分片、而它对应的 KEY 不可用时才报错（错误信息里带源站返回内容的诊断）。
         Map<String, byte[]> keyBytes = new HashMap<>();
+        Map<String, Integer> keyBadLen = new HashMap<>();
         for (String k : segKeys) {
-            if (k == null || keyBytes.containsKey(k)) continue;
+            if (k == null || keyBytes.containsKey(k) || keyBadLen.containsKey(k)) continue;
             File kf = new File(work, k);
-            if (!kf.exists() || kf.length() == 0) throw new java.io.IOException("KEY 文件缺失: " + k);
+            if (!kf.exists() || kf.length() == 0) { keyBadLen.put(k, -1); continue; }
             byte[] kb = java.nio.file.Files.readAllBytes(kf.toPath());
-            if (kb.length != 16) throw new java.io.IOException("KEY 文件异常: " + k + " len=" + kb.length);
+            if (kb.length != KEY_LEN) { keyBadLen.put(k, kb.length); continue; }
             keyBytes.put(k, kb);
         }
         // 2) 逐片解密 → 单分片明文 ts（dec-%04d.ts）。不拼接 full.ts：
@@ -1280,13 +1598,13 @@ final class DownloadManager {
                 File seg = new File(work, segNames.get(i));
                 if (!seg.exists() || seg.length() == 0) throw new java.io.IOException("分片缺失: " + segNames.get(i));
                 byte[] enc = java.nio.file.Files.readAllBytes(seg.toPath());
-                byte[] key = keyBytes.get(segKeys.get(i));
-                if (key == null) throw new java.io.IOException("缺少分片 KEY: " + segNames.get(i));
                 byte[] dec;
-                // 已明文（下载后 decryptTsToPlain 解密过，0x47 开头）→ 直接复用；密文才走 Cipher
-                if (enc.length >= 1 && (enc[0] & 0xFF) == 0x47 && (enc.length < 2 || (enc[1] & 0xFF) == 0x40)) {
+                // 已明文（下载后 decryptTsToPlain 解密过）→ 直接复用；密文才走 Cipher
+                if (looksLikeTs(enc)) {
                     dec = enc;
                 } else {
+                    byte[] key = keyBytes.get(segKeys.get(i));
+                    if (key == null) throw new java.io.IOException(keyUnavailableMessage(work, segNames.get(i), segKeys.get(i), keyBadLen));
                     byte[] iv = ivForSeg(segIVs, i, mediaSeq);
                     try {
                         Cipher c = Cipher.getInstance("AES/CBC/NoPadding");
@@ -1295,11 +1613,10 @@ final class DownloadManager {
                     } catch (Exception ce) {
                         throw new java.io.IOException("分片解密失败 " + segNames.get(i) + ": " + ce);
                     }
-                    // 解密结果校验：明文 TS 首字节必为 0x47（sync byte）。不是 → IV/KEY 与源不符
-                    // （旧版本地 playlist 写死 MEDIA-SEQUENCE:0 下载的乱码分片），立即报错避免静默空产物
-                    if (dec.length == 0 || (dec[0] & 0xFF) != 0x47) {
+                    // 解密结果校验：必须是明文 TS（0x47 + 第 188 字节二次校验）。不是 → IV/KEY 与源不符
+                    if (!looksLikeTs(dec)) {
                         throw new java.io.IOException("分片解密结果无效 " + segNames.get(i)
-                            + "（IV/KEY 与源不符，旧版错误分片，需重新下载本集）");
+                            + "（IV/KEY 与源不符，需重新下载本集）");
                     }
                 }
                 File df = new File(work, String.format(Locale.US, "dec-%04d.ts", i));
