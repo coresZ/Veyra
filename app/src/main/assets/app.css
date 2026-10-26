@@ -205,8 +205,9 @@ html[data-theme=dark] .search-suggest{box-shadow:0 12px 28px #0008}
   box-shadow:
     0 12px 30px rgba(60,52,24,.20),
     0 2px 6px rgba(60,52,24,.10),
-    inset 0 1px 0 rgba(255,255,255,.80),
-    inset 0 -1px 0 rgba(255,255,255,.22);
+    inset 0 1px 0 rgba(255,255,255,.85),
+    inset 0 -1px 0 rgba(255,255,255,.22),
+    inset 0 0 0 1px rgba(255,255,255,.32);
   isolation:isolate;
   touch-action:none;
   transition:transform .18s ease,box-shadow .25s ease;
@@ -215,20 +216,19 @@ html[data-theme=dark] #dock{
   background:linear-gradient(180deg,rgba(64,72,76,.56),rgba(26,32,35,.44));
   box-shadow:
     0 14px 32px rgba(0,0,0,.52),
-    inset 0 1px 0 rgba(255,255,255,.20),
-    inset 0 -1px 0 rgba(255,255,255,.06);
+    inset 0 1px 0 rgba(255,255,255,.22),
+    inset 0 -1px 0 rgba(255,255,255,.06),
+    inset 0 0 0 1px rgba(255,255,255,.12);
 }
-/* 玻璃高光描边：顶部强、下部弱，模拟镜面折射的亮边 */
+/* 玻璃表面反光：顶部一层柔光（不用 mask 裁边——旧 WebView 不认 mask-composite，
+ * 失效时整块渐变会盖住 Dock；边缘亮线交给 #dock 自己的 inset 阴影） */
 #dock::before{
-  content:"";position:absolute;inset:0;border-radius:inherit;padding:1px;pointer-events:none;
-  background:linear-gradient(180deg,rgba(255,255,255,.95),rgba(255,255,255,.40) 26%,rgba(255,255,255,.05) 58%,rgba(255,255,255,.30));
-  -webkit-mask:linear-gradient(#000,#000) content-box,linear-gradient(#000,#000);
-  -webkit-mask-composite:xor;
-  mask:linear-gradient(#000,#000) content-box,linear-gradient(#000,#000);
-  mask-composite:exclude;
+  content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:linear-gradient(180deg,rgba(255,255,255,.50),rgba(255,255,255,.12) 34%,rgba(255,255,255,0) 52%);
+  opacity:.9;
 }
 html[data-theme=dark] #dock::before{
-  background:linear-gradient(180deg,rgba(255,255,255,.55),rgba(255,255,255,.14) 30%,rgba(255,255,255,.03) 62%,rgba(255,255,255,.14));
+  background:linear-gradient(180deg,rgba(255,255,255,.20),rgba(255,255,255,.05) 34%,rgba(255,255,255,0) 54%);
 }
 /* 镜片反光：左上柔光 + 右下微光，制造玻璃厚度感 */
 #dock::after{
