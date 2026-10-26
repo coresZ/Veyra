@@ -1064,9 +1064,9 @@ final class DownloadManager {
             // 下载/复用后：把密文 TS 统一解密为明文（TS 文件可直接播放；合并检测 0x47 直接用明文）
             try { decryptTsToPlain(work, playlist); } catch (Exception de) { /* 解密失败保留密文，合并时再试 */ }
             StringBuilder dbg = new StringBuilder();
-            // 合并产物直接写在目标同目录（剧集目录），同目录 rename 基本必成；跨目录 rename/copy
-            // 在 Android 上可能失败（目标已存在不覆盖 / EXDEV / 父目录缺），是"合并完成但产物未落位"的根因
-            File tmpOut = new File(out.getParentFile(), String.format(Locale.US, "ep%03d.tmp", n));
+            // 合并产物直接写最终路径（无 .tmp 改名落位步骤）：MediaMuxer 写完 out 即产物，
+            // 杜绝"合并完成但产物未落位"（rename/copy 在 Android 上不可靠）。半成品由重试覆盖。
+            File tmpOut = out;
             // 方案2（无 ffmpeg）：Cipher 解密 ts → full.ts 字节拼接 → MediaExtractor/MediaMuxer 重封装。
             // 合并完全基于本地 work（play.m3u8 + ts + key），不依赖源站；独立子线程 + 120s 硬超时。
             task.detail = "第 " + n + " 集合并中…";
@@ -1093,32 +1093,14 @@ final class DownloadManager {
                     throw new RuntimeException(cause);
                 }
             } finally { remuxPool.shutdownNow(); }
-            task.debug = "第 " + n + " 集：合并完成，移动产物…";
             // 产物移动/落位/清理全带分段日志与异常兜底：任何一步慢/失败都不让任务永久卡在"合并中"
-            File parent = out.getParentFile();
-            if (parent != null) parent.mkdirs();   // 保险：目标目录必须存在
-            boolean moved = false;
-            if (out.exists()) {
-                // Android File.renameTo 对已存在目标可能不覆盖 → 先清旧产物再改名
-                if (!out.delete()) { task.debug = "第 " + n + " 集：旧产物删除失败，继续尝试覆盖…"; }
-            }
-            moved = tmpOut.renameTo(out);
-            if (!moved) {
-                task.debug = "第 " + n + " 集：移动失败，复制产物…";
-                try {
-                    java.nio.file.Files.copy(tmpOut.toPath(), out.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                    tmpOut.delete();
-                    moved = true;
-                } catch (Exception ce) {
-                    task.debug = "第 " + n + " 集：产物落位失败: " + ce.getClass().getSimpleName() + ": " + ce.getMessage();
-                }
-            }
-            if (moved && out.exists() && out.length() >= 1024) {
+            // 注意：tmpOut == out（合并直接写最终路径），无改名步骤，成功即落位
+            if (out.exists() && out.length() >= 1024) {
                 segOk = true;   // 本集合并成功，产物已落位
                 task.debug = "第 " + n + " 集：合并完成（产物 " + out.length() + "B）";
             } else {
-                task.debug = "第 " + n + " 集：合并完成但产物未落位，请重试";
-                throw new java.io.IOException("第 " + n + " 集合并产物未落位");
+                task.debug = "第 " + n + " 集：合并产物缺失，请重试";
+                throw new java.io.IOException("第 " + n + " 集合并产物缺失");
             }
         } finally {
             // 合并成功后清理本集临时目录（ts/KEY/playlist/半成品）；失败保留 ts，
