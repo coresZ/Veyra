@@ -24,6 +24,7 @@ extern int backtrace(void** buffer, int size);
 extern char** backtrace_symbols(void* const* buffer, int size);
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
+#include <libavcodec/bsf.h>
 #include <libavutil/opt.h>
 #include <libavutil/time.h>
 #include <libavutil/channel_layout.h>
@@ -209,22 +210,10 @@ static void scan_fill_extradata(AVFormatContext* in, int vIdx, int aIdx,
                 }
             }
         }
-        if (aout->codecpar->extradata_size == 0 && pk->stream_index == aIdx) {
-            const uint8_t* d = pk->data; int n = pk->size;
-            if (n >= 4 && d[0] == 0xFF && (d[1] & 0xF0) == 0xF0) {
-                int profile = ((d[2] >> 6) & 3) + 1;
-                int freqIdx = (d[2] >> 2) & 0xF;
-                int ch = ((d[2] & 1) << 2) | ((d[3] >> 6) & 3);
-                uint8_t asc[2];
-                asc[0] = (uint8_t)((profile << 3) | (freqIdx >> 1));
-                asc[1] = (uint8_t)(((freqIdx & 1) << 7) | (ch << 3));
-                aout->codecpar->extradata = (uint8_t*)av_mallocz(2 + AV_INPUT_BUFFER_PADDING_SIZE);
-                if (aout->codecpar->extradata) {
-                    memcpy(aout->codecpar->extradata, asc, 2);
-                    aout->codecpar->extradata_size = 2;
-                }
-            }
-        }
+        /* 音频 ASC 不填：mpegts 音频样本为 raw AAC（无 ADTS 头），audio extradata=0 时
+         * movenc 自动装 aac_adtstoasc bsf 透传；若填了 ASC，movenc 误判样本为 length-prefixed
+         * 格式 → 写样本报 "Malformed AAC bitstream"（CLI 同款行为）。 */
+        (void)aout; (void)aIdx;
         av_packet_free(&pk);
         if (vout->codecpar->extradata_size > 0 && aout->codecpar->extradata_size > 0) break;
     }
@@ -447,16 +436,18 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
     if (!vout) { logStage("规范化分集"); logErr("异常: 第%d集 输出视频流创建失败\n", idx); cleanup_output(oc); avformat_close_input(&in); return AVERROR(ENOMEM); }
     avcodec_parameters_copy(vout->codecpar, vin->codecpar);
     vout->time_base = vin->time_base;
-    /* movenc 需要 codec_tag：avc3/hev1（in-band SPS/PPS，TS 源参数集在样本内，不依赖 extradata）。
-     * 默认 avc1 要求完整 avcC extradata，TS 分片参数集不完整时 write_header 报 Invalid data
-     * （rc=-1094995529）——用户"我在寡妇村当老师"第1集即此故障。movenc 表仅 avc1/hvc1；avc3/hev1 会被 validate_codec_tag 拒绝。 */
-    if (vout->codecpar->codec_id == AV_CODEC_ID_H264) vout->codecpar->codec_tag = MKTAG('a','v','c','3');
-    else if (vout->codecpar->codec_id == AV_CODEC_ID_HEVC) vout->codecpar->codec_tag = MKTAG('h','e','v','1');
+    /* movenc 需要 codec_tag：avc1/hvc1（movenc 的 codec_tag 表仅收录 avc1/hvc1，
+     * avc3/hev1 被 validate_codec_tag 拒绝 → avformat_write_header 返回 INVALIDDATA
+     * rc=-1094995529，即历轮 write_header 失败真凶）。参数集由 scan_fill_extradata
+     * 补进 avcC（in-band 等价，播放兼容）。 */
+    if (vout->codecpar->codec_id == AV_CODEC_ID_H264) vout->codecpar->codec_tag = MKTAG('a','v','c','1');
+    else if (vout->codecpar->codec_id == AV_CODEC_ID_HEVC) vout->codecpar->codec_tag = MKTAG('h','v','c','1');
     if (aIdx >= 0) {
         AVStream* ain = in->streams[aIdx];
         aout = avformat_new_stream(oc, NULL);
         if (!aout) { logStage("规范化分集"); logErr("异常: 第%d集 输出音频流创建失败\n", idx); cleanup_output(oc); avformat_close_input(&in); return AVERROR(ENOMEM); }
         avcodec_parameters_copy(aout->codecpar, ain->codecpar);
+        aout->codecpar->codec_tag = 0;  /* TS demuxer 会把 stream_type(0x0F) 塞进 codec_tag，mp4 muxer validate_codec_tag 拒绝 → INVALIDDATA；清 0 由 movenc 自动分配 mp4a */
         aout->time_base = ain->time_base;
     }
 
@@ -483,6 +474,17 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
      * 播放器会解码到 0 大小 AAC 帧 → 音频乱码 / 丢声。 */
     AVPacket* pkt = av_packet_alloc();
     if (!pkt) { logStage("规范化分集"); logErr("异常: 第%d集 av_packet_alloc 失败\n", idx); cleanup_output(oc); avformat_close_input(&in); return AVERROR(ENOMEM); }
+    /* 音频手动 adtstoasc：mpegts 输出的 AAC 样本带 ADTS 头，movenc 的 mov_check_bitstream
+     * 只在首帧触发且条件苛刻（FFmpeg 6.1.1 对 ADTS 源直接报 "Malformed AAC bitstream"）。
+     * 手动装 aac_adtstoasc bsf 剥头成 raw AAC（mp4 样本标准格式），movenc 不再触发报错。 */
+    AVBSFContext* abf = NULL;
+    if (aIdx >= 0) {
+        const AVBitStreamFilter* bf = av_bsf_get_by_name("aac_adtstoasc");
+        if (bf && av_bsf_alloc(bf, &abf) == 0) {
+            avcodec_parameters_copy(abf->par_in, aout->codecpar);
+            if (av_bsf_init(abf) < 0) { av_bsf_free(&abf); abf = NULL; }
+        }
+    }
     int readErr = 0;
     int64_t lastDtsV = AV_NOPTS_VALUE, lastDtsA = AV_NOPTS_VALUE;   /* 逐流 last dts（rescale 后单位） */
     int64_t firstDtsV = AV_NOPTS_VALUE, firstDtsA = AV_NOPTS_VALUE; /* 首包 dts（诊断） */
@@ -511,6 +513,24 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
         *lastDts = pkt->dts;
         if (isV) { if (firstDtsV == AV_NOPTS_VALUE) firstDtsV = pkt->dts; lastDtsV = pkt->dts; }
         else     { if (firstDtsA == AV_NOPTS_VALUE) firstDtsA = pkt->dts; lastDtsA = pkt->dts; }
+        if (isA && abf) {
+            av_bsf_send_packet(abf, pkt);
+            av_packet_unref(pkt);
+            AVPacket* op = av_packet_alloc();
+            if (!op) { av_packet_free(&pkt); cleanup_output(oc); avformat_close_input(&in); return AVERROR(ENOMEM); }
+            while (av_bsf_receive_packet(abf, op) >= 0) {
+                int orc = av_interleaved_write_frame(oc, op);
+                if (orc < 0) {
+                    char e[128] = {0}; av_strerror(orc, e, sizeof(e));
+                    logStage("规范化分集"); logErr("异常: 第%d集 写包失败(音频bsf) rc=%d (%s) size=%d\n", idx, orc, e, op->size);
+                    av_packet_free(&op); av_packet_free(&pkt); cleanup_output(oc); avformat_close_input(&in); if (abf) av_bsf_free(&abf); return orc;
+                }
+                (*nAPkts)++;
+                av_packet_unref(op);
+            }
+            av_packet_free(&op);
+            continue;
+        }
         rc = av_interleaved_write_frame(oc, pkt);
         int failRc = rc, failSize = pkt->size;
         long long failPts = pkt->pts, failDts = pkt->dts;
@@ -553,6 +573,7 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
     }
     rc = av_write_trailer(oc);
     av_packet_free(&pkt);
+    if (abf) av_bsf_free(&abf);
     cleanup_output(oc);
     avformat_close_input(&in);
     if (rc < 0) {
@@ -737,6 +758,7 @@ static int transcode_segment(const char* inPath, const char* outPath, int idx, c
         avcodec_free_context(&encCtx); cleanup_output(oc); avcodec_free_context(&decCtx); avformat_close_input(&in); return AVERROR(EINVAL);
     }
     avcodec_parameters_from_context(aout->codecpar, encCtx);   /* aac + target 参数 + esds */
+    aout->codecpar->codec_tag = 0;  /* 防污染 tag 校验 */
     aout->time_base = (AVRational){1, tgt->sample_rate};
 
     /* 重采样（声道/采样率转换） */
@@ -1377,6 +1399,7 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
             cleanup_output(oc); avformat_close_input(&in); remove(listPath);
             return (*env)->NewStringUTF(env, g_err);
         }
+        aout->codecpar->codec_tag = 0;  /* 防污染 tag 校验（validate_codec_tag 拒绝非 mp4 表 tag → INVALIDDATA） */
         aout->time_base = ain->time_base;
     }
     stageLog(logBuf, "[nativeConcat] 输出流创建完成(video+audio)");
@@ -1568,6 +1591,7 @@ static int hls_remux(const char* playlistPath, const char* outPath, char* logBuf
             cleanup_output(oc); avformat_close_input(&in); return AVERROR(ENOMEM);
         }
         avcodec_parameters_copy(aout->codecpar, ain->codecpar);
+        aout->codecpar->codec_tag = 0;  /* TS demuxer 会把 stream_type(0x0F) 塞进 codec_tag，mp4 muxer validate_codec_tag 拒绝 → INVALIDDATA；清 0 由 movenc 自动分配 mp4a */
         aout->time_base = ain->time_base;
     }
 
