@@ -191,11 +191,11 @@ html[data-theme=dark] .search-suggest{box-shadow:0 12px 28px #0008}
 .series-row .film-title{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.35;word-break:break-all}
 
 
-/* ===================== 液态玻璃 Dock（Apple Liquid Glass，v0.18.72） =====================
+/* ===================== 液态玻璃 Dock（HyperOS / Liquid Glass 风格，v0.18.72） =====================
  * 结构：#dock（极淡底板） -> #dock-blob > b（玻璃透镜本体） -> 4 个按钮
  * 四条硬规则：
- *   1) 底板几乎不做模糊（blur 5px），只留一层 .06 白雾 —— 要能看清底下的封面和字，靠亮边出玻璃感；
- *   2) 透镜比底板更透（.05/.012），拖动时放大到「上下都顶穿底栏」的尺寸（盒模型撑大，圆角不变形）；
+ *   1) 底板几乎不做模糊（blur 1.5px），只留一层 .055 白雾 —— 要能看清底下的封面和字，靠亮边出玻璃感；
+ *   2) 透镜比底板更透（.035/.008），拖动时放大到「上下都顶穿底栏」的尺寸（盒模型撑大，圆角不变形）；
  *   3) 图标绝不动：只改颜色/透明度，唯一被「拿起来」的是透镜；
  *   4) 边缘折射：底栏与透镜的边缘各铺一条内侧高光 + 竖向渐亮带，模拟光线穿过玻璃厚边时的弯折。 */
 #dock{
@@ -203,26 +203,39 @@ html[data-theme=dark] .search-suggest{box-shadow:0 12px 28px #0008}
   border-radius:24px;
   border:0;
   padding:0 5px;
-  background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.015));
-  -webkit-backdrop-filter:blur(5px) saturate(150%) brightness(1.03);
-  backdrop-filter:blur(5px) saturate(150%) brightness(1.03);
+  background:linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,.008));
+  /* 只留 1.5px 模糊：底下的封面、文字要能看清 —— 靠边缘高光出玻璃感，不靠雾 */
+  -webkit-backdrop-filter:blur(.8px) saturate(122%) brightness(1.02);
+  backdrop-filter:blur(.8px) saturate(122%) brightness(1.02);
+  /* 折射：再叠一层 SVG 位移（边缘处背景被轻微掰弯）。浏览器不支持 url() 时整条被丢弃，
+     自动回退到上面那条纯模糊，不会变成完全不透明或全透明 */
+  -webkit-backdrop-filter:blur(.8px) saturate(122%) brightness(1.02) url(#lg-refract);
+  backdrop-filter:blur(.8px) saturate(122%) brightness(1.02) url(#lg-refract);
   box-shadow:
-    0 8px 22px rgba(20,18,8,.10),
-    inset 0 1px 0 rgba(255,255,255,.62),
-    inset 0 -1px 0 rgba(255,255,255,.14),
-    inset 0 0 0 .5px rgba(255,255,255,.30);
+    0 10px 28px rgba(12,14,22,.20),
+    0 0 0 1px rgba(255,255,255,.26),
+    0 0 20px rgba(255,255,255,.16),
+    inset 0 1.5px 0 rgba(255,255,255,.92),
+    inset 0 -1px 0 rgba(255,255,255,.22),
+    inset 1px 0 0 rgba(255,255,255,.34),
+    inset -1px 0 0 rgba(255,255,255,.34),
+    inset 0 0 26px rgba(255,255,255,.10);
   isolation:isolate;
   touch-action:none;
   overflow:visible;
   transition:box-shadow .28s ease;
 }
 html[data-theme=dark] #dock{
-  background:linear-gradient(180deg,rgba(255,255,255,.055),rgba(255,255,255,.012));
+  background:linear-gradient(180deg,rgba(255,255,255,.042),rgba(255,255,255,.008));
   box-shadow:
-    0 10px 26px rgba(0,0,0,.38),
-    inset 0 1px 0 rgba(255,255,255,.22),
-    inset 0 -1px 0 rgba(255,255,255,.05),
-    inset 0 0 0 .5px rgba(255,255,255,.12);
+    0 10px 28px rgba(0,0,0,.42),
+    0 0 0 1px rgba(255,255,255,.14),
+    0 0 18px rgba(255,255,255,.06),
+    inset 0 1.5px 0 rgba(255,255,255,.34),
+    inset 0 -1px 0 rgba(255,255,255,.08),
+    inset 1px 0 0 rgba(255,255,255,.14),
+    inset -1px 0 0 rgba(255,255,255,.14),
+    inset 0 0 26px rgba(255,255,255,.05);
 }
 /* 顶面柔光 */
 #dock::before{
@@ -258,12 +271,20 @@ html[data-theme=dark] #dock::after{
 #dock-blob b{
   position:relative;
   display:block;width:100%;height:100%;border-radius:19px;
-  background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.012));
+  background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.008));
+  /* 透镜里的内容再清一点、再亮一点：透过透镜看东西比透过底板更「聚」 */
+  -webkit-backdrop-filter:blur(.6px) saturate(132%) brightness(1.05);
+  backdrop-filter:blur(.6px) saturate(132%) brightness(1.05);
+  -webkit-backdrop-filter:blur(.6px) saturate(132%) brightness(1.05) url(#lg-refract);
+  backdrop-filter:blur(.6px) saturate(132%) brightness(1.05) url(#lg-refract);
   box-shadow:
-    inset 0 1px 0 rgba(255,255,255,.70),
-    inset 0 0 0 .5px rgba(255,255,255,.34),
-    0 0 0 .5px rgba(255,255,255,.18),
-    0 3px 10px rgba(30,26,10,.08);
+    inset 0 1.5px 0 rgba(255,255,255,.95),
+    inset 0 -1px 0 rgba(255,255,255,.30),
+    inset 1px 0 0 rgba(255,255,255,.50),
+    inset -1px 0 0 rgba(255,255,255,.50),
+    inset 0 0 0 .5px rgba(255,255,255,.45),
+    0 0 0 1px rgba(255,255,255,.22),
+    0 4px 12px rgba(30,26,10,.10);
   transition:
     width .26s cubic-bezier(.32,1.34,.28,1),
     height .26s cubic-bezier(.32,1.34,.28,1),
@@ -271,7 +292,23 @@ html[data-theme=dark] #dock::after{
     border-radius .26s cubic-bezier(.32,1.34,.28,1),
     background .2s ease,box-shadow .2s ease;
 }
-/* 透镜边缘折射环：外沿强高光、内沿暗线、左右侧壁亮带 —— 光穿过玻璃厚边的弯折感 */
+/* 边缘色散：玻璃厚边把白光拆成一点点色带（外沿偏青、内沿偏洋红），只有 1~2px，
+   这是「边缘有折射」最直观的视觉线索，纯 CSS，任何 WebView 都生效 */
+#dock-blob b::before{
+  content:"";position:absolute;inset:-.5px;border-radius:inherit;pointer-events:none;z-index:2;
+  box-shadow:
+    inset 0 0 0 1px rgba(150,225,255,.62),
+    inset 0 0 0 1.5px rgba(255,255,255,.10),
+    inset 0 0 0 2.5px rgba(255,168,255,.28);
+  filter:blur(.35px);
+}
+html[data-theme=dark] #dock-blob b::before{
+  box-shadow:
+    inset 0 0 0 .5px rgba(150,220,255,.34),
+    inset 0 0 0 1.5px rgba(255,255,255,.06),
+    inset 0 0 0 2.5px rgba(255,160,250,.14);
+}
+/* 透镜边缘高光环：外沿强高光、内沿暗线、左右侧壁亮带 —— 光穿过玻璃厚边的弯折感 */
 #dock-blob b::after{
   content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
   background:
@@ -284,11 +321,15 @@ html[data-theme=dark] #dock::after{
     inset -1px 0 0 rgba(255,255,255,.58);
 }
 html[data-theme=dark] #dock-blob b{
-  background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.018));
+  background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.012));
   box-shadow:
-    inset 0 1px 0 rgba(255,255,255,.26),
-    inset 0 0 0 .5px rgba(255,255,255,.14),
-    0 3px 10px rgba(0,0,0,.22);
+    inset 0 1.5px 0 rgba(255,255,255,.40),
+    inset 0 -1px 0 rgba(255,255,255,.12),
+    inset 1px 0 0 rgba(255,255,255,.20),
+    inset -1px 0 0 rgba(255,255,255,.20),
+    inset 0 0 0 .5px rgba(255,255,255,.18),
+    0 0 0 1px rgba(255,255,255,.10),
+    0 4px 12px rgba(0,0,0,.24);
 }
 html[data-theme=dark] #dock-blob b::after{
   background:
@@ -306,19 +347,26 @@ html[data-theme=dark] #dock-blob b::after{
   height:calc(100% + 22px);
   margin:-12px -8px -10px;
   border-radius:22px;
-  background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.03));
+  background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.016));
   box-shadow:
-    inset 0 1px 0 rgba(255,255,255,.92),
-    inset 0 0 0 .5px rgba(255,255,255,.48),
-    0 0 0 .5px rgba(255,255,255,.28),
-    0 10px 24px rgba(30,26,10,.16);
+    inset 0 2px 0 rgba(255,255,255,1),
+    inset 0 -1px 0 rgba(255,255,255,.34),
+    inset 1px 0 0 rgba(255,255,255,.60),
+    inset -1px 0 0 rgba(255,255,255,.60),
+    inset 0 0 0 .5px rgba(255,255,255,.52),
+    0 0 0 1px rgba(255,255,255,.30),
+    0 10px 26px rgba(30,26,10,.18);
 }
 html[data-theme=dark] #dock.dragging #dock-blob b{
-  background:linear-gradient(180deg,rgba(255,255,255,.13),rgba(255,255,255,.04));
+  background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.02));
   box-shadow:
-    inset 0 1px 0 rgba(255,255,255,.38),
-    inset 0 0 0 .5px rgba(255,255,255,.22),
-    0 10px 24px rgba(0,0,0,.36);
+    inset 0 2px 0 rgba(255,255,255,.48),
+    inset 0 -1px 0 rgba(255,255,255,.14),
+    inset 1px 0 0 rgba(255,255,255,.26),
+    inset -1px 0 0 rgba(255,255,255,.26),
+    inset 0 0 0 .5px rgba(255,255,255,.24),
+    0 0 0 1px rgba(255,255,255,.14),
+    0 10px 26px rgba(0,0,0,.38);
 }
 /* 图标：不动。只改颜色/透明度 */
 #dock button{
