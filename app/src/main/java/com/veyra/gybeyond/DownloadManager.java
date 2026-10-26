@@ -1280,118 +1280,156 @@ final class DownloadManager {
 
         // 3) 逐分片 MediaExtractor → 同一 MediaMuxer：每个分片是独立合法 ts（自带 PAT/PMT），
         //    单独解析可靠（拼接 full.ts 只读第一分片的坑在这里规避）。
-        //    PTS：分片内归零（t-basePts）后叠加跨分片累积值（lastV/lastA 按轨持续累加），
-        //    并对 B 帧回退做单调化（不早于前样本，同 writeSamples 红果路径）——缺这一步
-        //    部分设备 MediaMuxer 内部报错标记 stopped，到 stop() 才抛 "would have stopped already"。
+        //    PTS：分片内归零（t-basePts）后叠加跨分片累积值（vSegBase/aSegBase 按轨持续累加），
+        //    并对 B 帧回退做单调化（不早于前样本）——缺这一步部分设备 MediaMuxer 内部报错标记
+        //    stopped，到 stop() 才抛 "would have stopped already"。
+        //    读取方式：先首片解析格式/csd + addTrack + start，然后【视频轨一遍 + 音频轨一遍】
+        //    （每遍 selectTrack 后 advance，MediaExtractor 标准用法）。此前"不 select 交错读取"
+        //    在真机上 getSampleSize 拿不到样本 → 0 样本 → 空 mp4（<1KB）→ 三集全"产物无效"。
         dbg.append("MediaExtractor 逐分片重封装 ").append(decFiles.length).append(" 片…\n");
         MediaMuxer muxer = new MediaMuxer(out.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
         boolean started = false;
         int vTrack = -1, aTrack = -1;
-        long vLast = 0, aLast = 0;      // 跨分片最后写入 PTS（每轨独立，保证全局单调）
         long vSegBase = 0, aSegBase = 0; // 跨分片全局基准（每片起始时间轴位置，分片内相对偏移加在这个基准上）
         int vCnt = 0, aCnt = 0;
         ByteBuffer buf = ByteBuffer.allocateDirect(2 * 1024 * 1024);
         MediaCodec.BufferInfo bi = new MediaCodec.BufferInfo();
         try {
+            // 3.1 首片解析轨格式 + csd + addTrack + start
+            MediaExtractor first = new MediaExtractor();
+            try {
+                first.setDataSource(decFiles[0].getAbsolutePath());
+                int ev0 = -1, ea0 = -1;
+                for (int t = 0; t < first.getTrackCount(); t++) {
+                    String mime = first.getTrackFormat(t).getString(MediaFormat.KEY_MIME);
+                    if (mime == null) continue;
+                    if (mime.startsWith("video/") && ev0 < 0) ev0 = t;
+                    else if (mime.startsWith("audio/") && ea0 < 0) ea0 = t;
+                }
+                if (ev0 < 0) throw new java.io.IOException("分片无视频轨: " + segNames.get(0));
+                MediaFormat fv = first.getTrackFormat(ev0);
+                MediaFormat fa = ea0 >= 0 ? first.getTrackFormat(ea0) : null;
+                // 视频 csd 缺失（avc3/hev1 内联参数集）→ 扫描首关键帧提取 SPS/PPS（HEVC 含 VPS）
+                String vmime = fv.getString(MediaFormat.KEY_MIME);
+                if (!fv.containsKey("csd-0")) {
+                    List<byte[]> nal = null;
+                    MediaExtractor se = new MediaExtractor();
+                    try {
+                        se.setDataSource(decFiles[0].getAbsolutePath());
+                        se.selectTrack(ev0);
+                        boolean hevc = vmime != null && vmime.startsWith("video/hevc");
+                        while (se.advance()) {
+                            if ((se.getSampleFlags() & MediaCodec.BUFFER_FLAG_KEY_FRAME) == 0) continue;
+                            long sz = se.getSampleSize();
+                            if (sz <= 0 || sz > 4 * 1024 * 1024) continue;
+                            ByteBuffer bb = ByteBuffer.allocate((int) sz);
+                            int n = se.readSampleData(bb, 0);
+                            if (n <= 0) continue;
+                            bb.position(0); bb.limit(n);
+                            List<byte[]> p2 = extractParameterSets(bb, hevc);
+                            if (!p2.isEmpty()) { nal = p2; break; }
+                        }
+                    } finally { se.release(); }
+                    if (nal == null) throw new java.io.IOException("无法提取视频参数集(csd)");
+                    int total = 0; for (byte[] b : nal) total += b.length;
+                    ByteBuffer csd = ByteBuffer.allocate(total);
+                    for (byte[] b : nal) csd.put(b);
+                    csd.position(0);
+                    fv.setByteBuffer("csd-0", csd);
+                }
+                // 音频 csd 缺失 → 从首个 ADTS 帧构造 AudioSpecificConfig
+                if (fa != null && !fa.containsKey("csd-0")) {
+                    ByteBuffer asc = extractAacAsc(decFiles[0], ea0);
+                    if (asc == null) throw new java.io.IOException("无法构造音频 csd(ADTS)");
+                    fa.setByteBuffer("csd-0", asc);
+                }
+                // 编码/音频校验（对齐红果 normalizeEpisode 口径）：记录源编码与音频参数
+                String vmime2 = fv.getString(MediaFormat.KEY_MIME);
+                boolean vmimeOk = (vmime2 != null && (vmime2.startsWith("video/avc") || vmime2.startsWith("video/hevc")));
+                dbg.append("视频: ").append(vmime2 == null ? "?" : vmime2)
+                    .append(' ').append(fv.getInteger(MediaFormat.KEY_WIDTH)).append('x').append(fv.getInteger(MediaFormat.KEY_HEIGHT))
+                    .append(" csd=").append(fv.containsKey("csd-0") ? "内置" : "提取")
+                    .append(vmimeOk ? "" : " [编码非 H264/HEVC，播放兼容性未知]")
+                    .append('\n');
+                if (fa != null) {
+                    String amime = fa.getString(MediaFormat.KEY_MIME);
+                    boolean aOk = amime != null && (amime.startsWith("audio/mp4a") || amime.startsWith("audio/aac"));
+                    dbg.append("音频: ").append(amime == null ? "?" : amime)
+                        .append(" 采样率=").append(fa.getInteger(MediaFormat.KEY_SAMPLE_RATE))
+                        .append(" 声道=").append(fa.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
+                        .append(aOk ? "" : " [音频非 AAC，播放兼容性未知]")
+                        .append('\n');
+                } else dbg.append("音频: 无音频轨（仅视频）\n");
+                vTrack = muxer.addTrack(fv);
+                aTrack = fa != null ? muxer.addTrack(fa) : -1;
+                muxer.start();
+                started = true;
+            } finally { first.release(); }
+
+            // 3.2 视频轨一遍（每片 selectTrack(视频) 后 advance；PTS 跨分片单调）
+            long vLast = 0;
             for (int p = 0; p < decFiles.length; p++) {
                 MediaExtractor ex = new MediaExtractor();
-                int ev = -1, ea = -1;
                 try {
                     ex.setDataSource(decFiles[p].getAbsolutePath());
+                    int ev = -1;
                     for (int t = 0; t < ex.getTrackCount(); t++) {
                         String mime = ex.getTrackFormat(t).getString(MediaFormat.KEY_MIME);
-                        if (mime == null) continue;
-                        if (mime.startsWith("video/") && ev < 0) ev = t;
-                        else if (mime.startsWith("audio/") && ea < 0) ea = t;
+                        if (mime != null && mime.startsWith("video/")) { ev = t; break; }
                     }
-                    if (ev < 0) throw new java.io.IOException("分片无视频轨: " + segNames.get(p));
-                    MediaFormat fv = ex.getTrackFormat(ev);
-                    MediaFormat fa = ea >= 0 ? ex.getTrackFormat(ea) : null;
-                    if (!started) {
-                        // 视频 csd 缺失（avc3/hev1 内联参数集）→ 扫描首关键帧提取 SPS/PPS（HEVC 含 VPS）
-                        String vmime = fv.getString(MediaFormat.KEY_MIME);
-                        if (!fv.containsKey("csd-0")) {
-                            List<byte[]> nal = null;
-                            MediaExtractor se = new MediaExtractor();
-                            try {
-                                se.setDataSource(decFiles[p].getAbsolutePath());
-                                se.selectTrack(ev);
-                                boolean hevc = vmime != null && vmime.startsWith("video/hevc");
-                                while (se.advance()) {
-                                    if ((se.getSampleFlags() & MediaCodec.BUFFER_FLAG_KEY_FRAME) == 0) continue;
-                                    long sz = se.getSampleSize();
-                                    if (sz <= 0 || sz > 4 * 1024 * 1024) continue;
-                                    ByteBuffer bb = ByteBuffer.allocate((int) sz);
-                                    int n = se.readSampleData(bb, 0);
-                                    if (n <= 0) continue;
-                                    bb.position(0); bb.limit(n);
-                                    List<byte[]> p2 = extractParameterSets(bb, hevc);
-                                    if (!p2.isEmpty()) { nal = p2; break; }
-                                }
-                            } finally { se.release(); }
-                            if (nal == null) throw new java.io.IOException("无法提取视频参数集(csd)");
-                            int total = 0; for (byte[] b : nal) total += b.length;
-                            ByteBuffer csd = ByteBuffer.allocate(total);
-                            for (byte[] b : nal) csd.put(b);
-                            csd.position(0);
-                            fv.setByteBuffer("csd-0", csd);
-                        }
-                        // 音频 csd 缺失 → 从首个 ADTS 帧构造 AudioSpecificConfig
-                        if (fa != null && !fa.containsKey("csd-0")) {
-                            ByteBuffer asc = extractAacAsc(decFiles[p], ea);
-                            if (asc == null) throw new java.io.IOException("无法构造音频 csd(ADTS)");
-                            fa.setByteBuffer("csd-0", asc);
-                        }
-                        // 编码/音频校验（对齐红果 normalizeEpisode 口径）：记录源编码与音频参数
-                        String vmime2 = fv.getString(MediaFormat.KEY_MIME);
-                        boolean vmimeOk = (vmime2 != null && (vmime2.startsWith("video/avc") || vmime2.startsWith("video/hevc")));
-                        dbg.append("视频: ").append(vmime2 == null ? "?" : vmime2)
-                            .append(' ').append(fv.getInteger(MediaFormat.KEY_WIDTH)).append('x').append(fv.getInteger(MediaFormat.KEY_HEIGHT))
-                            .append(" csd=").append(fv.containsKey("csd-0") ? "内置" : "提取")
-                            .append(vmimeOk ? "" : " [编码非 H264/HEVC，播放兼容性未知]")
-                            .append('\n');
-                        if (fa != null) {
-                            String amime = fa.getString(MediaFormat.KEY_MIME);
-                            boolean aOk = amime != null && (amime.startsWith("audio/mp4a") || amime.startsWith("audio/aac"));
-                            dbg.append("音频: ").append(amime == null ? "?" : amime)
-                                .append(" 采样率=").append(fa.getInteger(MediaFormat.KEY_SAMPLE_RATE))
-                                .append(" 声道=").append(fa.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
-                                .append(aOk ? "" : " [音频非 AAC，播放兼容性未知]")
-                                .append('\n');
-                        } else dbg.append("音频: 无音频轨（仅视频）\n");
-                        vTrack = muxer.addTrack(fv);
-                        aTrack = fa != null ? muxer.addTrack(fa) : -1;
-                        muxer.start();
-                        started = true;
-                    }
-                    // 不调用 selectTrack：MediaExtractor 一次只能选一个轨，双 select 只读到最后
-                    // 选中的轨（视频轨 0 样本 → MediaMuxer 内部报错被吞，stop() 才抛 would have stopped already）。
-                    // 不 select 时 extractor 交错返回全部轨，getSampleTrackIndex() 分流视频/音频。
-                    long vBase = -1, aBase = -1, vMax = 0, aMax = 0;
-                    while (true) {
+                    if (ev < 0) continue;   // 异常分片无视频轨：跳过（其余片照常写）
+                    ex.selectTrack(ev);
+                    long vBase = -1, vMax = 0;
+                    while (ex.advance()) {
                         long sz = ex.getSampleSize();
-                        if (sz <= 0) break;
+                        if (sz <= 0) continue;
                         if (buf.capacity() < sz) buf = ByteBuffer.allocateDirect((int) sz + 65536);
                         buf.clear();
                         int n = ex.readSampleData(buf, 0);
-                        if (n < 0) break;
-                        int track = ex.getSampleTrackIndex();
+                        if (n < 0) continue;
                         long t = ex.getSampleTime();
                         int flags = ex.getSampleFlags();
                         buf.position(0); buf.limit(n);
-                        if (track == ev) {
-                            if (vBase < 0) vBase = t;
-                            if (t > vMax) vMax = t;
-                            // PTS = 分片全局基准(vSegBase) + 分片内相对偏移(t-vBase)——不能把相对偏移
-                            // 加到上一帧 PTS 上（会每帧累积叠加，几十帧后整片时长被拉长几十倍=播放慢放）
-                            long rel = t - vBase; if (rel < 0) rel = 0;
-                            long pts = vSegBase + rel;
-                            if (pts <= vLast) pts = vLast + 1;   // B 帧回退单调化
-                            vLast = pts;
-                            bi.set(0, n, pts, flags);
-                            muxer.writeSampleData(vTrack, buf, bi);
-                            vCnt++;
-                        } else if (track == ea) {
+                        if (vBase < 0) vBase = t;
+                        if (t > vMax) vMax = t;
+                        // PTS = 分片全局基准 + 分片内相对偏移（不能逐帧累加，否则时长被拉长=播放慢放）
+                        long rel = t - vBase; if (rel < 0) rel = 0;
+                        long pts = vSegBase + rel;
+                        if (pts <= vLast) pts = vLast + 1;   // B 帧回退单调化
+                        vLast = pts;
+                        bi.set(0, n, pts, flags);
+                        muxer.writeSampleData(vTrack, buf, bi);
+                        vCnt++;
+                    }
+                    if (vBase >= 0) vSegBase += (vMax - vBase);
+                } finally { ex.release(); }
+            }
+
+            // 3.3 音频轨一遍（如有；ADTS 剥头写 raw AAC）
+            if (aTrack >= 0) {
+                long aLast = 0;
+                for (int p = 0; p < decFiles.length; p++) {
+                    MediaExtractor ex = new MediaExtractor();
+                    try {
+                        ex.setDataSource(decFiles[p].getAbsolutePath());
+                        int ea = -1;
+                        for (int t = 0; t < ex.getTrackCount(); t++) {
+                            String mime = ex.getTrackFormat(t).getString(MediaFormat.KEY_MIME);
+                            if (mime != null && mime.startsWith("audio/")) { ea = t; break; }
+                        }
+                        if (ea < 0) continue;
+                        ex.selectTrack(ea);
+                        long aBase = -1, aMax = 0;
+                        while (ex.advance()) {
+                            long sz = ex.getSampleSize();
+                            if (sz <= 0) continue;
+                            if (buf.capacity() < sz) buf = ByteBuffer.allocateDirect((int) sz + 65536);
+                            buf.clear();
+                            int n = ex.readSampleData(buf, 0);
+                            if (n < 0) continue;
+                            long t = ex.getSampleTime();
+                            int flags = ex.getSampleFlags();
+                            buf.position(0); buf.limit(n);
                             if (aBase < 0) aBase = t;
                             if (t > aMax) aMax = t;
                             long rel = t - aBase; if (rel < 0) rel = 0;
@@ -1403,28 +1441,22 @@ final class DownloadManager {
                             if (n > 7 && (buf.get(0) & 0xFF) == 0xFF && (buf.get(1) & 0xF0) == 0xF0) {
                                 int hlen = ((buf.get(6) & 0x01) == 0) ? 9 : 7;
                                 if (n - hlen > 0) {
-                                    buf.position(0);
                                     bi.set(hlen, n - hlen, pts, flags);
                                     muxer.writeSampleData(aTrack, buf, bi);
                                     aCnt++;
-                                    ex.advance();
                                     continue;
                                 }
                             }
-                            buf.position(0);
                             bi.set(0, n, pts, flags);
                             muxer.writeSampleData(aTrack, buf, bi);
                             aCnt++;
                         }
-                        ex.advance();
-                    }
-                    // 分片结束：全局基准累加本片时长（源 PTS 差，独立或延续两种源都正确）
-                    if (vBase >= 0) vSegBase += (vMax - vBase);
-                    if (aBase >= 0) aSegBase += (aMax - aBase);
-                } finally { ex.release(); }
+                        if (aBase >= 0) aSegBase += (aMax - aBase);
+                    } finally { ex.release(); }
+                }
             }
             dbg.append("写入统计: 视频 ").append(vCnt).append(" 样本、音频 ").append(aCnt).append(" 样本\n");
-            if (started) muxer.stop();
+            if (started && (vCnt + aCnt) > 0) muxer.stop();
         } finally {
             muxer.release();
             for (File df : decFiles) if (df != null) df.delete();
