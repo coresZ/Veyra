@@ -29,8 +29,6 @@ final class UpdateManager {
     private static final String RELEASE_BASE = "https://github.com/gybeyond1/Veyra/releases/download/";
     private static final Pattern VERSION = Pattern.compile("\\d+\\.\\d+\\.\\d+");
     private static final long AUTO_INTERVAL_MS = 12 * 60 * 60 * 1000L;
-    private static final long MANUAL_WINDOW_MS = 60 * 60 * 1000L;
-    private static final int MANUAL_LIMIT = 5;
 
     interface Progress { void onPercent(int percent); }
 
@@ -127,23 +125,9 @@ final class UpdateManager {
 
     synchronized JSONObject check(boolean manual) throws Exception {
         long now = System.currentTimeMillis();
-        if (manual) {
-            List<Long> checks = new ArrayList<>();
-            for (String value : preferences.getString("manual_checks", "").split(",")) {
-                try {
-                    long timestamp = Long.parseLong(value);
-                    if (timestamp <= now && now - timestamp < MANUAL_WINDOW_MS) checks.add(timestamp);
-                } catch (NumberFormatException ignored) { }
-            }
-            if (checks.size() >= MANUAL_LIMIT) return status("throttled");
-            checks.add(now);
-            StringBuilder saved = new StringBuilder();
-            for (long timestamp : checks) {
-                if (saved.length() > 0) saved.append(',');
-                saved.append(timestamp);
-            }
-            preferences.edit().putString("manual_checks", saved.toString()).apply();
-        } else {
+        // 手动检查不设次数限制（旧版「1 小时最多 5 次」会在调试时被卡住）；
+        // 只有自动检查才走 12 小时间隔，避免每次冷启动都打 GitHub API。
+        if (!manual) {
             long last = preferences.getLong("last_auto_check", 0);
             if (last > 0 && now >= last && now - last < AUTO_INTERVAL_MS) return cached();
             preferences.edit().putLong("last_auto_check", now).apply();

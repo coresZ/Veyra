@@ -68,6 +68,16 @@ final class FFmpegConcat {
     }
 
     /**
+     * 产物级校验（供非 native 的合并路径复用，如 DownloadManager 的 MediaMuxer 合并）：
+     * 回读产物检查视频轨/音频轨是否齐全、时长是否对得上，不通过抛 IOException。
+     */
+    static void verify(File output, List<File> inputs, StringBuilder debug) throws Exception {
+        if (output == null || !output.exists() || output.length() == 0)
+            throw new java.io.IOException("合并产物为空");
+        verifyAudio(inputs, output, debug);
+    }
+
+    /**
      * 产物级音频校验：合并完成后回读产物，检查音频轨存在、音频时长与视频/分集总和匹配。
      * 只读容器元数据不遍历帧（快），能捕获「某段无声/丢声」这类规范化诊断看不出的产物缺陷。
      * 校验失败抛异常（分集保留，可重下重试）。

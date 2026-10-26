@@ -1425,19 +1425,25 @@ final class DownloadManager {
             task.detail = "第 " + n + " 集合并中…";
             task.debug = "第 " + n + " 集：解密合并中…";
             ExecutorService remuxPool = Executors.newSingleThreadExecutor();
+            // 合并超时按分片总量动态放宽：长剧的单集能到 300MB+/165 片，Muxer 逐样本写入要跑一两分钟，
+            // 固定 120s 会把「其实能成功」的集判成超时（用户看到的就是合并失败）
+            long workBytes = 0;
+            File[] workFiles = work.listFiles();
+            if (workFiles != null) for (File wf : workFiles) if (wf.isFile() && wf.getName().endsWith(".ts")) workBytes += wf.length();
+            int timeoutSec = (int) Math.min(600, Math.max(120, 90 + workBytes / (1024 * 1024) / 2));
             try {
                 Future<?> fr = remuxPool.submit(() -> {
                     try { mergeTsToMp4(work, tmpOut, dbg); }
                     catch (Throwable t) { throw new RuntimeException(t); }
                 });
                 try {
-                    fr.get(120, TimeUnit.SECONDS);
+                    fr.get(timeoutSec, TimeUnit.SECONDS);
                 } catch (TimeoutException te) {
                     fr.cancel(true);
                     // 超时也要留合并日志，用户能看卡在哪
-                    task.error = "第 " + n + " 集 m3u8 合并超时（120s）\n" + dbg;
-                    task.debug = "第 " + n + " 集：合并超时（120s），详见合并日志";
-                    throw new java.io.IOException("第 " + n + " 集 m3u8 合并超时（120s），请重试");
+                    task.error = "第 " + n + " 集 m3u8 合并超时（" + timeoutSec + "s）\n" + dbg;
+                    task.debug = "第 " + n + " 集：合并超时（" + timeoutSec + "s），详见合并日志";
+                    throw new java.io.IOException("第 " + n + " 集 m3u8 合并超时（" + timeoutSec + "s），请重试");
                 } catch (java.util.concurrent.ExecutionException ee) {
                     // 合并失败：把 m3u8ToMp4 详细日志写进任务，不再让 debug 残留下载阶段的"已完成 X/Y 片"
                     Throwable cause = ee.getCause() != null ? ee.getCause() : ee;
@@ -1628,35 +1634,279 @@ final class DownloadManager {
             throw e;
         }
 
-        // 3) FFmpeg concat 合并（libffconcat.so = 后端 server/downloader.js 同款 concat 逻辑：
-        //    -f concat -safe 0 -c copy -video_track_timescale 90000 -movflags +faststart -tag:v avc3/hev1）。
-        //    FFmpeg 自动处理 B 帧 PTS/ctts、annex-b→avcc、SPS/PPS in-band（avc3）——MediaMuxer 在
-        //    小米设备上 B 帧回退 PTS 崩、同 PTS 多音频样本崩、无 stss 乱码、时间轴误差加速，全部由
-        //    FFmpeg 一次解决。输入 = 解密后的明文 TS 分片列表（已 0x47 校验），本地文件，无需源站。
-        dbg.append("FFmpeg concat 合并 ").append(decFiles.length).append(" 片…\n");
+        // 3) 合并。顺序：系统 MediaMuxer 优先（Android 原生 muxer，stsd/avcC/hvcC/esds 由系统生成，
+        //    不可能出现「moov 在、视频轨读不出」），失败才回退 libffconcat.so 的 FFmpeg concat。
+        //    v0.18.68 是反着来的：native 先跑，165 片那集 native 日志一路「成功」，Java 回读只有音频轨
+        //    （视频=0ms head=ftyp）→ 整集白跑还报「产物没有视频轨」。
+        //    首片视频编码 → tag（回退 native 时用）。
         String tag = "avc3";
         try {
-            android.media.MediaExtractor ex = new android.media.MediaExtractor();
+            MediaExtractor ex = openExtractor(decFiles[0]);
             try {
-                ex.setDataSource(decFiles[0].getAbsolutePath());
                 for (int t = 0; t < ex.getTrackCount(); t++) {
-                    String mime = ex.getTrackFormat(t).getString(android.media.MediaFormat.KEY_MIME);
+                    String mime = ex.getTrackFormat(t).getString(MediaFormat.KEY_MIME);
                     if (mime != null && mime.startsWith("video/hevc")) { tag = "hev1"; break; }
                 }
-            } finally { ex.release(); }
+            } finally { try { ex.release(); } catch (Exception ignored) {} }
         } catch (Exception ignored) {}
         File nativeLog = new File(work, "native-concat.log");
         try {
-            FFmpegConcat.concat(java.util.Arrays.asList(decFiles), null, out, tag, dbg, nativeLog);
-        } catch (Throwable t) {
-            // 合并失败：删除 out 半成品（否则 84KB 残片留盘占位、重试时被当成"分集完成"复用 → 恶性循环）
-            if (out.exists()) out.delete();
-            throw t;
+            boolean merged = false;
+            try {
+                dbg.append("系统 muxer 合并 ").append(decFiles.length).append(" 片…\n");
+                concatTsByMuxer(decFiles, out, dbg);
+                FFmpegConcat.verify(out, java.util.Arrays.asList(decFiles), dbg);
+                merged = true;
+            } catch (Throwable muxErr) {
+                dbg.append("系统 muxer 合并失败：").append(muxErr.getMessage()).append('\n');
+                if (out.exists()) out.delete();
+            }
+            if (!merged) {
+                dbg.append("回退 libffconcat（FFmpeg concat）合并 ").append(decFiles.length).append(" 片…\n");
+                try {
+                    FFmpegConcat.concat(java.util.Arrays.asList(decFiles), null, out, tag, dbg, nativeLog);
+                    merged = true;
+                } catch (Throwable t) {
+                    if (out.exists()) dbg.append("native 产物结构: ").append(dumpMp4Boxes(out)).append('\n');
+                    if (out.exists()) out.delete();
+                    throw t;
+                }
+            }
+            dbg.append("合并完成 ").append(out.length()).append("B 耗时 ").append((System.currentTimeMillis() - t0) / 1000).append("s\n");
         } finally {
+            // 明文分片是临时文件（每片 2~3MB，165 片就是几百 MB），无论成败都清掉
             for (File df : decFiles) if (df != null) df.delete();
         }
-        dbg.append("合并完成 ").append(out.length()).append("B 耗时 ").append((System.currentTimeMillis() - t0) / 1000).append("s\n");
     }
+
+    // ---- 纯 Java 分片 concat（MediaExtractor + MediaMuxer）----
+    /** 每片统计：本片视频相对时长 / 帧间隔 / 写入样本数。 */
+    private static final class SegStat {
+        long maxV, vDelta;
+        int samples;
+    }
+
+    private static MediaExtractor openExtractor(File f) throws Exception {
+        MediaExtractor ex = new MediaExtractor();
+        ex.setDataSource(f.getAbsolutePath());
+        return ex;
+    }
+
+    /**
+     * 分片级 concat（纯 Java）。用于私密模式（黄果）ts 分片：
+     *   逐片 MediaExtractor 读样本 → MediaMuxer 顺序写入，时间轴按「本片首样本 + 累计偏移」重排。
+     * 相比 libffconcat 的 -c copy，这里由系统 muxer 生成 stsd/stsz/stco/stss 与 avcC/hvcC，
+     * 产物必然能被 MediaExtractor / 系统播放器识别（native 产物曾出现「有音频轨、没有视频轨」）。
+     * 视频保持解码序（B 帧靠 muxer 写 ctts），音频按本片视频时长截断，避免逐片累积音画错位。
+     */
+    private static void concatTsByMuxer(File[] decFiles, File out, StringBuilder dbg) throws Exception {
+        MediaFormat vf = null, af = null;
+        int vIdx = -1, aIdx = -1;
+        MediaExtractor probe = openExtractor(decFiles[0]);
+        try {
+            for (int t = 0; t < probe.getTrackCount(); t++) {
+                MediaFormat f = probe.getTrackFormat(t);
+                if (f == null) continue;
+                String mime = f.getString(MediaFormat.KEY_MIME);
+                if (mime == null) continue;
+                if (vIdx < 0 && mime.startsWith("video/")) { vIdx = t; vf = f; }
+                else if (aIdx < 0 && mime.startsWith("audio/")) { aIdx = t; af = f; }
+            }
+        } finally { try { probe.release(); } catch (Exception ignored) {} }
+        if (vIdx < 0 || vf == null) throw new java.io.IOException("首片没有视频轨，无法合并");
+        String vmime = vf.getString(MediaFormat.KEY_MIME);
+        if (!vf.containsKey("csd-0")) ensureCodecSpecificData(vf, collectSamples(openExtractor(decFiles[0]), vIdx), vmime);
+        if (!vf.containsKey("csd-0")) throw new java.io.IOException("首片提取不到视频参数集(csd)，无法用 muxer 合并");
+        if (af != null && !af.containsKey("csd-0")) {
+            ByteBuffer asc = extractAacAsc(decFiles[0], aIdx);
+            if (asc == null) asc = buildAacAsc(af);
+            if (asc != null) af.setByteBuffer("csd-0", asc);
+        }
+
+        MediaMuxer muxer = null;
+        boolean started = false;
+        try {
+            if (out.exists()) out.delete();          // 覆盖上次失败留下的残片
+            muxer = new MediaMuxer(out.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+            int vt = muxer.addTrack(vf);
+            int at = af != null ? muxer.addTrack(af) : -1;
+            muxer.start();
+            started = true;
+            long[] vLast = {-1}, aLast = {-1};
+            long offset = 0;
+            int written = 0, used = 0, skipped = 0;
+            for (int i = 0; i < decFiles.length; i++) {
+                SegStat st = writeSegment(decFiles[i], muxer, vt, at, offset, vLast, aLast);
+                if (st.samples <= 0) { skipped++; continue; }
+                used++;
+                written += st.samples;
+                offset += Math.max(0, st.maxV) + Math.max(0, st.vDelta);
+            }
+            if (written <= 0) throw new java.io.IOException("所有分片都没有可写入的样本");
+            dbg.append("muxer 写入 ").append(used).append('/').append(decFiles.length).append(" 片 样本 ")
+                    .append(written).append(" 时长 ").append(offset / 1000).append("ms")
+                    .append(skipped > 0 ? "（跳过 " + skipped + " 片空片）" : "").append('\n');
+        } finally {
+            if (muxer != null) {
+                if (started) { try { muxer.stop(); } catch (Exception ignored) {} }
+                try { muxer.release(); } catch (Exception ignored) {}
+            }
+        }
+        if (!out.exists() || out.length() == 0) throw new java.io.IOException("muxer 产物为空");
+    }
+
+    /** 单片写入：视频整轨（解码序）+ 音频按本片视频时长截断；时间戳跨片绝对单调。 */
+    private static SegStat writeSegment(File f, MediaMuxer muxer, int vTrack, int aTrack,
+                                        long offset, long[] vLast, long[] aLast) throws Exception {
+        SegStat st = new SegStat();
+        int vi = -1, ai = -1;
+        MediaExtractor probe = openExtractor(f);
+        try {
+            for (int t = 0; t < probe.getTrackCount(); t++) {
+                MediaFormat fm = probe.getTrackFormat(t);
+                if (fm == null) continue;
+                String mime = fm.getString(MediaFormat.KEY_MIME);
+                if (mime == null) continue;
+                if (vi < 0 && mime.startsWith("video/")) vi = t;
+                else if (ai < 0 && mime.startsWith("audio/")) ai = t;
+            }
+        } finally { try { probe.release(); } catch (Exception ignored) {} }
+        if (vi < 0) return st;
+        List<Sample> vs = collectSamples(openExtractor(f), vi);
+        if (vs.isEmpty()) return st;
+        List<Sample> as = ai >= 0 ? collectSamples(openExtractor(f), ai) : new ArrayList<Sample>();
+
+        long base = vs.get(0).pts;
+        if (!as.isEmpty()) base = Math.min(base, as.get(0).pts);
+
+        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+        long prev = -1;
+        int k = 0;
+        for (Sample s : vs) {
+            long t = s.pts - base + offset;
+            if (t < 0) t = 0;
+            if (t <= vLast[0]) t = vLast[0] + 1;
+            if (k > 0) {
+                long d = t - prev;
+                if (d > 0 && d < 200_000L) st.vDelta = Math.max(st.vDelta, d);   // 帧间隔（用于补片尾）
+            }
+            vLast[0] = t;
+            if (t > st.maxV) st.maxV = t;
+            prev = t;
+            k++;
+            writeSample(muxer, vTrack, t, s.size, s.flags, s.data, info);
+            st.samples++;
+        }
+        st.maxV = st.maxV - offset;                        // 转成本片相对时长
+        long maxRel = st.maxV + st.vDelta;
+        for (Sample s : as) {
+            long rel = s.pts - base;
+            if (rel > maxRel) continue;                     // 音频截断到本片视频时长
+            long t = rel + offset;
+            if (t < 0) t = 0;
+            if (t <= aLast[0]) t = aLast[0] + 1;
+            aLast[0] = t;
+            writeSample(muxer, aTrack, t, s.size, s.flags, s.data, info);
+            st.samples++;
+        }
+        return st;
+    }
+
+    /** 无 ADTS 头可读时，按轨道的采样率/声道数兜底构造 AAC-LC 的 AudioSpecificConfig。 */
+    private static ByteBuffer buildAacAsc(MediaFormat af) {
+        try {
+            int sr = af.containsKey(MediaFormat.KEY_SAMPLE_RATE) ? af.getInteger(MediaFormat.KEY_SAMPLE_RATE) : 44100;
+            int ch = af.containsKey(MediaFormat.KEY_CHANNEL_COUNT) ? af.getInteger(MediaFormat.KEY_CHANNEL_COUNT) : 2;
+            int[] rates = {96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350};
+            int sf = 4;
+            for (int i = 0; i < rates.length; i++) if (rates[i] == sr) { sf = i; break; }
+            byte[] asc = new byte[2];
+            asc[0] = (byte) ((2 << 3) | (sf >> 1));          // objectType=2 (AAC-LC)
+            asc[1] = (byte) (((sf & 1) << 7) | (ch << 3));
+            ByteBuffer bb = ByteBuffer.wrap(asc);
+            bb.position(0);
+            return bb;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    /** 产物 MP4 盒子结构快照（诊断用）：顶层盒子 + moov 内每条 trak 的 stsd 样本描述。 */
+    private static String dumpMp4Boxes(File f) {
+        StringBuilder sb = new StringBuilder();
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "r")) {
+            long len = raf.length();
+            byte[] head = new byte[16];
+            raf.seek(0);
+            long pos = 0;
+            int guard = 0;
+            while (pos + 8 <= len && guard++ < 32) {
+                raf.seek(pos);
+                if (raf.read(head) < 8) break;
+                long size = ((head[0] & 0xFFL) << 24) | ((head[1] & 0xFFL) << 16) | ((head[2] & 0xFFL) << 8) | (head[3] & 0xFFL);
+                String type = new String(head, 4, 4, StandardCharsets.ISO_8859_1);
+                sb.append(type).append('(').append(size).append(") ");
+                if (size <= 1) break;
+                if ("moov".equals(type) && pos + size <= len) {
+                    sb.append(trakSummary(raf, pos + 8, pos + size));
+                }
+                pos += size;
+            }
+        } catch (Exception e) {
+            sb.append("dump失败:").append(e.getMessage());
+        }
+        return sb.toString().trim();
+    }
+
+    /** 在 moov 内找 trak，输出每条 trak 的 stsd 首样本描述四码（avc1/hvc1/avc3/hev1/mp4a…）。 */
+    private static String trakSummary(java.io.RandomAccessFile raf, long start, long end) {
+        StringBuilder sb = new StringBuilder();
+        try {
+            byte[] b = new byte[16];
+            long pos = start;
+            while (pos + 8 <= end) {
+                raf.seek(pos);
+                if (raf.read(b) < 8) break;
+                long size = ((b[0] & 0xFFL) << 24) | ((b[1] & 0xFFL) << 16) | ((b[2] & 0xFFL) << 8) | (b[3] & 0xFFL);
+                String type = new String(b, 4, 4, StandardCharsets.ISO_8859_1);
+                if (size < 8) break;
+                if ("trak".equals(type)) {
+                    String codec = findStsd(raf, pos + 8, Math.min(pos + size, end));
+                    sb.append("[trak:").append(codec == null ? "无stsd?" : codec).append("] ");
+                }
+                pos += size;
+            }
+        } catch (Exception ignored) { }
+        return sb.toString();
+    }
+
+    private static String findStsd(java.io.RandomAccessFile raf, long start, long end) {
+        try {
+            byte[] b = new byte[16];
+            long pos = start;
+            int guard = 0;
+            while (pos + 8 <= end && guard++ < 64) {
+                raf.seek(pos);
+                if (raf.read(b) < 8) return null;
+                long size = ((b[0] & 0xFFL) << 24) | ((b[1] & 0xFFL) << 16) | ((b[2] & 0xFFL) << 8) | (b[3] & 0xFFL);
+                String type = new String(b, 4, 4, StandardCharsets.ISO_8859_1);
+                if (size < 8) return null;
+                if ("stsd".equals(type)) {
+                    raf.seek(pos + 16);                       // 8 头 + 4 version/flags + 4 entry_count
+                    byte[] e = new byte[8];
+                    if (raf.read(e) < 8) return null;
+                    return new String(e, 4, 4, StandardCharsets.ISO_8859_1);
+                }
+                if ("mdia".equals(type) || "minf".equals(type) || "stbl".equals(type) || "trak".equals(type)) {
+                    String r = findStsd(raf, pos + 8, Math.min(pos + size, end));
+                    if (r != null) return r;
+                }
+                pos += size;
+            }
+        } catch (Exception ignored) { }
+        return null;
+    }
+
     private static byte[] ivForSeg(List<String> segIVs, int i, int mediaSeq) {
         String ivs = (i < segIVs.size()) ? segIVs.get(i) : null;
         if (ivs != null && !ivs.isEmpty()) {

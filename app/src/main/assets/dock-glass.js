@@ -65,14 +65,15 @@
       b.classList.toggle('dim', !!btn && b !== btn);
     });
     if (btn) {
+      /* 透镜略放宽，包住被放大（1.26x）的按钮 */
       const m = metrics(btn);
-      blob.style.width = Math.max(0, m.w - PAD * 2) + 'px';
+      blob.style.width = Math.max(0, m.w - PAD * 2 + 10) + 'px';
     }
   }
 
   function clearHover() {
     hovered = null;
-    buttons.forEach(b => b.classList.remove('drag-over', 'dim'));
+    buttons.forEach(b => b.classList.remove('drag-over', 'dim', 'holding'));
   }
 
   function buzz(ms) {
@@ -89,7 +90,8 @@
     dragging = false;
     hovered = null;
     try { dock.setPointerCapture(pointerId); } catch (_) {}
-    /* 按下即成为焦点：透镜先吸附到按下的按钮，拖动时再跟手 */
+    /* 按下即成为焦点：透镜先吸附到按下的按钮，按钮同时放大上浮（holding）；拖动时透镜再跟手 */
+    btn.classList.add('holding');
     paint(btn, true);
   }, { passive: true });
 
