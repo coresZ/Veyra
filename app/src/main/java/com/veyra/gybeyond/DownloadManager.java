@@ -755,7 +755,7 @@ final class DownloadManager {
     /** 递归展开 m3u8（代理已把 URI 重写为绝对代理 URL）：收集分片、每段对应 KEY URL 与显式 IV。
      *  每次拉取后刷新 task.detail，让"解析 m3u8 播放列表…"有实时进度（已展开条目/已收集分片），
      *  避免用户面对无进度转圈；fetchBytes 已有 connect/read 超时兜底。 */
-    private void expandM3u8(String url, List<String> segs, List<String> segKeys, List<String> segIVs, int depth, Task task, int n) throws Exception {
+    private void expandM3u8(String url, List<String> segs, List<String> segKeys, List<String> segIVs, int depth, Task task, int n, AtomicInteger mediaSeqRef) throws Exception {
         if (depth > 6) throw new java.io.IOException("m3u8 层级过深");
         if (++expandCount > 400) throw new java.io.IOException("m3u8 展开条目过多（>400），疑似变种列表循环");
         task.detail = "解析 m3u8 播放列表… 条目 " + expandCount + "、分片 " + segs.size();
@@ -775,6 +775,11 @@ final class DownloadManager {
                 // 媒体序列号作默认 IV 解密，与源不符 → 解密数据全错 → 产物损坏/合并卡死
                 ivMatcher.reset(line);
                 currentIV = ivMatcher.find() ? ivMatcher.group(1) : "";
+            } else if (line.startsWith("#EXT-X-MEDIA-SEQUENCE")) {
+                // 记录真实媒体序列号：无显式 IV 的分片用 mediaSeq+i 大端作默认 IV，
+                // 本地 playlist 写死 0 会导致这类分片解密错乱（第 2 集 TS 不可播的根因）
+                int p = line.indexOf(':');
+                if (p >= 0) { try { mediaSeqRef.set(Integer.parseInt(line.substring(p + 1).trim())); } catch (Exception ignored) {} }
             } else if (line.startsWith("#EXT-X-STREAM-INF")) {
                 expectSub = true;
             } else if (line.startsWith("#EXT-X-MEDIA")) {
@@ -789,7 +794,7 @@ final class DownloadManager {
                         // 非播放列表：该 URL 实际是分片，直接纳入分片列表
                         segs.add(uri); segKeys.add(currentKey); segIVs.add(currentIV);
                     } else {
-                        expandM3u8(uri, segs, segKeys, segIVs, depth + 1, task, n);
+                        expandM3u8(uri, segs, segKeys, segIVs, depth + 1, task, n, mediaSeqRef);
                     }
                 } else { segs.add(uri); segKeys.add(currentKey); segIVs.add(currentIV); }
                 expectSub = false;
@@ -942,6 +947,7 @@ final class DownloadManager {
             List<String> segUris = new ArrayList<>();
             List<String> segKeys = new ArrayList<>();
             List<String> segIVs = new ArrayList<>();
+            AtomicInteger mediaSeqRef = new AtomicInteger(0);   // 源真实媒体序列号（无显式 IV 分片的默认 IV 基准）
             expandCount = 0;   // 每集重置解析计数
             task.detail = "解析 m3u8 播放列表…";
             task.debug = "第 " + n + " 集：解析 m3u8 播放列表…";
@@ -950,7 +956,7 @@ final class DownloadManager {
             ExecutorService expandPool = Executors.newSingleThreadExecutor();
             try {
                 Future<?> fe = expandPool.submit(() -> {
-                    try { expandM3u8(url, segUris, segKeys, segIVs, 0, task, n); }
+                    try { expandM3u8(url, segUris, segKeys, segIVs, 0, task, n, mediaSeqRef); }
                     catch (Throwable t) { throw new RuntimeException(t); }
                 });
                 try {
@@ -1042,7 +1048,7 @@ final class DownloadManager {
             }
             // 本地 playlist（相对路径；每段按需写 KEY 行，合并阶段从本地 playlist 自解析 AES-128 解密）
             {
-                StringBuilder sb = new StringBuilder("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:0\n");
+                StringBuilder sb = new StringBuilder("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:").append(mediaSeqRef.get()).append("\n");
                 String lastKeyName = null;
                 for (int i = 0; i < segN; i++) {
                     String ku = segKeys.get(i);
