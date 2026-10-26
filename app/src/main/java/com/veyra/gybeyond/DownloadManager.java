@@ -2280,11 +2280,36 @@ final class DownloadManager {
                 JSONObject ep = task.episodes.optJSONObject(i);
                 keys.add(ep != null ? ep.optString("key", "") : "");
             }
-            stage = "运行 ffmpeg concat 合并";
+            // 合并引擎与「ts 分片 → 单集 mp4」统一：系统 MediaMuxer 优先，失败才回退 libffconcat。
+            // v0.18.70 之前这里只有 native —— native 日志一路「合并成功」，产物 head=ftyp、音频轨正常、
+            // 视频轨 0ms（movenc 写的视频 trak 系统解析器不认），所以手动「多集合并」必然失败。
             File nativeLog = new File(context.getFilesDir(), "native.log");
-            FFmpegConcat.concat(inputs, keys, output, tag, debug, nativeLog);
+            boolean muxerOk = false;
+            try {
+                stage = "系统 muxer 合并多集";
+                debug.append("系统 muxer 合并 ").append(inputs.size()).append(" 集…\n");
+                concatTsByMuxer(inputs.toArray(new File[0]), output, debug);
+                stage = "校验产物";
+                FFmpegConcat.verify(output, inputs, debug);
+                muxerOk = true;
+            } catch (Throwable muxErr) {
+                debug.append("系统 muxer 合并失败：").append(muxErr.getMessage()).append('\n');
+                if (output.exists()) output.delete();
+            }
+            if (!muxerOk) {
+                stage = "回退运行 ffmpeg concat 合并";
+                debug.append("回退 libffconcat（FFmpeg concat）合并 ").append(inputs.size()).append(" 集…\n");
+                try {
+                    FFmpegConcat.concat(inputs, keys, output, tag, debug, nativeLog);
+                } catch (Throwable t) {
+                    if (output.exists()) debug.append("native 产物结构: ").append(dumpMp4Boxes(output)).append('\n');
+                    if (output.exists()) output.delete();
+                    throw t;
+                }
+            }
             stage = "完成";
-            debug.append("完成: 产物=").append(output.length() / 1048576).append("MB tag=").append(tag).append('\n');
+            debug.append("完成: 产物=").append(output.length() / 1048576).append("MB 引擎=")
+                    .append(muxerOk ? "系统 muxer" : "libffconcat(tag=" + tag + ")").append('\n');
             task.debug = debug.toString();
         } catch (Exception e) {
             debug.append("失败阶段: ").append(stage).append('\n');
