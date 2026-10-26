@@ -546,34 +546,6 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
             av_packet_free(&op);
             continue;
         }
-        if (si == aIdx && abf) {
-            /* 音频样本先过 adtstoasc bsf（剥 ADTS 头→raw AAC），再写 mp4 */
-            av_bsf_send_packet(abf, pkt);
-            av_packet_unref(pkt);
-            AVPacket* op = av_packet_alloc();
-            if (!op) {
-                stageLog(logBuf, "[nativeConcat] 失败: av_packet_alloc(bsf)");
-                logStage("拷贝音视频包"); logErr("异常: av_packet_alloc(音频bsf) 失败\n");
-                av_write_trailer(oc); av_packet_free(&pkt); cleanup_output(oc); avformat_close_input(&in); remove(listPath);
-                if (abf) av_bsf_free(&abf); return (*env)->NewStringUTF(env, g_err);
-            }
-            while (av_bsf_receive_packet(abf, op) >= 0) {
-                int orc = av_interleaved_write_frame(oc, op);
-                if (orc < 0) {
-                    char e[128] = {0}; av_strerror(orc, e, sizeof(e));
-                    stageLog(logBuf, "[nativeConcat] 失败: av_interleaved_write_frame(音频bsf) rc<0");
-                    logStage("拷贝音视频包");
-                    logErr("异常: 写包失败(音频bsf) rc=%d (%s) size=%d，已写 %ld 包\n", orc, e, op->size, written);
-                    av_packet_free(&op); av_packet_free(&pkt); av_write_trailer(oc);
-                    cleanup_output(oc); avformat_close_input(&in); remove(listPath);
-                    if (abf) av_bsf_free(&abf); return (*env)->NewStringUTF(env, g_err);
-                }
-                written++;
-                av_packet_unref(op);
-            }
-            av_packet_free(&op);
-            continue;
-        }
 
         rc = av_interleaved_write_frame(oc, pkt);
         int failRc = rc, failSize = pkt->size;
@@ -1433,6 +1405,35 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
                     gapLogN++;
                 }
             }
+        }
+
+        if (si == aIdx && abf) {
+            /* 音频样本先过 adtstoasc bsf（剥 ADTS 头→raw AAC），再写 mp4 */
+            av_bsf_send_packet(abf, pkt);
+            av_packet_unref(pkt);
+            AVPacket* op = av_packet_alloc();
+            if (!op) {
+                stageLog(logBuf, "[nativeConcat] 失败: av_packet_alloc(bsf)");
+                logStage("拷贝音视频包"); logErr("异常: av_packet_alloc(音频bsf) 失败\n");
+                av_write_trailer(oc); av_packet_free(&pkt); cleanup_output(oc); avformat_close_input(&in); remove(listPath);
+                if (abf) av_bsf_free(&abf); return (*env)->NewStringUTF(env, g_err);
+            }
+            while (av_bsf_receive_packet(abf, op) >= 0) {
+                int orc = av_interleaved_write_frame(oc, op);
+                if (orc < 0) {
+                    char e[128] = {0}; av_strerror(orc, e, sizeof(e));
+                    stageLog(logBuf, "[nativeConcat] 失败: av_interleaved_write_frame(音频bsf) rc<0");
+                    logStage("拷贝音视频包");
+                    logErr("异常: 写包失败(音频bsf) rc=%d (%s) size=%d，已写 %ld 包\n", orc, e, op->size, written);
+                    av_packet_free(&op); av_packet_free(&pkt); av_write_trailer(oc);
+                    cleanup_output(oc); avformat_close_input(&in); remove(listPath);
+                    if (abf) av_bsf_free(&abf); return (*env)->NewStringUTF(env, g_err);
+                }
+                written++;
+                av_packet_unref(op);
+            }
+            av_packet_free(&op);
+            continue;
         }
 
         rc = av_interleaved_write_frame(oc, pkt);
