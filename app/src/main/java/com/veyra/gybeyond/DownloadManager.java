@@ -216,10 +216,28 @@ final class DownloadManager {
                     // 仍在下载/合并中的任务不动（目录可能刚建还是空的）
                     if (found != null && !"done".equals(found.status) && !"failed".equals(found.status)) continue;
                     File[] kids = d.listFiles();
-                    if (kids != null && kids.length > 0) continue;   // 有内容（失败重试还要的 ts）：保留
+                    boolean hasContent = kids != null && kids.length > 0;
+                    if (hasContent) {
+                        // 任务已完成且剧集目录里已有正式成品 → 这个任务目录里只剩重复的分集与临时片。
+                        // 用户实测反馈：「合并前 Download/Veyra 下会多出一个和自己剧名文件夹内容一样的
+                        // dl_xxx」，就是这个残留（新版本导出后已当场删除中间产物，这里清历史遗留）。
+                        String title = found != null ? found.title : null;
+                        boolean finished = found != null && "done".equals(found.status);
+                        if (finished && title != null) {
+                            File edir = episodeDir(title);
+                            File official = new File(edir, title.replaceAll("[\\\\/:*?\"<>|]", "_") + ".mp4");
+                            if (official.exists() && official.length() > 0) {
+                                deleteRecursive(d);
+                                continue;
+                            }
+                        }
+                        continue;   // 有内容（失败重试还要的 ts / 还没合并）：保留
+                    }
                     d.delete();
                     continue;
                 }
+                // 历史遗留的名字漂移（剧名_1793032838265.mp4）：有正式名就以正式名为准，没有就正名回来。
+                fixDriftName(d, dn);
                 File official = new File(d, dn + ".mp4");
                 if (!(official.exists() && official.length() > 0)) continue;
                 File[] kids = d.listFiles();
@@ -228,6 +246,37 @@ final class DownloadManager {
                     if (!f.isFile() || !isEpisodeArtifact(f.getName())) continue;
                     f.delete();
                     deletePublicFile(Environment.DIRECTORY_DOWNLOADS + "/Veyra/" + dn, f.getName());
+                }
+            }
+        } catch (Exception ignored) { }
+    }
+
+    /** 修复「剧名_1793032838265.mp4」这种被 MediaStore 去重改名的产物：
+     *  目录里若已有正式「剧名.mp4」→ 带后缀的是重复文件，删掉；没有 → 把它正名回「剧名.mp4」。 */
+    private void fixDriftName(File d, String base) {
+        try {
+            File official = new File(d, base + ".mp4");
+            boolean hasOfficial = official.exists() && official.length() > 0;
+            File[] kids = d.listFiles();
+            if (kids == null) return;
+            java.util.regex.Pattern drift = driftPattern(base + ".mp4");
+            String rel = Environment.DIRECTORY_DOWNLOADS + "/Veyra/" + base;
+            for (File f : kids) {
+                if (!f.isFile() || !drift.matcher(f.getName()).matches()) continue;
+                if (hasOfficial) {          // 已有正式产物：带后缀的是重复文件
+                    f.delete();
+                    deletePublicFile(rel, f.getName());
+                    continue;
+                }
+                if (Build.VERSION.SDK_INT >= 29 && renamePublicEntry(rel, f.getName(), base + ".mp4")) {
+                    hasOfficial = true;
+                    continue;
+                }
+                if (f.renameTo(official)) {  // MediaStore 改不动就退回 File 改名，再补一次扫描
+                    deletePublicFile(rel, f.getName());
+                    MediaScannerConnection.scanFile(context, new String[]{official.getAbsolutePath()},
+                            new String[]{"video/mp4"}, null);
+                    hasOfficial = true;
                 }
             }
         } catch (Exception ignored) { }
@@ -505,6 +554,14 @@ final class DownloadManager {
                     if (u != null) { if (outList.length() > 0) outList.append('|'); outList.append(u); }
                     // 删除临时归一化文件（公共 Downloads 已有副本）
                     norm.delete();
+                    // 导出成功 → 任务目录里的中间产物也删掉：剧集目录已经是同一集的正片，
+                    // 再留一份就是「同一部剧出现两个文件夹、内容完全重复」（用户实测反馈的 dl_xxx
+                    // 与剧情目录并存就是这么来的）。合并阶段改从剧集目录的「第NN集.mp4」读，
+                    // 见 runMerge 的查找顺序；导出失败的集不删，留给合并兜底。
+                    if (u != null) {
+                        File src = plain.get(i);
+                        if (src != null && !src.equals(norm)) src.delete();
+                    }
                 } catch (Exception ex) {
                     // 单集导出失败不阻塞任务，原始密文仍在 app 私有目录供合并
                 }
@@ -642,12 +699,22 @@ final class DownloadManager {
         try {
             int n = task.episodes.length();
             List<File> plain = new ArrayList<>();
+            // 与 plain 一一对应的解密密钥：中间产物可能是 CENC 密文 → 要 key；
+            // 剧集目录里的「第NN集.mp4」是已解密归一化的正式分集 → 传空串，让 C 层按明文处理。
+            List<String> plainKeys = new ArrayList<>();
             for (int i = 0; i < n; i++) {
-                // 分集现在放任务目录（dl_<id>）；旧版本把它们写在剧集目录，所以两个位置都要找
+                JSONObject ep = task.episodes.optJSONObject(i);
+                String k = ep != null ? ep.optString("key", "") : "";
+                // 查找顺序：
+                //   ① 任务目录 epNNN.mp4    —— 下载中间产物（导出失败时还在，可能是密文）
+                //   ② 剧集目录 第NN集.mp4   —— 正常路径：用户看得见的正式分集（明文）
+                //   ③ 剧集目录 epNNN.mp4    —— 旧版本遗留位置
                 File f = new File(dir, String.format(Locale.US, "ep%03d.mp4", i + 1));
-                if (!(f.exists() && f.length() > 0))
-                    f = new File(episodeDir(task.title), String.format(Locale.US, "ep%03d.mp4", i + 1));
-                if (f.exists() && f.length() > 0) plain.add(f);
+                if (f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(k); continue; }
+                f = new File(episodeDir(task.title), String.format(Locale.US, "第%02d集.mp4", i + 1));
+                if (f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(""); continue; }
+                f = new File(episodeDir(task.title), String.format(Locale.US, "ep%03d.mp4", i + 1));
+                if (f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(k); }
             }
             if (plain.size() != n) throw new java.io.IOException("分集不完整（" + plain.size() + "/" + n + "），请重新下载");
             // 优先合并成单个文件；若合并仍失败（个别设备 MediaMuxer 兼容问题），自动回退为分集逐个导出，下载不白费。
@@ -659,12 +726,11 @@ final class DownloadManager {
                 if (plain.size() == 1) {
                     // 单集也要 C 层规范化（解密+时间轴归零），不能直接复制密文分集
                     List<String> k1 = new ArrayList<>();
-                    JSONObject ep0 = task.episodes.optJSONObject(0);
-                    k1.add(ep0 != null ? ep0.optString("key", "") : "");
+                    k1.add(plainKeys.get(0));
                     StringBuilder dbg = new StringBuilder();
                     FFmpegConcat.concat(plain, k1, merged, "hvc1", dbg, new File(context.getFilesDir(), "native.log"));
                     task.debug = dbg.toString();
-                } else mergeMp4(plain, merged, task);
+                } else mergeMp4(plain, plainKeys, merged, task);
                 if (task.canceled) return;
                 task.percent = 97;
                 task.detail = "保存到手机";
@@ -2103,7 +2169,11 @@ final class DownloadManager {
      *   逐片 MediaExtractor 读样本 → MediaMuxer 顺序写入，时间轴按「本片首样本 + 累计偏移」重排。
      * 相比 libffconcat 的 -c copy，这里由系统 muxer 生成 stsd/stsz/stco/stss 与 avcC/hvcC，
      * 产物必然能被 MediaExtractor / 系统播放器识别（native 产物曾出现「有音频轨、没有视频轨」）。
-     * 视频保持解码序（B 帧靠 muxer 写 ctts），音频按本片视频时长截断，避免逐片累积音画错位。
+     * 视频保持解码序写入，PTS 只做单调化修正——**这是它的固有缺陷**：MediaMuxer 不接受写入序上
+     * 时间戳回退，而 B 帧在解码序里 PTS 必然回退（I P B B → 0,4,1,2），只能抬到「上一个 +1µs」，
+     * 呈现时间就被压平了（实测 66.9% 的样本被改写，出画按解码序、整段发顿）。
+     * 所以它只作兜底：正常路径走 libffconcat（-c copy 保留源 ctts，B 帧关系完整）。
+     * 音频按本片视频时长截断，避免逐片累积音画错位。
      */
     private static void concatTsByMuxer(File[] decFiles, File out, StringBuilder dbg) throws Exception {
         MediaFormat vf = null, af = null;
@@ -2582,7 +2652,8 @@ final class DownloadManager {
         return maxT;
     }
 
-    private void mergeMp4(List<File> inputs, File output, Task task) throws Exception {
+    /** @param keys 与 inputs 一一对应的解密密钥（空串 = 明文，已解密的正式分集都传空串）。 */
+    private void mergeMp4(List<File> inputs, List<String> keys, File output, Task task) throws Exception {
         StringBuilder debug = new StringBuilder("合并详细日志\n分集数=").append(inputs.size()).append('\n');
         String stage = "初始化";
         try {
@@ -2623,42 +2694,50 @@ final class DownloadManager {
             //   + -tag:v avc1/hvc1 参数集只放 avcC：Android 解码器按四码匹配 stsd，
             //   写成 avc3/hev1（参数集 in-band）时部分机型直接判不支持 → 打开黑屏）
             String tag = h264 >= hevc ? "avc1" : "hvc1";   // majority 编码（红果短剧一般为 HEVC → hvc1）
-            List<String> keys = new ArrayList<>();
-            for (int i = 0; i < inputs.size(); i++) {
-                JSONObject ep = task.episodes.optJSONObject(i);
-                keys.add(ep != null ? ep.optString("key", "") : "");
-            }
-            // 合并引擎：系统 MediaMuxer 优先，失败才回退 libffconcat。
-            // 与「ts 分片 → 单集 mp4」的顺序**故意相反**：单集那个必须 native 优先（TS 的 annex-b
-            // 3 字节起始码 muxer 处理不了），而这里的输入是已经成型的 mp4，muxer 读得到 csd/sync、
-            // 写得出标准 stsd，v0.18.71/72 实测播放流畅，不要为了「统一」去动它。
+            // 合并引擎：libffconcat（FFmpeg concat）优先，失败才回退系统 MediaMuxer。
+            //
+            // ⚠️ v0.18.76 及以前这里是反的（muxer 优先），正是「合集开始播放就卡、整段发顿」的来源。
+            // 原因不是容器，是**帧的呈现时间被毁掉了**：
+            //   MediaMuxer 要求 writeSampleData 的时间戳在写入序（= 解码序）上单调递增，而 H.264 有 B 帧，
+            //   解码序里 PTS 必然回退（I P B B：0, 4, 1, 2）。代码只能把回退的时间戳「抬到上一个 +1µs」
+            //   做单调化——44.5% 的回退帧被这么处理，实测该剧 3300 个样本里 66.9% 的时间戳被改写：
+            //   3 帧被压成同一时刻（间隔 1µs），接着一个 133ms 的长停顿，如此循环。
+            //   播放器于是按「解码序」出画：开局先抖一下，之后每一拍都在顿。
+            //   而 MP4 想正确表达 B 帧必须写 ctts（合成偏移），MediaMuxer 只能从我们给的时间戳反推，
+            //   MediaExtractor 又不暴露 DTS，纯 Java 这条路补不回来。
+            // FFmpeg concat 是 -c copy 级别的重封装，直接保留源 stts/ctts，B 帧关系完整（实测合并后
+            // 4309 处 B 帧倒序全部保留、零解码错误、时长与三集之和一致）。
+            //
+            // 这也解释了「公开模式合集流畅、私密模式合集卡顿」：公开模式（红果）的分集是 CENC 密文，
+            // MediaExtractor 读不了 → muxer 直接失败 → 自动落到 native；私密模式（黄果）的分集已是
+            // 明文 mp4，muxer 能读 → 于是正好走了那条会毁 B 帧的路。
             File nativeLog = new File(context.getFilesDir(), "native.log");
-            boolean muxerOk = false;
+            boolean nativeOk = false;
             try {
-                stage = "系统 muxer 合并多集";
-                debug.append("系统 muxer 合并 ").append(inputs.size()).append(" 集…\n");
-                concatTsByMuxer(inputs.toArray(new File[0]), output, debug);
+                stage = "libffconcat 合并多集";
+                debug.append("libffconcat（FFmpeg concat）合并 ").append(inputs.size()).append(" 集…\n");
+                if (output.exists()) output.delete();   // native 侧「存在即不覆盖」，残片会让它直接失败
+                FFmpegConcat.concat(inputs, keys, output, tag, debug, nativeLog);
                 stage = "校验产物";
                 FFmpegConcat.verify(output, inputs, debug);
-                muxerOk = true;
-            } catch (Throwable muxErr) {
-                debug.append("系统 muxer 合并失败：").append(muxErr.getMessage()).append('\n');
+                if (checkPicture(output, debug) == 2)
+                    throw new java.io.IOException("产物抽帧全是纯色/全黑（打开会黑屏）");
+                nativeOk = true;
+            } catch (Throwable natErr) {
+                debug.append("libffconcat 合并失败：").append(natErr.getMessage()).append('\n');
                 if (output.exists()) output.delete();
             }
-            if (!muxerOk) {
-                stage = "回退运行 ffmpeg concat 合并";
-                debug.append("回退 libffconcat（FFmpeg concat）合并 ").append(inputs.size()).append(" 集…\n");
-                try {
-                    FFmpegConcat.concat(inputs, keys, output, tag, debug, nativeLog);
-                } catch (Throwable t) {
-                    if (output.exists()) debug.append("native 产物结构: ").append(dumpMp4Boxes(output)).append('\n');
-                    if (output.exists()) output.delete();
-                    throw t;
-                }
+            if (!nativeOk) {
+                stage = "回退系统 muxer 合并";
+                debug.append("回退系统 muxer 合并 ").append(inputs.size()).append(" 集…\n");
+                concatTsByMuxer(inputs.toArray(new File[0]), output, debug);
+                FFmpegConcat.verify(output, inputs, debug);
+                if (checkPicture(output, debug) == 2)
+                    throw new java.io.IOException("回退 muxer 合并后抽帧仍是纯色/全黑（打开会黑屏）");
             }
             stage = "完成";
             debug.append("完成: 产物=").append(output.length() / 1048576).append("MB 引擎=")
-                    .append(muxerOk ? "系统 muxer" : "libffconcat(tag=" + tag + ")").append('\n');
+                    .append(nativeOk ? "libffconcat(tag=" + tag + ")" : "系统 muxer（B 帧时间戳可能被压平）").append('\n');
             task.debug = debug.toString();
         } catch (Exception e) {
             debug.append("失败阶段: ").append(stage).append('\n');
@@ -2883,45 +2962,43 @@ final class DownloadManager {
 
     private Uri exportToDownloads(File file, String subDir, String displayName, String mime) throws Exception {
         if (Build.VERSION.SDK_INT >= 29) {
-            // 先清理同名旧条目：MediaStore insert 遇同名（残留/删除未及时完成）会自动追加 "_时间戳"
-            // 后缀生成新文件，导致产物名漂移 + 旧文件残留；先删同名再插入，保证永远用原名覆盖。
             String rel = Environment.DIRECTORY_DOWNLOADS + "/Veyra";
             if (subDir != null && !subDir.isEmpty()) rel += "/" + subDir;
-            try (android.database.Cursor c = context.getContentResolver().query(
-                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                    new String[]{MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME},
-                    relSelection(), relCandidates(rel), null)) {
-                if (c != null) {
-                    while (c.moveToNext()) {
-                        if (displayName.equals(c.getString(1))) {
-                            try {
-                                context.getContentResolver().delete(
-                                        ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)),
-                                        null, null);
-                            } catch (Exception ignored) { }
-                        }
-                    }
-                }
-            } catch (Exception ignored) { }
-            ContentValues values = new ContentValues();
-            values.put(MediaStore.Downloads.DISPLAY_NAME, displayName);
-            values.put(MediaStore.Downloads.MIME_TYPE, mime);
-            values.put(MediaStore.Downloads.RELATIVE_PATH, rel);
-            values.put(MediaStore.Downloads.IS_PENDING, 1);
-            Uri uri = context.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-            if (uri != null) {
+            // 名字必须稳定。MediaStore 插入时如果发现同名条目/同名实体文件还在（自家的删除是**异步**的，
+            // 行列删了、文件还没 unlink），会自作主张把新文件改名成「剧名_<13位毫秒>.mp4」——
+            // 用户看到的就是「合并好了却不叫剧名.mp4，多出一串数字」。所以：
+            //   ① 每次插之前，把同名 + 已经漂移成「剧名_<毫秒>」的条目和实体文件都清掉；
+            //   ② 插完读回真实 DISPLAY_NAME 校验，对不上就原地改名，再不行删掉重来（最多 3 次）。
+            for (int attempt = 0; attempt < 3; attempt++) {
+                cleanExportTarget(rel, displayName);
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Downloads.DISPLAY_NAME, displayName);
+                values.put(MediaStore.Downloads.MIME_TYPE, mime);
+                values.put(MediaStore.Downloads.RELATIVE_PATH, rel);
+                values.put(MediaStore.Downloads.IS_PENDING, 1);
+                Uri uri = context.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                if (uri == null) break;
                 try (OutputStream os = context.getContentResolver().openOutputStream(uri);
                      InputStream is = new FileInputStream(file)) {
                     if (os == null) throw new java.io.IOException("无法写入系统下载目录");
                     byte[] buffer = new byte[256 * 1024];
                     int n;
                     while ((n = is.read(buffer)) > 0) os.write(buffer, 0, n);
+                } catch (Exception we) {
+                    try { context.getContentResolver().delete(uri, null, null); } catch (Exception ignored) { }
+                    throw we;
                 }
                 ContentValues done = new ContentValues();
                 done.put(MediaStore.Downloads.IS_PENDING, 0);
                 context.getContentResolver().update(uri, done, null, null);
                 MediaScannerConnection.scanFile(context, new String[]{file.getAbsolutePath()}, new String[]{mime}, null);
-                return uri;
+                String actual = queryDisplayName(uri);
+                if (displayName.equals(actual)) return uri;
+                // 名字被 ROM 改写（剧名_1793032838265.mp4）：先试着原地改名回原名
+                if (renameEntry(uri, displayName)) return uri;
+                // 改不回去就删掉这次的结果，等物理删除落地后重来
+                try { context.getContentResolver().delete(uri, null, null); } catch (Exception ignored) { }
+                try { Thread.sleep(120); } catch (InterruptedException ignored) { }
             }
         }
         // API 26-28：无存储权限时回退到 app 专属 Download 目录
@@ -2932,6 +3009,94 @@ final class DownloadManager {
         copyFile(file, fallback);
         MediaScannerConnection.scanFile(context, new String[]{fallback.getAbsolutePath()}, new String[]{mime}, null);
         return Uri.fromFile(fallback);
+    }
+
+    /** 导出前清场：删掉同名条目 + 已经漂移成「名字_<13位毫秒>.mp4」的历史残留。
+     *  连实体文件一起删：MediaStore 的删除是异步的，只删行不删文件时下一次插入还会被改名。 */
+    private void cleanExportTarget(String rel, String displayName) {
+        try {
+            final java.util.regex.Pattern drift = driftPattern(displayName);
+            String dir = publicPathOf(rel);
+            try (android.database.Cursor c = context.getContentResolver().query(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    new String[]{MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME},
+                    relSelection(), relCandidates(rel), null)) {
+                if (c != null) {
+                    while (c.moveToNext()) {
+                        String name = c.getString(1);
+                        if (name == null) continue;
+                        boolean hit = name.equals(displayName) || drift.matcher(name).matches();
+                        if (!hit) continue;
+                        try {
+                            context.getContentResolver().delete(ContentUris.withAppendedId(
+                                    MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)), null, null);
+                        } catch (Exception ignored) { }
+                        if (dir != null) { try { new File(dir, name).delete(); } catch (Exception ignored) { } }
+                    }
+                }
+            } catch (Exception ignored) { }
+        } catch (Exception ignored) { }
+    }
+
+    /** 「剧名.mp4」→ 匹配「剧名_1793032838265.mp4」这种被 MediaStore 去重改名的变体。 */
+    private static java.util.regex.Pattern driftPattern(String displayName) {
+        int dot = displayName.lastIndexOf('.');
+        String base = dot > 0 ? displayName.substring(0, dot) : displayName;
+        String ext = dot > 0 ? displayName.substring(dot) : "";
+        return java.util.regex.Pattern.compile(
+                java.util.regex.Pattern.quote(base) + "_\\d{10,}" + java.util.regex.Pattern.quote(ext));
+    }
+
+    /** "Download/Veyra/剧名" → 绝对路径；用于在 MediaStore 之外补一刀实体文件删除。 */
+    private static String publicPathOf(String rel) {
+        try {
+            File root = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+            String tail = rel;
+            if (tail.startsWith(Environment.DIRECTORY_DOWNLOADS))
+                tail = tail.substring(Environment.DIRECTORY_DOWNLOADS.length());
+            while (tail.startsWith("/")) tail = tail.substring(1);
+            return new File(root, tail).getAbsolutePath();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String queryDisplayName(Uri uri) {
+        try (android.database.Cursor c = context.getContentResolver().query(
+                uri, new String[]{MediaStore.Downloads.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) return c.getString(0);
+        } catch (Exception ignored) { }
+        return null;
+    }
+
+    /** 原地改名（MediaStore 会连实体文件一起 rename），成功后读回校验。 */
+    private boolean renameEntry(Uri uri, String name) {
+        try {
+            ContentValues v = new ContentValues();
+            v.put(MediaStore.Downloads.DISPLAY_NAME, name);
+            context.getContentResolver().update(uri, v, null, null);
+            return name.equals(queryDisplayName(uri));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 按「目录 + 旧名」找行并改名（sweep 修历史漂移用）。 */
+    private boolean renamePublicEntry(String rel, String from, String to) {
+        try {
+            String[] rels = relCandidates(rel);
+            try (android.database.Cursor c = context.getContentResolver().query(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    new String[]{MediaStore.Downloads._ID},
+                    relSelection() + " AND " + MediaStore.Downloads.DISPLAY_NAME + "=?",
+                    new String[]{rels[0], rels[1], from}, null)) {
+                if (c != null && c.moveToNext()) {
+                    return renameEntry(ContentUris.withAppendedId(
+                            MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)), to);
+                }
+            }
+        } catch (Exception ignored) { }
+        return false;
     }
 
     private static void copyFile(File src, File dst) throws Exception {
