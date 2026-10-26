@@ -1219,15 +1219,16 @@ final class DownloadManager {
         }
     }
 
-    /** 方案2（彻底移除 ffmpeg/JavaCPP）：Cipher AES-128-CBC 解密每个 ts → 字节级拼 full.ts →
-     *  MediaExtractor/MediaMuxer 重封装单集 mp4。HLS 标准：分片 16 字节对齐，NoPadding 解密；
-     *  显式 IV 按分片（segIVs），无显式 IV 时用媒体序列号（mediaSeq+i 大端 16B）。
-     *  输入仅依赖本地 work 目录：从 play.m3u8 自解析分片/KEY/IV/序列号，完全不需要源站，
-     *  分片早已下载好时（合并失败重试）直接合并。成功后删密文 ts + full.ts；失败保留可重试。
-     *  视频/音频 csd 缺失走提取/构造兜底（复用 normalizeEpisode 同款逻辑）。 */
+    /** 方案2（libffconcat.so FFmpeg concat）：Cipher AES-128-CBC 解密每个 ts → 明文分片列表 →
+     *  FFmpeg concat（-c copy 无损重封装）出单集 mp4（avc3/hev1 in-band SPS/PPS，与后端
+     *  server/downloader.js 同款逻辑，B 帧 PTS/ctts/参数集全部由 FFmpeg 处理）。
+     *  HLS 标准：分片 16 字节对齐，NoPadding 解密；显式 IV 按分片（segIVs），无显式 IV 时
+     *  用媒体序列号（mediaSeq+i 大端 16B）。输入仅依赖本地 work 目录：从 play.m3u8 自解析
+     *  分片/KEY/IV/序列号，完全不需要源站，分片早已下载好时（合并失败重试）直接合并。
+     *  成功后删明文 ts；失败保留可重试。 */
     private static void mergeTsToMp4(File work, File out, StringBuilder dbg) throws Exception {
         long t0 = System.currentTimeMillis();
-        dbg.append("方案2：Cipher 解密 + MediaExtractor/MediaMuxer 合并\n");
+        dbg.append("方案2：Cipher 解密 + FFmpeg concat 合并\n");
         File playlist = new File(work, "play.m3u8");
         if (!playlist.exists()) throw new java.io.IOException("缺少本地 playlist（play.m3u8）");
         String text = new String(java.nio.file.Files.readAllBytes(playlist.toPath()), StandardCharsets.UTF_8);
@@ -1310,220 +1311,27 @@ final class DownloadManager {
             throw e;
         }
 
-        // 3) 逐分片 MediaExtractor → 同一 MediaMuxer：每个分片是独立合法 ts（自带 PAT/PMT），
-        //    单独解析可靠（拼接 full.ts 只读第一分片的坑在这里规避）。
-        //    PTS：源分片 PTS 全局连续（实测片1 末 877151us / 片2 首 883151us 无缝衔接）——
-        //    直接透传源 PTS，绝不重写/累加/单调化。B 帧显示序有回退，强制单调会把 B 帧 PTS
-        //    压到 1us 间隔 → 加速播 + 乱码；muxer 依据显示序自动写 ctts。
-        //    读取方式：先首片解析格式/csd + addTrack + start，然后【视频轨一遍 + 音频轨一遍】
-        //    （每遍 selectTrack 后 advance，MediaExtractor 标准用法）。此前"不 select 交错读取"
-        //    在真机上 getSampleSize 拿不到样本 → 0 样本 → 空 mp4（<1KB）→ 三集全"产物无效"。
-        dbg.append("MediaExtractor 逐分片重封装 ").append(decFiles.length).append(" 片…\n");
-        MediaMuxer muxer = new MediaMuxer(out.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
-        boolean started = false;
-        int vTrack = -1, aTrack = -1;
-        int vCnt = 0, aCnt = 0;
-        ByteBuffer buf = ByteBuffer.allocateDirect(2 * 1024 * 1024);
-        MediaCodec.BufferInfo bi = new MediaCodec.BufferInfo();
+        // 3) FFmpeg concat 合并（libffconcat.so = 后端 server/downloader.js 同款 concat 逻辑：
+        //    -f concat -safe 0 -c copy -video_track_timescale 90000 -movflags +faststart -tag:v avc3/hev1）。
+        //    FFmpeg 自动处理 B 帧 PTS/ctts、annex-b→avcc、SPS/PPS in-band（avc3）——MediaMuxer 在
+        //    小米设备上 B 帧回退 PTS 崩、同 PTS 多音频样本崩、无 stss 乱码、时间轴误差加速，全部由
+        //    FFmpeg 一次解决。输入 = 解密后的明文 TS 分片列表（已 0x47 校验），本地文件，无需源站。
+        dbg.append("FFmpeg concat 合并 ").append(decFiles.length).append(" 片…\n");
+        String tag = "avc3";
         try {
-            // 3.1 首片解析轨格式 + csd + addTrack + start
-            MediaExtractor first = new MediaExtractor();
+            android.media.MediaExtractor ex = new android.media.MediaExtractor();
             try {
-                first.setDataSource(decFiles[0].getAbsolutePath());
-                int ev0 = -1, ea0 = -1;
-                for (int t = 0; t < first.getTrackCount(); t++) {
-                    String mime = first.getTrackFormat(t).getString(MediaFormat.KEY_MIME);
-                    if (mime == null) continue;
-                    if (mime.startsWith("video/") && ev0 < 0) ev0 = t;
-                    else if (mime.startsWith("audio/") && ea0 < 0) ea0 = t;
+                ex.setDataSource(decFiles[0].getAbsolutePath());
+                for (int t = 0; t < ex.getTrackCount(); t++) {
+                    String mime = ex.getTrackFormat(t).getString(android.media.MediaFormat.KEY_MIME);
+                    if (mime != null && mime.startsWith("video/hevc")) { tag = "hev1"; break; }
                 }
-                if (ev0 < 0) throw new java.io.IOException("分片无视频轨: " + segNames.get(0));
-                MediaFormat fv = first.getTrackFormat(ev0);
-                MediaFormat fa = ea0 >= 0 ? first.getTrackFormat(ea0) : null;
-                // 视频 csd 缺失（avc3/hev1 内联参数集）→ 扫描首关键帧提取 SPS/PPS（HEVC 含 VPS）
-                String vmime = fv.getString(MediaFormat.KEY_MIME);
-                if (!fv.containsKey("csd-0")) {
-                    List<byte[]> nal = null;
-                    MediaExtractor se = new MediaExtractor();
-                    try {
-                        se.setDataSource(decFiles[0].getAbsolutePath());
-                        se.selectTrack(ev0);
-                        boolean hevc = vmime != null && vmime.startsWith("video/hevc");
-                        while (se.advance()) {
-                            if ((se.getSampleFlags() & MediaCodec.BUFFER_FLAG_KEY_FRAME) == 0) continue;
-                            long sz = se.getSampleSize();
-                            if (sz <= 0 || sz > 4 * 1024 * 1024) continue;
-                            ByteBuffer bb = ByteBuffer.allocate((int) sz);
-                            int n = se.readSampleData(bb, 0);
-                            if (n <= 0) continue;
-                            bb.position(0); bb.limit(n);
-                            List<byte[]> p2 = extractParameterSets(bb, hevc);
-                            if (!p2.isEmpty()) { nal = p2; break; }
-                        }
-                    } finally { se.release(); }
-                    if (nal == null) throw new java.io.IOException("无法提取视频参数集(csd)");
-                    int total = 0; for (byte[] b : nal) total += b.length;
-                    ByteBuffer csd = ByteBuffer.allocate(total);
-                    for (byte[] b : nal) csd.put(b);
-                    csd.position(0);
-                    fv.setByteBuffer("csd-0", csd);
-                }
-                // 音频 csd 缺失 → 从首个 ADTS 帧构造 AudioSpecificConfig
-                if (fa != null && !fa.containsKey("csd-0")) {
-                    ByteBuffer asc = extractAacAsc(decFiles[0], ea0);
-                    if (asc == null) throw new java.io.IOException("无法构造音频 csd(ADTS)");
-                    fa.setByteBuffer("csd-0", asc);
-                }
-                // 编码/音频校验（对齐红果 normalizeEpisode 口径）：记录源编码与音频参数
-                String vmime2 = fv.getString(MediaFormat.KEY_MIME);
-                boolean vmimeOk = (vmime2 != null && (vmime2.startsWith("video/avc") || vmime2.startsWith("video/hevc")));
-                dbg.append("视频: ").append(vmime2 == null ? "?" : vmime2)
-                    .append(' ').append(fv.getInteger(MediaFormat.KEY_WIDTH)).append('x').append(fv.getInteger(MediaFormat.KEY_HEIGHT))
-                    .append(" csd=").append(fv.containsKey("csd-0") ? "内置" : "提取")
-                    .append(vmimeOk ? "" : " [编码非 H264/HEVC，播放兼容性未知]")
-                    .append('\n');
-                if (fa != null) {
-                    String amime = fa.getString(MediaFormat.KEY_MIME);
-                    boolean aOk = amime != null && (amime.startsWith("audio/mp4a") || amime.startsWith("audio/aac"));
-                    dbg.append("音频: ").append(amime == null ? "?" : amime)
-                        .append(" 采样率=").append(fa.getInteger(MediaFormat.KEY_SAMPLE_RATE))
-                        .append(" 声道=").append(fa.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
-                        .append(aOk ? "" : " [音频非 AAC，播放兼容性未知]")
-                        .append('\n');
-                } else dbg.append("音频: 无音频轨（仅视频）\n");
-                vTrack = muxer.addTrack(fv);
-                aTrack = fa != null ? muxer.addTrack(fa) : -1;
-                muxer.start();
-                started = true;
-            } finally { first.release(); }
-
-            // 3.2 视频轨一遍。PTS 处理：源分片 PTS 全局连续（实测片1 末 877151us / 片2 首 883151us
-            // 无缝衔接），直接以源 PTS 为基线。但源含 B 帧（显示序回退）——系统 MediaMuxer 要求
-            // 视频样本 PTS 单调（回退会内部 stopped，stop() 才抛 "would have stopped already"），
-            // 又不能像 v0.18.53 那样 +1us（B 帧被压成瞬间闪过 → 加速播/乱码）。
-            // 折中：回退样本补到「前帧 + 真实帧间隔」（帧间隔从递增样本实时学习），
-            // PTS 单调 → muxer 不崩，B 帧保持正常显示时长。
-            long lastOut = -1;          // 已写出的 PTS（跨分片，片间 PTS 连续）
-            for (int p = 0; p < decFiles.length; p++) {
-                MediaExtractor ex = new MediaExtractor();
-                try {
-                    ex.setDataSource(decFiles[p].getAbsolutePath());
-                    int ev = -1;
-                    for (int t = 0; t < ex.getTrackCount(); t++) {
-                        String mime = ex.getTrackFormat(t).getString(MediaFormat.KEY_MIME);
-                        if (mime != null && mime.startsWith("video/")) { ev = t; break; }
-                    }
-                    if (ev < 0) continue;   // 异常分片无视频轨：跳过（其余片照常写）
-                    ex.selectTrack(ev);
-                    String vm = ex.getTrackFormat(ev).getString(MediaFormat.KEY_MIME);
-                    boolean hevc = vm != null && vm.startsWith("video/hevc");
-                    long lastPtsIn = -1;
-                    long refInterval = 40_000;   // 帧间隔初始 25fps，随即从递增样本学习
-                    boolean learned = false;
-                    while (ex.advance()) {
-                        long sz = ex.getSampleSize();
-                        if (sz <= 0) continue;
-                        if (buf.capacity() < sz) buf = ByteBuffer.allocateDirect((int) sz + 65536);
-                        buf.clear();
-                        int n = ex.readSampleData(buf, 0);
-                        if (n < 0) continue;
-                        long pts = ex.getSampleTime();
-                        int flags = ex.getSampleFlags();
-                        buf.position(0); buf.limit(n);
-                        // 学习真实帧间隔（用递增样本的 PTS 差，滑动平滑）
-                        if (lastPtsIn >= 0 && pts > lastPtsIn) {
-                            long d = pts - lastPtsIn;
-                            if (d > 0 && d < 250_000) {
-                                if (!learned) { refInterval = d; learned = true; }
-                                else refInterval = (refInterval * 3 + d) / 4;
-                            }
-                        }
-                        lastPtsIn = pts;
-                        long ptsOut = pts;
-                        if (lastOut >= 0 && ptsOut <= lastOut) ptsOut = lastOut + refInterval;  // B 帧回退
-                        lastOut = ptsOut;
-                        // TS 源 MediaExtractor 不提供 sync 信息（getSampleFlags 恒 0）→ 自行检测
-                        // IDR/参数集并标 KEY_FRAME，否则 MediaMuxer 写不出 stss → 播放器花屏/乱码。
-                        if (sampleIsSync(buf, 0, n, hevc))
-                            flags |= MediaCodec.BUFFER_FLAG_KEY_FRAME;
-                        bi.set(0, n, ptsOut, flags);
-                        muxer.writeSampleData(vTrack, buf, bi);
-                        vCnt++;
-                    }
-                } finally { ex.release(); }
-            }
-
-            // 3.3 音频轨一遍（源音频 PTS 全局连续；ADTS 剥头写 raw AAC）
-            // MediaMuxer 要求每轨样本 PTS 严格递增：同一 sample 拆出的多个 ADTS 帧不能同 PTS
-            // （v0.18.54/55 多帧剥头同 PTS 写多样本 → 内部 stopped，stop() 抛 would have stopped）。
-            // 每帧 PTS = sample PTS + 帧序号 × AAC 帧时长（1024 samples / 采样率）。
-            if (aTrack >= 0) {
-                long aLastOut = -1;
-                for (int p = 0; p < decFiles.length; p++) {
-                    MediaExtractor ex = new MediaExtractor();
-                    try {
-                        ex.setDataSource(decFiles[p].getAbsolutePath());
-                        int ea = -1;
-                        for (int t = 0; t < ex.getTrackCount(); t++) {
-                            String mime = ex.getTrackFormat(t).getString(MediaFormat.KEY_MIME);
-                            if (mime != null && mime.startsWith("audio/")) { ea = t; break; }
-                        }
-                        if (ea < 0) continue;
-                        ex.selectTrack(ea);
-                        int aSampleRate = 44100;
-                        try { aSampleRate = ex.getTrackFormat(ea).getInteger(MediaFormat.KEY_SAMPLE_RATE); } catch (Exception ignored) {}
-                        final long aFrameDur = (aSampleRate > 0) ? (1024L * 1_000_000 / aSampleRate) : 23_219L;
-                        while (ex.advance()) {
-                            long sz = ex.getSampleSize();
-                            if (sz <= 0) continue;
-                            if (buf.capacity() < sz) buf = ByteBuffer.allocateDirect((int) sz + 65536);
-                            buf.clear();
-                            int n = ex.readSampleData(buf, 0);
-                            if (n < 0) continue;
-                            long pts = ex.getSampleTime();
-                            int flags = ex.getSampleFlags();
-                            buf.position(0); buf.limit(n);
-                            // TS 音频 sample 是 ADTS 帧（含头），mp4 的 AAC 轨必须 raw AAC——剥头。
-                            // 头长：protection_absent=1 → 7B，=0 → 9B（第 6 字节 bit0）。
-                            // sample 可能含多个 ADTS 帧 → 按 frame_length 循环剥全部帧头、逐帧写入
-                            //（只剥第一个头会把后续帧的 ADTS 头当 AAC 数据 → 解码失败 → 无声）。
-                            if (n > 7 && (buf.get(0) & 0xFF) == 0xFF && (buf.get(1) & 0xF0) == 0xF0) {
-                                int off = 0, fidx = 0;
-                                boolean any = false;
-                                while (off + 7 <= n) {
-                                    int b0 = buf.get(off) & 0xFF, b1 = buf.get(off + 1) & 0xFF;
-                                    if (b0 != 0xFF || (b1 & 0xF0) != 0xF0) break;
-                                    int frameLen = ((b1 & 0x03) << 11) | ((buf.get(off + 2) & 0xFF) << 3) | ((buf.get(off + 3) & 0xE0) >> 5);
-                                    int hlen = ((buf.get(off + 6) & 0x01) == 0) ? 9 : 7;
-                                    if (frameLen < hlen || off + frameLen > n) break;
-                                    int dataLen = frameLen - hlen;
-                                    if (dataLen > 0) {
-                                        long fpts = pts + fidx * aFrameDur;
-                                        if (aLastOut >= 0 && fpts <= aLastOut) fpts = aLastOut + aFrameDur;  // 严格递增
-                                        aLastOut = fpts;
-                                        bi.set(off + hlen, dataLen, fpts, flags);
-                                        muxer.writeSampleData(aTrack, buf, bi);
-                                        aCnt++;
-                                        any = true;
-                                    }
-                                    off += frameLen;
-                                    fidx++;
-                                }
-                                if (any) continue;
-                            }
-                            if (aLastOut >= 0 && pts <= aLastOut) pts = aLastOut + aFrameDur;  // 严格递增
-                            aLastOut = pts;
-                            bi.set(0, n, pts, flags);
-                            muxer.writeSampleData(aTrack, buf, bi);
-                            aCnt++;
-                        }
-                    } finally { ex.release(); }
-                }
-            }
-            dbg.append("写入统计: 视频 ").append(vCnt).append(" 样本、音频 ").append(aCnt).append(" 样本\n");
-            if (started && (vCnt + aCnt) > 0) muxer.stop();
+            } finally { ex.release(); }
+        } catch (Exception ignored) {}
+        File nativeLog = new File(work, "native-concat.log");
+        try {
+            FFmpegConcat.concat(java.util.Arrays.asList(decFiles), null, out, tag, dbg, nativeLog);
         } finally {
-            muxer.release();
             for (File df : decFiles) if (df != null) df.delete();
         }
         dbg.append("合并完成 ").append(out.length()).append("B 耗时 ").append((System.currentTimeMillis() - t0) / 1000).append("s\n");
