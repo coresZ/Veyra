@@ -524,7 +524,13 @@ final class DownloadManager {
             }
             // 下载完成后：逐集 ffmpeg 解密归一化并导出到公共 Downloads（文件管理器立即可见可播）
             String subDir = task.title.replaceAll("[\\\\/:*?\"<>|]", "_");
+            // 导出前先把剧集目录里的旧分集全部清掉（含「第03集_1793036388994.mp4」这种漂移名）。
+            // 上一轮下载留下的「第03集.mp4」只要还在盘上，这一轮写同名文件就会被 MediaStore 撞名
+            // 改成「第03集_<毫秒>.mp4」；而它又是异步删除的，删完不一定会立刻落地 —— 所以这里
+            // 先删、再轮询等它真的消失，然后才开始写。
+            purgeEpisodeArtifacts(subDir);
             StringBuilder outList = new StringBuilder();
+            int directOk = 0;
             for (int i = 0; i < plain.size(); i++) {
                 if (task.canceled) return;
                 task.percent = 90 + Math.min(9, (int) ((i + 1) * 9.0 / Math.max(1, plain.size())));
@@ -554,9 +560,13 @@ final class DownloadManager {
                     String epName = String.format(Locale.US, "第%02d集.mp4", i + 1);
                     long normLen = norm.length();
                     Uri u = exportToDownloads(norm, subDir, epName);
+                    if (lastExportDirect) directOk++;
                     if (u != null) { if (outList.length() > 0) outList.append('|'); outList.append(u); }
                     // 删除临时归一化文件（公共 Downloads 已有副本）
                     norm.delete();
+                    // 每导出一集就查一次名字，被改名立刻正名（别等全部导出完 —— 中间隔得越久，
+                    // 越可能留下一个带时间戳的名字被用户看到）
+                    normalizeEpisodeNames(episodeDir(task.title));
                     // 导出成功 → 任务目录里的中间产物也删掉：剧集目录已经是同一集的正片，
                     // 再留一份就是「同一部剧出现两个文件夹、内容完全重复」（用户实测反馈的 dl_xxx
                     // 与剧名目录并存就是这么来的）。合并阶段改从剧集目录的「第NN集.mp4」读，
@@ -575,10 +585,16 @@ final class DownloadManager {
             }
             // 兜一层：个别 ROM 连「直接改名」都不让，名字会留成「第01集_1793034343293.mp4」。
             // 导出全部结束后再统一正名一次，保证文件管理器里看到的就是「第01集.mp4」。
+            // 连做两遍：MediaStore 的删除/改名是异步的，第一遍可能被它事后覆盖掉。
+            normalizeEpisodeNames(episodeDir(task.title));
+            try { Thread.sleep(250); } catch (InterruptedException ignored) { }
             normalizeEpisodeNames(episodeDir(task.title));
             task.status = "ready";
             task.percent = 100;
-            task.detail = "已下载 " + n + " 集，待合并";
+            // 直写成功就不加后缀（正常情况）；只要有一集走了 MediaStore 回退，就把计数带上，
+            // 便于一眼判断「名字不对」到底是我们写不进去、还是系统事后改的。
+            task.detail = "已下载 " + n + " 集，待合并"
+                    + (directOk == n ? "" : "（直写 " + directOk + "/" + n + "）");
             task.output = outList.toString();
             persist();
             return;
@@ -3031,7 +3047,22 @@ final class DownloadManager {
         return exportToDownloads(file, subDir, displayName, "video/mp4");
     }
 
+    /** 上一次导出是否走的「直写文件系统」（false = 走了 MediaStore 回退，名字可能被系统改）。 */
+    private volatile boolean lastExportDirect = false;
+
+    /** 导出串行化：两个任务（同一部剧重复下载、或旧任务还没收尾）同时往同一个剧集目录写
+     *  同名文件时，后写的那个必然撞名被 MediaStore 改成「第03集_<毫秒>.mp4」——
+     *  「总是最后一集被改名」很可能就是这种并发撞出来的。加锁最省事。 */
+    private static final Object EXPORT_LOCK = new Object();
+
     private Uri exportToDownloads(File file, String subDir, String displayName, String mime) throws Exception {
+        synchronized (EXPORT_LOCK) {
+            return exportToDownloadsInner(file, subDir, displayName, mime);
+        }
+    }
+
+    private Uri exportToDownloadsInner(File file, String subDir, String displayName, String mime) throws Exception {
+        lastExportDirect = false;
         String rel = Environment.DIRECTORY_DOWNLOADS + "/Veyra";
         if (subDir != null && !subDir.isEmpty()) rel += "/" + subDir;
         // ① 直接写文件系统 —— 主路径。
@@ -3041,7 +3072,7 @@ final class DownloadManager {
         //    本机验证过 App 对 Download/Veyra/** 有直接的读写权限（dl_ 临时目录就是这么建的）。
         cleanExportTarget(rel, displayName);   // 先清掉旧行与旧文件（含漂移名），避免扫描后出现两条
         File target = publicFile(subDir, displayName);
-        if (writeDirect(file, target, mime)) return Uri.fromFile(target);
+        if (writeDirect(file, target, mime)) { lastExportDirect = true; return Uri.fromFile(target); }
         // ② 直接写不可用（Android 11+ 无 MANAGE_EXTERNAL_STORAGE 的机型）→ 回退 MediaStore 插入。
         if (Build.VERSION.SDK_INT >= 29) {
             // 名字兜底策略：插之前清同名 + 已漂移的变体；插完读回 DISPLAY_NAME 校验；
@@ -3099,22 +3130,24 @@ final class DownloadManager {
     }
 
     /** 直接把内容写到公共 Downloads 目录（不经 MediaStore 的命名逻辑）：
-     *  先写 <name>.part 再 rename，中途失败不会留下半截正片；成功后扫描一次让文件管理器入库。
-     *  返回 true 表示文件名与内容都已就位。 */
+     *  先写 <name>.part → 确保目标名真的没人占 → rename 成正名 → 扫描入库。
+     *  rename 不会被任何系统逻辑加后缀，所以只要这一步成功，文件名就一定是我们要的。 */
     private boolean writeDirect(File src, File target, String mime) {
         File tmp = null;
         try {
             File dir = target.getParentFile();
             if (dir == null) return false;
             if (!dir.exists() && !dir.mkdirs() && !dir.isDirectory()) return false;
-            tmp = new File(dir, target.getName() + ".part");
+            tmp = new File(dir, target.getName() + "." + Long.toHexString(System.nanoTime()) + ".part");
             try (InputStream in = new FileInputStream(src);
                  OutputStream out = new FileOutputStream(tmp)) {
                 byte[] buffer = new byte[256 * 1024];
                 int n;
                 while ((n = in.read(buffer)) > 0) out.write(buffer, 0, n);
             }
-            if (target.exists() && !target.delete()) { tmp.delete(); return false; }
+            // 目标必须**真的**不存在才 rename：MediaStore 的删除是异步的（行删了、文件还在），
+            // 只删一次就 rename 会在部分 ROM 上失败/被改名，所以这里轮询等它彻底消失。
+            if (!ensureGone(target)) { tmp.delete(); return false; }
             if (!tmp.renameTo(target)) { tmp.delete(); return false; }
             tmp = null;
             MediaScannerConnection.scanFile(context, new String[]{target.getAbsolutePath()},
@@ -3124,6 +3157,57 @@ final class DownloadManager {
             if (tmp != null) { try { tmp.delete(); } catch (Exception ignored) { } }
             return false;
         }
+    }
+
+    /** 反复尝试删除，直到文件真的不在（最多约 2s）。异步删除的落地时间不定，只能等。 */
+    private static boolean ensureGone(File f) {
+        if (!f.exists()) return true;
+        for (int i = 0; i < 16; i++) {
+            f.delete();
+            if (!f.exists()) return true;
+            try { Thread.sleep(120); } catch (InterruptedException ignored) { }
+        }
+        return !f.exists();
+    }
+
+    /** 导出前清空剧集目录里的旧分集（含「第03集_1793036388994.mp4」这种漂移名与 .part 残片）。
+     *  只要盘上还留着同名文件，写新文件时就会被 MediaStore 撞名改名 —— 这是反复出现后缀的源头。 */
+    private void purgeEpisodeArtifacts(String subDir) {
+        try {
+            String rel = Environment.DIRECTORY_DOWNLOADS + "/Veyra" + (subDir == null || subDir.isEmpty() ? "" : "/" + subDir);
+            if (Build.VERSION.SDK_INT >= 29) {
+                try (android.database.Cursor c = context.getContentResolver().query(
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        new String[]{MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME},
+                        relSelection(), relCandidates(rel), null)) {
+                    if (c != null) {
+                        while (c.moveToNext()) {
+                            String name = c.getString(1);
+                            // 调试包是素材，别顺手删了
+                            if (name == null || name.contains("调试包") || !isEpisodeArtifact(name)) continue;
+                            try {
+                                context.getContentResolver().delete(ContentUris.withAppendedId(
+                                        MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)), null, null);
+                            } catch (Exception ignored) { }
+                        }
+                    }
+                } catch (Exception ignored) { }
+            }
+            File dir = publicFile(subDir, "x").getParentFile();
+            if (dir == null) return;
+            // 删 + 等：MediaStore 的删除是异步的，删完不落地等于没删
+            for (int round = 0; round < 16; round++) {
+                File[] kids = dir.listFiles();
+                boolean any = false;
+                if (kids != null) for (File f : kids) {
+                    if (!f.isFile() || f.getName().contains("调试包") || !isEpisodeArtifact(f.getName())) continue;
+                    f.delete();
+                    any = true;
+                }
+                if (!any) return;
+                try { Thread.sleep(120); } catch (InterruptedException ignored) { }
+            }
+        } catch (Exception ignored) { }
     }
 
     /** 导出前清场：删掉同名条目 + 已经漂移成「名字_<13位毫秒>.mp4」的历史残留。
