@@ -1,10 +1,13 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light" data-material="soft" data-color="blue" data-corner="default">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
   <meta name="color-scheme" content="light dark">
   <title>Veyra</title>
+  <!-- Sunny UI 令牌层必须排在 app.css 前面：它定义 --bg/--text/--accent/--mat-* ，
+       app.css 只消费，不定义。顺序反了材质和配色就不生效。 -->
+  <link rel="stylesheet" href="sunny-theme.css">
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -101,7 +104,9 @@
   <script src="card-transition.js"></script>
   <script src="runtime.js"></script>
   <script src="hot-runtime.js"></script>
+  <script src="appearance.js"></script>
   <script src="app.js"></script>
   <script src="dock-glass.js"></script>
+  <script src="dock-refract.js"></script>
 </body>
 </html>

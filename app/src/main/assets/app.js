@@ -334,7 +334,18 @@ updateDownloadButton.addEventListener('click', async () => {
 });
 updateLaterButton.addEventListener('click', () => { if (!updateDownloading) { updateOverlay.hidden = true; updateBackEnabled(); } });
 
-window.hgTheme = dark => { document.documentElement.dataset.theme = dark ? 'dark' : 'light'; };
+window.hgTheme = dark => {
+  // 外观（明暗/质感/配色/圆角）现在由 appearance.js 管理并存在 localStorage：
+  // 用户在本机选过就以本地为准，否则跟随原生传来的系统主题，并把结果记下来当初始值。
+  const A = window.VeyraAppearance;
+  if (A) {
+    let saved = null;
+    try { saved = localStorage.getItem('veyra.appearance.v1'); } catch (e) {}
+    if (!saved) A.set({ theme: dark ? 'dark' : 'light' });
+    return;
+  }
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+};
 api('theme').then(window.hgTheme).catch(() => {});
 
 function itemCard(item) {
@@ -1133,6 +1144,7 @@ async function submitDownloadTo(target) {
 
 function renderSettings() {
   content.innerHTML = `<div class="settings-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回我的</button><h1>设置</h1>
+    ${window.renderAppearance ? window.renderAppearance() : ''}
     <section><button type="button" class="settings-link" data-account-management="1"><span><strong>账号管理</strong><small>${state.account.loggedIn ? esc(state.account.username) : '登录或注册账号'}</small></span>${icon('arrow')}</button></section>
     <section class="settings-library"><h2>片单管理</h2><p>${state.account.loggedIn ? '清空后会同步到当前账号的其他设备。' : '清空当前设备保存的片单。'}</p>
       <button type="button" data-clear="history" ${asArray(state.library?.progress).length ? '' : 'disabled'}>清空观看历史</button>
@@ -1156,6 +1168,7 @@ function renderSettings() {
     <section class="update-settings"><div><h2>应用更新</h2><button type="button" class="app-version ${updateAvailable ? 'has-update' : ''}" aria-label="当前版本 ${esc(appVersion)}"><span class="app-version-text">版本 ${appVersion ? `v${esc(appVersion)}` : '读取中…'}</span></button><p>启动后自动检查，也可以在这里手动检查。</p></div><button type="button" data-check-update>检查更新</button></section>
     <section class="settings-storage"><h2>内容模式</h2><p>${state.privateUnlocked ? '该账号已解锁私密模式，切换无需动态码。' : '首次进入私密模式需输入后端动态码（鉴权一次，跟账号走）。'}</p>${privateMode() ? '<button type="button" data-return-public>返回红果（公开模式）</button>' : '<button type="button" data-enter-private>进入私密模式</button>'}</section><section class="settings-storage"><h2>本地存储</h2><button type="button" data-clear="cache">清理内容缓存</button></section>
     <section class="settings-storage"><h2>关于 Veyra</h2><p>项目地址：<button type="button" class="settings-url" data-open-url="https://github.com/gybeyond1/Veyra">github.com/gybeyond1/Veyra</button></p><p>Veyra 基于开源项目二次开发，遵循 GPL-3.0 开源协议发布，完整源码、自建后端与 Docker 部署说明见仓库。</p></section></div>`;
+  if (window.bindAppearance) window.bindAppearance();
   api('hot-update-status').then(window.hgHotUpdateStatus).catch(() => {});
   api('get-proxy').then(value => {
     state.proxy = value || '';
