@@ -98,6 +98,9 @@ final class DownloadManager {
         volatile String error = "";
         volatile String debug = "";   // 合并/下载详细排查日志（多行，UI 换行展示）
         volatile String nasTaskId = "";   // 转发模式：NAS 后端任务 id
+        /** 调试模式（私密模式专用）：只把 TS 分片+KEY+playlist 下全并打包导出，**不做自动合并**。
+         *  用来取「单集黑屏」那集的原始素材，交给开发者离线分析（产物在 Download/Veyra/剧名/第NN集_调试包.zip）。 */
+        volatile boolean keepRaw = false;
         final long createdAt = System.currentTimeMillis();
         volatile boolean canceled = false;
 
@@ -112,7 +115,7 @@ final class DownloadManager {
                         .put("id", id).put("source", source).put("title", title)
                         .put("status", status).put("doneCount", doneCount).put("totalCount", totalCount)
                         .put("percent", percent).put("detail", detail)
-                        .put("nasTaskId", nasTaskId)
+                        .put("nasTaskId", nasTaskId).put("keepRaw", keepRaw)
                         .put("output", output).put("error", error).put("debug", debug).put("createdAt", createdAt);
             } catch (Exception e) { return new JSONObject(); }
         }
@@ -130,6 +133,7 @@ final class DownloadManager {
                             .put("doneCount", t.doneCount).put("totalCount", t.totalCount)
                             .put("detail", t.detail).put("output", t.output).put("error", t.error).put("debug", t.debug)
                             .put("nasTaskId", t.nasTaskId)
+                            .put("keepRaw", t.keepRaw)
                             .put("episodes", t.episodes)
                             .put("createdAt", t.createdAt));
                 }
@@ -159,6 +163,7 @@ final class DownloadManager {
                 t.output = o.optString("output", "");
                 t.debug = o.optString("debug", "");
                 t.nasTaskId = o.optString("nasTaskId", "");
+                t.keepRaw = o.optBoolean("keepRaw", false);
                 // 恢复分集列表（episodes 为 final JSONArray，用 put 拷贝），否则重试恢复的任务分集数=0
                 JSONArray saved = o.optJSONArray("episodes");
                 if (saved != null) {
@@ -251,6 +256,11 @@ final class DownloadManager {
 
     // ---- 对外 API（供 MainActivity dispatch 调用）----
     JSONObject start(String source, String title, JSONArray episodes) throws Exception {
+        return start(source, title, episodes, false);
+    }
+
+    /** @param keepRaw 调试模式：保留 TS/KEY 并打包导出，不自动合并（私密模式「下载到手机（调试）」）。 */
+    JSONObject start(String source, String title, JSONArray episodes, boolean keepRaw) throws Exception {
         if (!"hongguo".equals(source) && !"huangguo".equals(source)) throw new IllegalArgumentException("无效来源");
         if (episodes == null || episodes.length() == 0) throw new IllegalArgumentException("没有可下载的分集");
         for (int i = 0; i < episodes.length(); i++) {
@@ -261,6 +271,7 @@ final class DownloadManager {
         }
         String id = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         Task task = new Task(id, source, title, episodes);
+        task.keepRaw = keepRaw;
         tasks.add(0, task);
         persist();
         pool.execute(() -> run(task));
@@ -450,6 +461,16 @@ final class DownloadManager {
             for (File f : plainArr) if (f != null) plain.add(f);
             if (plain.size() != n) throw new java.io.IOException("部分分集下载失败（" + plain.size() + "/" + n + "）");
             if (task.canceled) return;
+            // 调试模式：各集的 TS/KEY 已在 downloadM3u8 里打包导出到公共 Downloads，
+            // 这里不再做「归一化 + 导出 mp4」（本来也没有产物），直接把任务收尾成完成态。
+            if (task.keepRaw) {
+                task.doneCount = n;
+                task.percent = 100;
+                task.status = "done";
+                task.detail = "调试模式：TS/KEY 已打包，未合并";
+                persist();
+                return;
+            }
             // 下载完成后：逐集 ffmpeg 解密归一化并导出到公共 Downloads（文件管理器立即可见可播）
             String subDir = task.title.replaceAll("[\\\\/:*?\"<>|]", "_");
             StringBuilder outList = new StringBuilder();
@@ -1483,6 +1504,21 @@ final class DownloadManager {
             }   // else：本地已有 playlist → 跳过解析/下载，直接进合并
             // 下载/复用后：把密文 TS 统一解密为明文（TS 文件可直接播放；合并检测 0x47 直接用明文）
             try { decryptTsToPlain(work, playlist, task, n); } catch (Exception de) { /* 解密失败保留密文，合并时再试 */ }
+            // ---- 调试模式（私密模式「下载到手机（调试）」）：素材到此为止，不合并 ----
+            // 目的是拿到「出问题那一集」的原封素材（ts + key + playlist + 诊断），导成一个 zip
+            // 落在公共 Downloads，用户直接转发即可。导出成功后 work 才清（zip 里已是全部内容，
+            // 不必在手机上存两份 ts）。
+            if (task.keepRaw) {
+                task.detail = "第 " + n + " 集：调试模式，打包 TS/KEY…";
+                try {
+                    String where = exportDebugBundle(task, work, n);
+                    task.debug = "第 " + n + " 集：调试模式已导出 " + where + "（未合并）";
+                    segOk = true;   // 打包完成 → 允许 finally 清掉内部 work
+                } catch (Exception ee) {
+                    task.debug = "第 " + n + " 集：调试包导出失败（TS 仍保留在本机任务目录）：" + ee;
+                }
+                return;
+            }
             StringBuilder dbg = new StringBuilder();
             // 合并产物直接写最终路径（无 .tmp 改名落位步骤）：MediaMuxer 写完 out 即产物，
             // 杜绝"合并完成但产物未落位"（rename/copy 在 Android 上不可靠）。半成品由重试覆盖。
@@ -1538,6 +1574,183 @@ final class DownloadManager {
                 try { deleteRecursively(work); } catch (Exception ignored) {}
             }
         }
+    }
+
+    // ---- 调试包（私密模式「下载到手机（调试）」）----
+
+    private static final String DEBUG_README =
+        "Veyra 单集调试包\r\n"
+        + "==================\r\n"
+        + "这是某一集的原始素材，**没有合并成 mp4**，用于排查「合并后黑屏 / 花屏 / 时长不对」这类问题。\r\n\r\n"
+        + "包含：\r\n"
+        + "  seg-XXXX.ts   已下载并解密（若源为 AES-128）的原始分片，可直接播放\r\n"
+        + "  key-N.key     源站返回的 AES-128 密钥原文（16 字节）\r\n"
+        + "  play.m3u8     本地重写的播放列表（分片顺序 + KEY/IV 对应关系）\r\n"
+        + "  key-diag.txt  仅当密钥下载异常时出现，记录源站实际返回内容\r\n"
+        + "  diag.txt      分片逐个体检：TS 同步字节、annex-b 起始码长度分布、NAL 类型、音视频轨信息\r\n\r\n"
+        + "关键看 diag.txt 里的「起始码 3B / 4B」：3 字节起始码（00 00 01）的 TS 在部分播放器 / 封装器上\r\n"
+        + "会被误判，正是「容器合法但画面全黑」的典型来源。\r\n";
+
+    /** 把一集的 work 目录（ts/KEY/playlist/诊断）整包打成一个 zip 导出到公共 Downloads。
+     *  @return 便于写进任务日志的「落在哪 / 多大」描述 */
+    private String exportDebugBundle(Task task, File work, int n) throws Exception {
+        File[] kids = work.listFiles();
+        if (kids == null || kids.length == 0) throw new java.io.IOException("调试目录为空，没有可导出的分片");
+        // 诊断与说明先落进 work，随后一起打进 zip
+        java.nio.file.Files.write(new File(work, "diag.txt").toPath(),
+                buildDebugDiag(task, work, n).getBytes(StandardCharsets.UTF_8));
+        java.nio.file.Files.write(new File(work, "README.txt").toPath(),
+                DEBUG_README.getBytes(StandardCharsets.UTF_8));
+
+        String subDir = task.title == null ? "" : task.title.replaceAll("[\\\\/:*?\"<>|]", "_");
+        String zipName = String.format(Locale.US, "第%02d集_调试包.zip", n);
+        File tmp = new File(work.getParentFile(), "dbg_" + n + ".zip");
+        if (tmp.exists()) tmp.delete();
+        File[] all = work.listFiles();
+        if (all == null) throw new java.io.IOException("调试目录不可读");
+        java.util.Arrays.sort(all, (a, b) -> a.getName().compareTo(b.getName()));
+        byte[] buf = new byte[256 * 1024];
+        try (java.util.zip.ZipOutputStream zos = new java.util.zip.ZipOutputStream(
+                new java.io.BufferedOutputStream(new FileOutputStream(tmp), 1024 * 1024))) {
+            for (File f : all) {
+                if (!f.isFile()) continue;
+                // mpeg-ts 基本不可再压缩，deflate 只会白白多花一倍 CPU 时间 → 全部 STORED
+                java.util.zip.ZipEntry e = new java.util.zip.ZipEntry(f.getName());
+                e.setMethod(java.util.zip.ZipEntry.STORED);
+                e.setSize(f.length());
+                e.setCompressedSize(f.length());
+                e.setCrc(crc32(f));
+                e.setTime(f.lastModified());
+                zos.putNextEntry(e);
+                try (InputStream in = new FileInputStream(f)) {
+                    int r;
+                    while ((r = in.read(buf)) > 0) zos.write(buf, 0, r);
+                }
+                zos.closeEntry();
+            }
+        }
+        long size = tmp.length();
+        Uri u;
+        try {
+            u = exportToDownloads(tmp, subDir, zipName, "application/zip");
+        } finally {
+            tmp.delete();
+        }
+        return zipName + " " + (size / 1024 / 1024) + "MB" + (u == null ? "" : " → " + u);
+    }
+
+    private static long crc32(File f) throws Exception {
+        java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+        byte[] buf = new byte[256 * 1024];
+        try (InputStream in = new FileInputStream(f)) {
+            int r;
+            while ((r = in.read(buf)) > 0) crc.update(buf, 0, r);
+        }
+        return crc.getValue();
+    }
+
+    /** 分片逐个体检：这是排查「黑屏」最直接的一手材料，比事后看 mp4 更准。 */
+    private String buildDebugDiag(Task task, File work, int n) {
+        StringBuilder sb = new StringBuilder();
+        String ver = "";
+        try { ver = context.getPackageManager().getPackageInfo(context.getPackageName(), 0).versionName; } catch (Exception ignored) {}
+        sb.append("# Veyra 单集调试包诊断\n");
+        sb.append("appVersion=").append(ver).append('\n');
+        sb.append("source=").append(task.source).append('\n');
+        sb.append("title=").append(task.title).append('\n');
+        sb.append("episode=").append(n).append('\n');
+        sb.append("time=").append(new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                .format(new java.util.Date())).append('\n');
+        sb.append("device=").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
+                .append(" / Android ").append(Build.VERSION.RELEASE).append('\n');
+
+        File[] segs = work.listFiles((d, name) -> name.endsWith(".ts"));
+        if (segs == null) segs = new File[0];
+        java.util.Arrays.sort(segs, (a, b) -> a.getName().compareTo(b.getName()));
+        long bytes = 0;
+        for (File s : segs) bytes += s.length();
+        sb.append("\n## 分片 ").append(segs.length).append(" 个，共 ").append(bytes / 1024 / 1024).append("MB\n");
+        for (int i = 0; i < segs.length; i++) sb.append(probeSegment(segs[i], i == 0 || i == segs.length - 1)).append('\n');
+
+        sb.append("\n## 音视频轨（MediaExtractor 读首片）\n");
+        if (segs.length > 0) {
+            try {
+                MediaExtractor ex = openExtractor(segs[0]);
+                try {
+                    for (int t = 0; t < ex.getTrackCount(); t++) {
+                        MediaFormat mf = ex.getTrackFormat(t);
+                        sb.append("track").append(t).append(": ").append(mf.getString(MediaFormat.KEY_MIME));
+                        Integer w = mf.containsKey(MediaFormat.KEY_WIDTH) ? mf.getInteger(MediaFormat.KEY_WIDTH) : null;
+                        Integer h = mf.containsKey(MediaFormat.KEY_HEIGHT) ? mf.getInteger(MediaFormat.KEY_HEIGHT) : null;
+                        if (w != null && h != null) sb.append(' ').append(w).append('x').append(h);
+                        ByteBuffer csd = mf.getByteBuffer("csd-0");
+                        sb.append(" csd-0=").append(csd == null ? "缺失" : csd.remaining() + "B");
+                        sb.append('\n');
+                    }
+                } finally { try { ex.release(); } catch (Exception ignored) {} }
+            } catch (Exception e) {
+                sb.append("MediaExtractor 打不开首片：").append(e).append('\n');
+            }
+        }
+
+        sb.append("\n## KEY\n");
+        File[] keys = work.listFiles((d, name) -> name.endsWith(".key"));
+        if (keys == null || keys.length == 0) sb.append("无（分片可能是明文）\n");
+        else for (File k : keys) {
+            sb.append(k.getName()).append(" len=").append(k.length()).append(" hex=");
+            try { sb.append(hex(java.nio.file.Files.readAllBytes(k.toPath()), 32)); }
+            catch (Exception e) { sb.append('<').append(e).append('>'); }
+            sb.append('\n');
+        }
+
+        sb.append("\n## 本地 playlist\n");
+        File pl = new File(work, "play.m3u8");
+        try { sb.append(new String(java.nio.file.Files.readAllBytes(pl.toPath()), StandardCharsets.UTF_8)); }
+        catch (Exception e) { sb.append("<读取失败 ").append(e).append(">\n"); }
+        return sb.toString();
+    }
+
+    /** 单片体检：TS 同步字节 + annex-b 起始码 3B/4B 统计 + NAL 类型分布（只扫前 1MB，够判断）。 */
+    private static String probeSegment(File f, boolean verbose) {
+        StringBuilder r = new StringBuilder();
+        r.append(f.getName()).append(' ').append(f.length()).append('B');
+        long sc3 = 0, sc4 = 0;
+        int[] nalType = new int[64];
+        try (InputStream in = new FileInputStream(f)) {
+            byte[] b = new byte[1024 * 1024];
+            int len = in.read(b);
+            if (len <= 0) return r.append(" 读取失败").toString();
+            int first = b[0] & 0xFF;
+            r.append(" 首字节=0x").append(String.format(Locale.US, "%02X", first));
+            if (first != 0x47) r.append("（不是 TS 同步字节！）");
+            for (int i = 0; i + 4 < len; i++) {
+                if (b[i] == 0 && b[i + 1] == 0 && b[i + 2] == 1) {
+                    if (i > 0 && b[i - 1] == 0) sc4++; else sc3++;
+                    int h = b[i + 3] & 0xFF;
+                    if (h < 64) nalType[h]++;
+                }
+            }
+        } catch (Exception e) {
+            return r.append(" 读取异常:").append(e).toString();
+        }
+        r.append(" 起始码 3B=").append(sc3).append(" 4B=").append(sc4);
+        if (!verbose) return r.toString();
+        // 只对首末片印 NAL 类型分布，避免 diag 被几百行刷爆
+        r.append(" NAL类型{");
+        boolean any = false;
+        for (int t = 0; t < nalType.length; t++) {
+            if (nalType[t] == 0) continue;
+            if (any) r.append(',');
+            r.append(t).append(':').append(nalType[t]);
+            any = true;
+        }
+        return r.append('}').toString();
+    }
+
+    private static String hex(byte[] b, int max) {
+        StringBuilder s = new StringBuilder();
+        for (int i = 0; i < b.length && i < max; i++) s.append(String.format(Locale.US, "%02x", b[i]));
+        return s.toString();
     }
 
     /** 下载完成后把密文 TS 解密为明文（0x47 开头）：TS 文件可直接播放（用户要求"之前版本可播"），
@@ -2460,6 +2673,8 @@ final class DownloadManager {
     private static boolean isEpisodeArtifact(String name) {
         if (name == null) return false;
         return name.matches("第\\d+集\\.mp4") || name.matches("ep\\d+\\.mp4")
+                // 调试模式下导出的素材包，删任务时也要一起清掉，别留在剧集目录里
+                || name.matches("第\\d+集_调试包\\.zip")
                 || name.startsWith("norm_") || name.endsWith(".part");
     }
 
@@ -2533,6 +2748,10 @@ final class DownloadManager {
     }
 
     private Uri exportToDownloads(File file, String subDir, String displayName) throws Exception {
+        return exportToDownloads(file, subDir, displayName, "video/mp4");
+    }
+
+    private Uri exportToDownloads(File file, String subDir, String displayName, String mime) throws Exception {
         if (Build.VERSION.SDK_INT >= 29) {
             // 先清理同名旧条目：MediaStore insert 遇同名（残留/删除未及时完成）会自动追加 "_时间戳"
             // 后缀生成新文件，导致产物名漂移 + 旧文件残留；先删同名再插入，保证永远用原名覆盖。
@@ -2556,7 +2775,7 @@ final class DownloadManager {
             } catch (Exception ignored) { }
             ContentValues values = new ContentValues();
             values.put(MediaStore.Downloads.DISPLAY_NAME, displayName);
-            values.put(MediaStore.Downloads.MIME_TYPE, "video/mp4");
+            values.put(MediaStore.Downloads.MIME_TYPE, mime);
             values.put(MediaStore.Downloads.RELATIVE_PATH, rel);
             values.put(MediaStore.Downloads.IS_PENDING, 1);
             Uri uri = context.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
@@ -2571,7 +2790,7 @@ final class DownloadManager {
                 ContentValues done = new ContentValues();
                 done.put(MediaStore.Downloads.IS_PENDING, 0);
                 context.getContentResolver().update(uri, done, null, null);
-                MediaScannerConnection.scanFile(context, new String[]{file.getAbsolutePath()}, new String[]{"video/mp4"}, null);
+                MediaScannerConnection.scanFile(context, new String[]{file.getAbsolutePath()}, new String[]{mime}, null);
                 return uri;
             }
         }
@@ -2581,7 +2800,7 @@ final class DownloadManager {
         if (!dir.exists()) dir.mkdirs();
         File fallback = new File(dir, displayName);
         copyFile(file, fallback);
-        MediaScannerConnection.scanFile(context, new String[]{fallback.getAbsolutePath()}, new String[]{"video/mp4"}, null);
+        MediaScannerConnection.scanFile(context, new String[]{fallback.getAbsolutePath()}, new String[]{mime}, null);
         return Uri.fromFile(fallback);
     }
 

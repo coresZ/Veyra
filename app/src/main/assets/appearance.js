@@ -78,12 +78,38 @@ var SUNNY_CORNERS = [{"id":"tight","name":"紧致"},{"id":"default","name":"标�
       + ' style="--dot:' + swatch(c.light) + ';--dot-d:' + swatch(c.dark) + '"></button>';
   }
 
-  window.renderAppearance = function () {
+  /* ---------- 设置页 UI：一行入口 + 弹窗 ----------
+   * 四维组合铺在设置页里要占满一屏，把后面的设置项全挤下去。改成和「账号管理」一样的
+   * 一行入口（副标题显示当前组合），点开才以浮层弹出完整选项；点遮罩/关闭/返回导航都会收起。 */
+  function findById(list, id) {
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+    return null;
+  }
+
+  function cornerName() {
+    var c = findById(SUNNY_CORNERS, state.corner);
+    return c ? c.name : state.corner;
+  }
+
+  function summaryText() {
+    var m = findById(SUNNY_MATERIALS, state.material);
+    var c = findById(SUNNY_COLORS_SINGLE, state.color) || findById(SUNNY_COLORS_MULTI, state.color);
+    return (m ? m.name : state.material) + ' · ' + (c ? c.name : state.color)
+      + ' · ' + (state.theme === 'dark' ? '深色' : '浅色') + ' · ' + cornerName() + '圆角';
+  }
+
+  function updateSummary() {
+    var el = document.querySelector('[data-appearance-summary]');
+    if (el) el.textContent = summaryText();
+  }
+
+  var ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+    + ' stroke-linecap="round" stroke-linejoin="round"><path d="m9 5 7 7-7 7"/></svg>';
+
+  function optionsHtml() {
     var single = SUNNY_COLORS_SINGLE.map(dot).join('');
     var multi = SUNNY_COLORS_MULTI.map(dot).join('');
-    return '<div class="appearance" id="appearance-panel">'
-      + '<div class="appearance-head"><h2>外观</h2><small>明暗、质感、配色、圆角各存一份，互不影响。</small></div>'
-      + '<div class="appearance-block"><span class="appearance-label">明暗</span>'
+    return '<div class="appearance-block"><span class="appearance-label">明暗</span>'
       +   '<div class="seg" role="group" aria-label="明暗">'
       +     '<button type="button" data-theme-set="light">浅色</button>'
       +     '<button type="button" data-theme-set="dark">深色</button>'
@@ -99,16 +125,32 @@ var SUNNY_CORNERS = [{"id":"tight","name":"紧致"},{"id":"default","name":"标�
       +     '<button type="button" data-corner-set="tight">紧致</button>'
       +     '<button type="button" data-corner-set="default">标准</button>'
       +     '<button type="button" data-corner-set="round">圆润</button>'
-      +   '</div></div>'
-      + '</div>';
+      +   '</div></div>';
+  }
+
+  window.renderAppearance = function () {
+    return '<section><button type="button" class="settings-link appearance-entry"'
+      + ' data-appearance-open aria-haspopup="dialog">'
+      + '<span><strong>外观</strong><small data-appearance-summary>' + esc(summaryText()) + '</small></span>'
+      + ARROW + '</button></section>';
   };
 
-  /** 设置页渲染完调用：同步选中态 + 绑定事件。 */
-  window.bindAppearance = function () {
-    var panel = document.getElementById('appearance-panel');
-    if (!panel || panel.dataset.bound === '1') return;
-    panel.dataset.bound = '1';
-    panel.addEventListener('click', function (e) {
+  var scrim = null;
+
+  function ensurePop() {
+    if (scrim && document.body.contains(scrim)) return scrim;
+    scrim = document.createElement('div');
+    scrim.className = 'appearance-scrim';
+    scrim.hidden = true;
+    scrim.innerHTML = '<div class="appearance-pop" role="dialog" aria-modal="true" aria-labelledby="appearance-title">'
+      + '<div class="appearance-head"><h2 id="appearance-title">外观</h2>'
+      +   '<button type="button" class="appearance-close" data-appearance-close aria-label="关闭">✕</button></div>'
+      + '<p class="appearance-note">明暗、质感、配色、圆角各存一份，互不影响。</p>'
+      + '<div class="appearance" id="appearance-panel">' + optionsHtml() + '</div></div>';
+    document.body.appendChild(scrim);
+    scrim.addEventListener('click', function (e) {
+      // 点遮罩空白处或关闭按钮 → 收起；点选项 → 就地改状态，弹窗不关
+      if (e.target === scrim || e.target.closest('[data-appearance-close]')) { closePop(); return; }
       var t = e.target.closest('[data-theme-set],[data-mat],[data-color],[data-corner-set]');
       if (!t) return;
       if (t.dataset.themeSet) window.VeyraAppearance.set({ theme: t.dataset.themeSet });
@@ -116,12 +158,44 @@ var SUNNY_CORNERS = [{"id":"tight","name":"紧致"},{"id":"default","name":"标�
       else if (t.dataset.color) window.VeyraAppearance.set({ color: t.dataset.color });
       else if (t.dataset.cornerSet) window.VeyraAppearance.set({ corner: t.dataset.cornerSet });
       syncSelection();
+      updateSummary();
     });
+    return scrim;
+  }
+
+  function openPop() {
+    ensurePop();
     syncSelection();
+    scrim.hidden = false;
+    document.body.classList.add('appearance-open');
+  }
+
+  function closePop() {
+    if (!scrim || scrim.hidden) return;
+    scrim.hidden = true;
+    document.body.classList.remove('appearance-open');
+  }
+
+  /** 设置页渲染完调用：刷新入口文案/选中态，并挂一次性全局事件。 */
+  window.bindAppearance = function () {
+    updateSummary();
+    syncSelection();
+    if (window.__veyraAppearanceWired) return;
+    window.__veyraAppearanceWired = true;
+    document.addEventListener('click', function (e) {
+      if (e.target.closest('[data-appearance-open]')) { openPop(); return; }
+      // 离开设置页（切 Dock / 点返回）时顺手收起，避免弹窗留在别的页面上
+      if (!scrim || scrim.hidden) return;
+      if (e.target.closest('[data-nav],[data-back]')) closePop();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closePop();
+    });
   };
 
   function syncSelection() {
-    var panel = document.getElementById('appearance-panel');
+    var panel = scrim && document.body.contains(scrim) ? scrim.querySelector('#appearance-panel')
+      : document.getElementById('appearance-panel');
     if (!panel) return;
     var set = function (sel, attr, val) {
       panel.querySelectorAll(sel).forEach(function (b) {

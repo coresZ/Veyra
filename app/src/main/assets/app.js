@@ -1036,9 +1036,13 @@ function renderDownloadSheet() {
   }
   if (downloadMode === 'target') {
     const isAdmin = state.account.role === 'admin';
+    // 「调试」只在私密（黄果）模式给：那条链路才是 m3u8 → ts 分片 → 本地合并，
+    // 也只有它能保留 TS/KEY 给开发者复现黑屏。公开模式没有分片可留。
+    const canDebug = privateMode();
     sheet.innerHTML = `<div class="download-pick">
       <button type="button" class="download-pick-option" data-dl-pick="phone"><strong>下载到手机</strong></button>
       <button type="button" class="download-pick-option" data-dl-pick="nas" ${isAdmin ? '' : 'disabled'}><strong>下载到 NAS</strong>${isAdmin ? '' : '<small>仅管理员可用</small>'}</button>
+      ${canDebug ? '<button type="button" class="download-pick-option" data-dl-pick="phone-debug"><strong>下载到手机（调试）</strong><small>保留 TS 与 Key，不自动合并，导出调试包</small></button>' : ''}
       <p class="download-nas-note">${state.account.loggedIn ? '' : 'NAS 下载需要先登录账号。'}</p>
     </div>`;
     return;
@@ -1129,8 +1133,12 @@ async function submitDownloadTo(target) {
       {
         const resolved = await resolveEpisodesForDownload(episodes);
         if (!resolved.length) throw new Error('没有可下载的分集');
-        await api('download-start', { source: sourceNow, title: state.detail.title, episodes: resolved });
-        toast(`判定[源=${sourceNow} 通道=${proxyModeNow}] 已开始下载到手机（手机经代理拉源合并）`);
+        // 调试模式：仍是「下载到手机」，但要求原生保留 TS/KEY、不自动合并，最后打成一个调试包
+        const debug = target === 'phone-debug';
+        await api('download-start', { source: sourceNow, title: state.detail.title, episodes: resolved, debug });
+        toast(debug
+          ? `调试模式已开始（${resolved.length} 集）：分片下完后会导出「第NN集_调试包.zip」到 Download/Veyra/${state.detail.title}`
+          : `判定[源=${sourceNow} 通道=${proxyModeNow}] 已开始下载到手机（手机经代理拉源合并）`);
       }
     }
     hideDownloadSheet();

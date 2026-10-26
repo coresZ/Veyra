@@ -615,7 +615,7 @@ public final class MainActivity extends Activity {
             case "change-password": return account.changePassword(args.optString("oldPassword"), args.optString("newPassword"));
             case "logout": account.logout(); return account.profile();
             case "sync": return account.sync();
-            case "download-start": return DownloadManager.get(this).start(args.optString("source"), args.optString("title"), args.optJSONArray("episodes"));
+            case "download-start": return DownloadManager.get(this).start(args.optString("source"), args.optString("title"), args.optJSONArray("episodes"), args.optBoolean("debug", false));
             case "download-list": return DownloadManager.get(this).list();
             case "download-cancel": DownloadManager.get(this).cancel(args.optString("id")); return new JSONObject().put("ok", true);
             case "download-delete": DownloadManager.get(this).delete(args.optString("id")); return new JSONObject().put("ok", true);
