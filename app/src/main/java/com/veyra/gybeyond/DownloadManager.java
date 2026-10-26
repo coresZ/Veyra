@@ -1312,9 +1312,9 @@ final class DownloadManager {
 
         // 3) 逐分片 MediaExtractor → 同一 MediaMuxer：每个分片是独立合法 ts（自带 PAT/PMT），
         //    单独解析可靠（拼接 full.ts 只读第一分片的坑在这里规避）。
-        //    PTS：分片内归零（t-basePts）后叠加跨分片累积值（vSegBase/aSegBase 按轨持续累加），
-        //    并对 B 帧回退做单调化（不早于前样本）——缺这一步部分设备 MediaMuxer 内部报错标记
-        //    stopped，到 stop() 才抛 "would have stopped already"。
+        //    PTS：源分片 PTS 全局连续（实测片1 末 877151us / 片2 首 883151us 无缝衔接）——
+        //    直接透传源 PTS，绝不重写/累加/单调化。B 帧显示序有回退，强制单调会把 B 帧 PTS
+        //    压到 1us 间隔 → 加速播 + 乱码；muxer 依据显示序自动写 ctts。
         //    读取方式：先首片解析格式/csd + addTrack + start，然后【视频轨一遍 + 音频轨一遍】
         //    （每遍 selectTrack 后 advance，MediaExtractor 标准用法）。此前"不 select 交错读取"
         //    在真机上 getSampleSize 拿不到样本 → 0 样本 → 空 mp4（<1KB）→ 三集全"产物无效"。
@@ -1322,7 +1322,6 @@ final class DownloadManager {
         MediaMuxer muxer = new MediaMuxer(out.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
         boolean started = false;
         int vTrack = -1, aTrack = -1;
-        long vSegBase = 0, aSegBase = 0; // 跨分片全局基准（每片起始时间轴位置，分片内相对偏移加在这个基准上）
         int vCnt = 0, aCnt = 0;
         ByteBuffer buf = ByteBuffer.allocateDirect(2 * 1024 * 1024);
         MediaCodec.BufferInfo bi = new MediaCodec.BufferInfo();
@@ -1398,8 +1397,9 @@ final class DownloadManager {
                 started = true;
             } finally { first.release(); }
 
-            // 3.2 视频轨一遍（每片 selectTrack(视频) 后 advance；PTS 跨分片单调）
-            long vLast = 0;
+            // 3.2 视频轨一遍（源分片 PTS 全局连续——实测片1 末 877151us / 片2 首 883151us 无缝衔接——
+            // 直接透传源 PTS，绝不重写/累加/单调化。B 帧显示序有回退，强制单调会把 B 帧 PTS 压到
+            // 1us 间隔 → 加速播 + 乱码。muxer 依据显示序自动写 ctts。）
             for (int p = 0; p < decFiles.length; p++) {
                 MediaExtractor ex = new MediaExtractor();
                 try {
@@ -1413,7 +1413,6 @@ final class DownloadManager {
                     ex.selectTrack(ev);
                     String vm = ex.getTrackFormat(ev).getString(MediaFormat.KEY_MIME);
                     boolean hevc = vm != null && vm.startsWith("video/hevc");
-                    long vBase = -1, vMax = 0;
                     while (ex.advance()) {
                         long sz = ex.getSampleSize();
                         if (sz <= 0) continue;
@@ -1421,31 +1420,22 @@ final class DownloadManager {
                         buf.clear();
                         int n = ex.readSampleData(buf, 0);
                         if (n < 0) continue;
-                        long t = ex.getSampleTime();
+                        long pts = ex.getSampleTime();
                         int flags = ex.getSampleFlags();
                         buf.position(0); buf.limit(n);
-                        if (vBase < 0) vBase = t;
-                        if (t > vMax) vMax = t;
                         // TS 源 MediaExtractor 不提供 sync 信息（getSampleFlags 恒 0）→ 自行检测
                         // IDR/参数集并标 KEY_FRAME，否则 MediaMuxer 写不出 stss → 播放器花屏/乱码。
                         if (sampleIsSync(buf, 0, n, hevc))
                             flags |= MediaCodec.BUFFER_FLAG_KEY_FRAME;
-                        // PTS = 分片全局基准 + 分片内相对偏移（不能逐帧累加，否则时长被拉长=播放慢放）
-                        long rel = t - vBase; if (rel < 0) rel = 0;
-                        long pts = vSegBase + rel;
-                        if (pts <= vLast) pts = vLast + 1;   // B 帧回退单调化
-                        vLast = pts;
                         bi.set(0, n, pts, flags);
                         muxer.writeSampleData(vTrack, buf, bi);
                         vCnt++;
                     }
-                    if (vBase >= 0) vSegBase += (vMax - vBase);
                 } finally { ex.release(); }
             }
 
-            // 3.3 音频轨一遍（如有；ADTS 剥头写 raw AAC）
+            // 3.3 音频轨一遍（源音频 PTS 同样全局连续——直接透传；ADTS 剥头写 raw AAC）
             if (aTrack >= 0) {
-                long aLast = 0;
                 for (int p = 0; p < decFiles.length; p++) {
                     MediaExtractor ex = new MediaExtractor();
                     try {
@@ -1457,7 +1447,6 @@ final class DownloadManager {
                         }
                         if (ea < 0) continue;
                         ex.selectTrack(ea);
-                        long aBase = -1, aMax = 0;
                         while (ex.advance()) {
                             long sz = ex.getSampleSize();
                             if (sz <= 0) continue;
@@ -1465,15 +1454,9 @@ final class DownloadManager {
                             buf.clear();
                             int n = ex.readSampleData(buf, 0);
                             if (n < 0) continue;
-                            long t = ex.getSampleTime();
+                            long pts = ex.getSampleTime();
                             int flags = ex.getSampleFlags();
                             buf.position(0); buf.limit(n);
-                            if (aBase < 0) aBase = t;
-                            if (t > aMax) aMax = t;
-                            long rel = t - aBase; if (rel < 0) rel = 0;
-                            long pts = aSegBase + rel;
-                            if (pts <= aLast) pts = aLast + 1;
-                            aLast = pts;
                             // TS 音频 sample 是 ADTS 帧（含头），mp4 的 AAC 轨必须 raw AAC——剥头。
                             // 头长：protection_absent=1 → 7B，=0 → 9B（第 6 字节 bit0）。
                             // sample 可能含多个 ADTS 帧 → 按 frame_length 循环剥全部帧头、逐帧写入
@@ -1502,7 +1485,6 @@ final class DownloadManager {
                             muxer.writeSampleData(aTrack, buf, bi);
                             aCnt++;
                         }
-                        if (aBase >= 0) aSegBase += (aMax - aBase);
                     } finally { ex.release(); }
                 }
             }
