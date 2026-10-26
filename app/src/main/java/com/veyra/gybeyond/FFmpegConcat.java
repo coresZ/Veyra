@@ -26,8 +26,12 @@ final class FFmpegConcat {
         }
     }
 
-    /** 与 ffmpeg CLI concat 合并 1:1。tag: "hev1" 或 "avc3"。输出失败抛 IOException（带 ffmpeg 阶段信息）。
-     *  keys：每集 CENC 解密密钥（hex 字符串，可为空串表示明文源），顺序与 inputs 一一对应。 */
+    /** 与 ffmpeg CLI concat 合并 1:1。tag: "hvc1" 或 "avc1"（**不要**用 hev1/avc3，见下）。
+     *  输出失败抛 IOException（带 ffmpeg 阶段信息）。
+     *  keys：每集 CENC 解密密钥（hex 字符串，可为空串表示明文源），顺序与 inputs 一一对应。
+     *  ⚠️ tag 必须是 avc1 / hvc1（参数集只在 avcC 里）。avc3 / hev1 是「参数集放样本内」的
+     *  变体，规范上合法、ffmpeg 也能正确生成，但很多 Android 解码器按 stsd 四码匹配，
+     *  遇到 avc3/hev1 直接判不支持 → 文件能打开、时长正确、画面全黑，容器校验查不出来。 */
     static void concat(List<File> inputs, List<String> keys, File output, String tag, StringBuilder debug, File nativeLog) throws Exception {
         if (LOAD_ERROR != null) {
             throw new java.io.IOException("ffmpeg 库加载失败: " + LOAD_ERROR, LOAD_ERROR);

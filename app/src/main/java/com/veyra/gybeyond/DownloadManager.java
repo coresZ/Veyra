@@ -497,7 +497,7 @@ final class DownloadManager {
                         List<String> singleKey = new ArrayList<>();
                         singleKey.add(key);
                         StringBuilder dbg = new StringBuilder();
-                        FFmpegConcat.concat(single, singleKey, norm, "hev1", dbg,
+                        FFmpegConcat.concat(single, singleKey, norm, "hvc1", dbg,
                             new File(context.getFilesDir(), "native.log"));
                     }
                     String epName = String.format(Locale.US, "第%02d集.mp4", i + 1);
@@ -662,7 +662,7 @@ final class DownloadManager {
                     JSONObject ep0 = task.episodes.optJSONObject(0);
                     k1.add(ep0 != null ? ep0.optString("key", "") : "");
                     StringBuilder dbg = new StringBuilder();
-                    FFmpegConcat.concat(plain, k1, merged, "hev1", dbg, new File(context.getFilesDir(), "native.log"));
+                    FFmpegConcat.concat(plain, k1, merged, "hvc1", dbg, new File(context.getFilesDir(), "native.log"));
                     task.debug = dbg.toString();
                 } else mergeMp4(plain, merged, task);
                 if (task.canceled) return;
@@ -1252,6 +1252,111 @@ final class DownloadManager {
         }
     }
 
+    /**
+     * 削掉 AES-128-CBC(NoPadding) 解密后残留的 PKCS#7 填充。
+     *
+     * HLS 分片是「明文 + PKCS#7 填充」再按 16 字节块加密的，所以密文长度是 16 的倍数，
+     * 明文长度却不是。用 NoPadding 解密拿到的是「明文 + 填充」，填充长度记在最后一个字节，
+     * 值是 pad 字节、每个字节都是 pad。实测每个分片尾部残留 4~16 字节（如 04040404、
+     * 10101010...0x10×16），削掉之后分片长度才正好是 188 的整数倍。
+     *
+     * 只在「削完正好是 188 的整数倍」时才认定是填充 —— 否则万一源站真的把 0x04 写进了
+     * 有效数据，这个判据能避免削掉真数据。不符合就原样返回，不做任何破坏。
+     */
+    private static byte[] stripPkcs7Pad(byte[] b) {
+        if (b == null || b.length < 188 + 1) return b;
+        int n = b.length;
+        int pad = b[n - 1] & 0xFF;
+        if (pad < 1 || pad > 16 || pad >= n) return b;
+        for (int i = n - pad; i < n; i++) if ((b[i] & 0xFF) != pad) return b;
+        int keep = n - pad;
+        if (keep % 188 != 0) return b;       // 削完不能整除 188 → 不是填充，别动
+        byte[] r = new byte[keep];
+        System.arraycopy(b, 0, r, 0, keep);
+        return r;
+    }
+
+    /**
+     * 产物「画面」自检：真的解几帧出来看，而不是只查容器。
+     *
+     * 黑屏有两种形态，只看容器都发现不了：
+     *   1) 视频轨时长为 0（FFmpegConcat.verify 已覆盖）；
+     *   2) 时长/结构全部正常，但解码器不认这条轨（典型是 stsd 写了 avc3/hev1，
+     *      或者样本数据被旧的 annex-b→长度前缀转换弄坏）→ 播放器打开黑屏。
+     * 第 2 种只能靠实际取帧判断。
+     *
+     * @return 0=正常（解出非纯色画面）；1=取不到帧（无法判定，只记日志不拦截）；
+     *         2=取到的帧全是纯色/全黑（确定黑屏）。
+     * 注意不要把 1 当失败：个别机型 / 某些编码上 MediaMetadataRetriever 会返回 null，
+     * 那属于「判不了」，拦下来只会把能播的剧也判死。
+     */
+    private static int checkPicture(File out, StringBuilder dbg) {
+        if (out == null || !out.exists() || out.length() == 0) return 1;
+        android.media.MediaMetadataRetriever mr = new android.media.MediaMetadataRetriever();
+        try {
+            mr.setDataSource(out.getAbsolutePath());
+            long durMs = 0;
+            try {
+                String ds = mr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION);
+                if (ds != null) durMs = Long.parseLong(ds.trim());
+            } catch (Exception ignored) {}
+            if (durMs <= 0) { dbg.append("[画面自检] 读不到时长\n"); return 1; }
+            long[] pts = { durMs * 15 / 100, durMs * 50 / 100, durMs * 85 / 100 };
+            int got = 0, blank = 0;
+            for (long t : pts) {
+                android.graphics.Bitmap bm = null;
+                try {
+                    bm = mr.getFrameAtTime(t * 1000L,
+                            android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                } catch (Exception ignored) {}
+                if (bm == null) continue;
+                got++;
+                if (isBlankFrame(bm)) blank++;
+                try { bm.recycle(); } catch (Exception ignored) {}
+            }
+            dbg.append("[画面自检] 时长=").append(durMs).append("ms 取到帧=").append(got)
+                    .append(" 纯色帧=").append(blank).append('\n');
+            if (got == 0) return 1;
+            return blank == got ? 2 : 0;
+        } catch (Exception e) {
+            dbg.append("[画面自检] 异常：").append(e).append('\n');
+            return 1;
+        } finally {
+            try { mr.release(); } catch (Exception ignored) {}
+        }
+    }
+
+    /**
+     * 抽稀采样判断是否「平坦帧」（黑屏 / 纯色 / 无画面）。
+     *
+     * 判据用**亮度极差**而不是「颜色是否完全相同」：真黑屏经过 H.264 压缩后每个像素都有
+     * 细微噪声，颜色极少完全相等，用相等判据会漏判。正常影视画面在 24×24 个采样点上
+     * 亮度极差普遍 > 60，而纯黑/纯色帧极差 < 20，两者区分度足够。
+     */
+    private static boolean isBlankFrame(android.graphics.Bitmap bm) {
+        try {
+            int w = bm.getWidth(), h = bm.getHeight();
+            if (w <= 0 || h <= 0) return true;
+            int sx = Math.max(1, w / 24), sy = Math.max(1, h / 24);
+            int lo = 255, hi = 0, total = 0;
+            for (int y = 0; y < h; y += sy) {
+                for (int x = 0; x < w; x += sx) {
+                    int p = bm.getPixel(x, y);
+                    // 整数近似亮度：0.299R + 0.587G + 0.114B
+                    int r = (p >> 16) & 0xFF, g = (p >> 8) & 0xFF, b = p & 0xFF;
+                    int y8 = (r * 77 + g * 150 + b * 29) >> 8;
+                    if (y8 < lo) lo = y8;
+                    if (y8 > hi) hi = y8;
+                    total++;
+                }
+            }
+            if (total == 0) return true;
+            return (hi - lo) < 20;
+        } catch (Exception e) {
+            return false;   // 读像素失败不判黑屏，避免误杀
+        }
+    }
+
     /** 复用本地 work 前检查：playlist 里引用的 KEY 文件必须都存在且为 16 字节，否则删掉坏的并返回说明
      *  （调用方据此放弃本地复用、重新解析下载）。没有 KEY 行（明文剧）返回 null。 */
     private static String dropInvalidLocalKeys(File work, File playlist) {
@@ -1808,6 +1913,10 @@ final class DownloadManager {
                 // 解出来的必须是明文 TS 才覆盖原文件：IV/KEY 不对时解出的垃圾一旦写回，密文就被永久毁掉，
                 // 下次再解密等于二次解密 → 整集报废且无法自愈（旧实现缺这层校验，直接回写）
                 if (!looksLikeTs(dec)) { decBad++; continue; }
+                // NoPadding 解密保留源站加的 PKCS#7 填充（实测每片尾部残留 4~16 字节，
+                // 内容是「填充长度」重复），这里削掉，让落盘的 TS 正好是 188 的整数倍，
+                // 文件管理器里能直接播，也免得把垃圾字节带进合并阶段。
+                dec = stripPkcs7Pad(dec);
                 java.nio.file.Files.write(seg.toPath(), dec);
                 decOk++;
             } catch (Exception ignored) {}
@@ -1906,7 +2015,8 @@ final class DownloadManager {
                     }
                 }
                 File df = new File(work, String.format(Locale.US, "dec-%04d.ts", i));
-                java.nio.file.Files.write(df.toPath(), dec);
+                // 老版本落盘的分片带 PKCS#7 填充尾巴，这里兜底再削一次（已是 188 整数倍则原样返回）
+                java.nio.file.Files.write(df.toPath(), stripPkcs7Pad(dec));
                 decFiles[i] = df;
             }
         } catch (Exception e) {
@@ -1921,13 +2031,23 @@ final class DownloadManager {
         //    mdat 里没有一个能解的 NAL → 播放器黑屏，而 moov/stbl 结构完全合法，verify 也查不出来。
         //    FFmpeg concat 自己按 annex-b 解析（3/4 字节都认），0.18.67 全量可播的正是这条路径。
         //    首片视频编码 → tag（回退 native 时用）。
-        String tag = "avc3";
+        // ⚠️ 必须用 avc1 / hvc1，不能用 avc3 / hev1。
+        // 两者的区别是「参数集（SPS/PPS）放在哪」：
+        //   avc1 → 参数集只在 avcC box 里（out-of-band），这是 Android 解码器 / 系统播放器
+        //          / 相册唯一稳定支持的形态，MediaMuxer 产出的也是它；
+        //   avc3 → 参数集在样本里（in-band），规范上合法，ffmpeg 也能正确生成，
+        //          但大量 Android 硬件解码器按四码匹配 stsd，遇到 avc3 直接判为不支持 →
+        //          播放器打开就是黑屏（有声音或有进度条、画面全黑），且容器结构完全合法，
+        //          任何基于容器的校验都查不出来。
+        // v0.18.76 及以前这里写的是 avc3，正是「某些剧单集黑屏、合集却正常」的来源：
+        // 合集走 MediaMuxer（avc1）能播，单集走 native（avc3）黑屏。
+        String tag = "avc1";
         try {
             MediaExtractor ex = openExtractor(decFiles[0]);
             try {
                 for (int t = 0; t < ex.getTrackCount(); t++) {
                     String mime = ex.getTrackFormat(t).getString(MediaFormat.KEY_MIME);
-                    if (mime != null && mime.startsWith("video/hevc")) { tag = "hev1"; break; }
+                    if (mime != null && mime.startsWith("video/hevc")) { tag = "hvc1"; break; }
                 }
             } finally { try { ex.release(); } catch (Exception ignored) {} }
         } catch (Exception ignored) {}
@@ -1936,10 +2056,17 @@ final class DownloadManager {
             boolean merged = false;
             try {
                 dbg.append("libffconcat（FFmpeg concat）合并 ").append(decFiles.length).append(" 片…\n");
+                // 必须先删掉旧产物：native 侧是「存在即不覆盖」的打开方式，重试时残留的
+                // 上一次（可能是黑屏的）成品会让 native 直接失败并回退到 muxer，问题被掩盖。
+                if (out.exists() && !out.delete()) dbg.append("警告：旧产物删不掉，继续尝试合并\n");
                 FFmpegConcat.concat(java.util.Arrays.asList(decFiles), null, out, tag, dbg, nativeLog);
+                // 画面自检：容器合法、时长正确但画面全黑，是「stsd 写了 avc3」这类问题的典型形态，
+                // 只查容器查不出来，必须真的解一帧看。确定黑屏就删掉产物走 muxer 兜底。
+                if (checkPicture(out, dbg) == 2)
+                    throw new java.io.IOException("产物抽帧全是纯色/全黑（打开会黑屏）");
                 merged = true;
             } catch (Throwable natErr) {
-                dbg.append("libffconcat 合并失败：").append(natErr.getMessage()).append('\n');
+                dbg.append("libffconcat 合并失败：").append(natErr).append('\n');
                 if (out.exists()) out.delete();
             }
             if (!merged) {
@@ -1948,6 +2075,8 @@ final class DownloadManager {
                 dbg.append("回退系统 muxer 合并 ").append(decFiles.length).append(" 片…\n");
                 concatTsByMuxer(decFiles, out, dbg);
                 FFmpegConcat.verify(out, java.util.Arrays.asList(decFiles), dbg);
+                if (checkPicture(out, dbg) == 2)
+                    throw new java.io.IOException("回退 muxer 合并后抽帧仍是纯色/全黑（打开会黑屏）");
             }
             dbg.append("合并完成 ").append(out.length()).append("B 耗时 ").append((System.currentTimeMillis() - t0) / 1000).append("s\n");
         } finally {
@@ -2491,8 +2620,9 @@ final class DownloadManager {
             // ffmpeg concat（自写 NDK JNI，直调 C API）：与后端 server/downloader.js 合并命令 1:1
             // （下载密文 → C 层 ffmpeg -decryption_key 原生解密重封装 → concat：
             //   -f concat -safe 0 -c copy + -video_track_timescale + -movflags +faststart
-            //   + -tag:v avc3/hev1 in-band SPS/PPS：播放器 seek 任何段按帧内参数解码，杜绝快进花屏/乱码）
-            String tag = h264 >= hevc ? "avc3" : "hev1";   // majority 编码（红果短剧一般为 HEVC → hev1）
+            //   + -tag:v avc1/hvc1 参数集只放 avcC：Android 解码器按四码匹配 stsd，
+            //   写成 avc3/hev1（参数集 in-band）时部分机型直接判不支持 → 打开黑屏）
+            String tag = h264 >= hevc ? "avc1" : "hvc1";   // majority 编码（红果短剧一般为 HEVC → hvc1）
             List<String> keys = new ArrayList<>();
             for (int i = 0; i < inputs.size(); i++) {
                 JSONObject ep = task.episodes.optJSONObject(i);
