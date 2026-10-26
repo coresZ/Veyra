@@ -314,7 +314,9 @@ final class DownloadManager {
             pub.mkdirs();
             if (pub.isDirectory()) return pub;
         } catch (Exception ignored) { }
-        return new File(context.getFilesDir(), "downloads/" + sub);
+        File fb = new File(context.getFilesDir(), "downloads/" + sub);
+        try { fb.mkdirs(); } catch (Exception ignored) { }
+        return fb;
     }
 
     private void run(Task task) {
@@ -1062,7 +1064,9 @@ final class DownloadManager {
             // 下载/复用后：把密文 TS 统一解密为明文（TS 文件可直接播放；合并检测 0x47 直接用明文）
             try { decryptTsToPlain(work, playlist); } catch (Exception de) { /* 解密失败保留密文，合并时再试 */ }
             StringBuilder dbg = new StringBuilder();
-            File tmpOut = new File(work, "ep.mp4");
+            // 合并产物直接写在目标同目录（剧集目录），同目录 rename 基本必成；跨目录 rename/copy
+            // 在 Android 上可能失败（目标已存在不覆盖 / EXDEV / 父目录缺），是"合并完成但产物未落位"的根因
+            File tmpOut = new File(out.getParentFile(), String.format(Locale.US, "ep%03d.tmp", n));
             // 方案2（无 ffmpeg）：Cipher 解密 ts → full.ts 字节拼接 → MediaExtractor/MediaMuxer 重封装。
             // 合并完全基于本地 work（play.m3u8 + ts + key），不依赖源站；独立子线程 + 120s 硬超时。
             task.detail = "第 " + n + " 集合并中…";
@@ -1090,8 +1094,15 @@ final class DownloadManager {
                 }
             } finally { remuxPool.shutdownNow(); }
             task.debug = "第 " + n + " 集：合并完成，移动产物…";
-            // 产物移动/落位/清理全部带分段日志与异常兜底：任何一步慢/失败都不让任务永久卡在"合并中"
-            boolean moved = tmpOut.renameTo(out);
+            // 产物移动/落位/清理全带分段日志与异常兜底：任何一步慢/失败都不让任务永久卡在"合并中"
+            File parent = out.getParentFile();
+            if (parent != null) parent.mkdirs();   // 保险：目标目录必须存在
+            boolean moved = false;
+            if (out.exists()) {
+                // Android File.renameTo 对已存在目标可能不覆盖 → 先清旧产物再改名
+                if (!out.delete()) { task.debug = "第 " + n + " 集：旧产物删除失败，继续尝试覆盖…"; }
+            }
+            moved = tmpOut.renameTo(out);
             if (!moved) {
                 task.debug = "第 " + n + " 集：移动失败，复制产物…";
                 try {
@@ -1099,7 +1110,7 @@ final class DownloadManager {
                     tmpOut.delete();
                     moved = true;
                 } catch (Exception ce) {
-                    task.debug = "第 " + n + " 集：产物落位失败: " + ce.getMessage();
+                    task.debug = "第 " + n + " 集：产物落位失败: " + ce.getClass().getSimpleName() + ": " + ce.getMessage();
                 }
             }
             if (moved && out.exists() && out.length() >= 1024) {
