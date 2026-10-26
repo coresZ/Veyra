@@ -826,18 +826,30 @@ final class DownloadManager {
     }
 
     /** 解析阶段取小文件（master/子流/playlist）：connect/read 超时外再套 25s 硬超时，
-     *  DNS 解析/TLS 握手黑洞时 HttpURLConnection 超时不覆盖，硬超时保证快速失败可重试。 */
+     *  DNS 解析/TLS 握手黑洞时 HttpURLConnection 超时不覆盖，硬超时保证快速失败可重试。
+     *  5xx（源/代理过载）与超时做退避重试（0.5s/1s/2s，最多 3 次），等过载恢复。 */
     private byte[] fetchBytes(String url) throws Exception {
-        ExecutorService pool = Executors.newSingleThreadExecutor();
-        try {
-            Future<byte[]> f = pool.submit(() -> doFetchBytes(url));
+        Exception lastErr = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            ExecutorService pool = Executors.newSingleThreadExecutor();
             try {
-                return f.get(25, TimeUnit.SECONDS);
-            } catch (TimeoutException te) {
-                f.cancel(true);
-                throw new java.io.IOException("请求超时(25s) " + shortUrl(url));
-            }
-        } finally { pool.shutdownNow(); }
+                Future<byte[]> f = pool.submit(() -> doFetchBytes(url));
+                try {
+                    return f.get(25, TimeUnit.SECONDS);
+                } catch (TimeoutException te) {
+                    f.cancel(true);
+                    throw new java.io.IOException("请求超时(25s) " + shortUrl(url));
+                }
+            } catch (Exception e) {
+                lastErr = e;
+                if (attempt < 3) {
+                    String m = e.getMessage();
+                    boolean busy = m != null && (m.startsWith("下载失败 HTTP 5") || m.contains("超时"));
+                    Thread.sleep(busy ? 500L * attempt : 300L);
+                }
+            } finally { pool.shutdownNow(); }
+        }
+        throw lastErr;
     }
 
     private byte[] doFetchBytes(String url) throws Exception {
@@ -882,9 +894,11 @@ final class DownloadManager {
     private void downloadToFile(String url, File out, AtomicLong dlBytes, AtomicLong totalBytes) throws Exception {
         url = curlSafeUrl(url);
         // 单片 60s 绝对硬超时（看门狗强制断开连接，覆盖部分 ROM readTimeout 对流式挂起失效——read 阻塞时
-        // 永不返回，进度卡死）+ 最多 2 次自动重试（换新连接）。每片最多 ~2 分钟，绝不无限卡。
+        // 永不返回，进度卡死）+ 最多 5 次自动重试（换新连接）。5xx（源/代理过载 502/503）退避更久
+        // 等过载恢复（0.6s/1.2s/2.4s/4.8s），其他错误 400ms 起步。每片总时长有界，绝不无限卡。
         Exception lastErr = null;
-        for (int attempt = 1; attempt <= 2; attempt++) {
+        final int maxAttempt = 5;
+        for (int attempt = 1; attempt <= maxAttempt; attempt++) {
             final HttpURLConnection[] connRef = new HttpURLConnection[1];
             Thread wd = null;
             try {
@@ -924,7 +938,11 @@ final class DownloadManager {
             } catch (Exception e) {
                 lastErr = e;
                 out.delete();
-                if (attempt < 2) Thread.sleep(400L * attempt);
+                if (attempt < maxAttempt) {
+                    String m = e.getMessage();
+                    boolean serverBusy = m != null && (m.startsWith("下载失败 HTTP 5") || m.contains("超时"));
+                    Thread.sleep(serverBusy ? (600L << Math.min(attempt, 4)) : 400L * attempt);
+                }
             } finally {
                 if (wd != null) wd.interrupt();
             }
@@ -991,16 +1009,16 @@ final class DownloadManager {
                     keyIdx++;
                 }
             }
-            // 并发下载分片（12 并发提速）
+            // 并发下载分片（8 并发：多集任务并发后对源/代理压力可控，过高易触发 502/限流）
             final int segN = segUris.size();
             final String[] segFiles = new String[segN];
             final AtomicInteger nextSeg = new AtomicInteger();
             final AtomicInteger segDone = new AtomicInteger();   // 真正完成的片数（进度精确，不再用"已分配"误导）
             final AtomicLong lastBytes = new AtomicLong();
             final AtomicLong lastTime = new AtomicLong(System.currentTimeMillis());
-            ExecutorService pool = Executors.newFixedThreadPool(Math.min(12, Math.max(1, segN)));
+            ExecutorService pool = Executors.newFixedThreadPool(Math.min(8, Math.max(1, segN)));
             List<Future<?>> futs = new ArrayList<>();
-            for (int i = 0; i < Math.min(12, segN); i++) {
+            for (int i = 0; i < Math.min(8, segN); i++) {
                 futs.add(pool.submit(() -> {
                     int curIdx = -1;
                     try {
