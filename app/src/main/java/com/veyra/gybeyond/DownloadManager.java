@@ -550,17 +550,22 @@ final class DownloadManager {
                             new File(context.getFilesDir(), "native.log"));
                     }
                     String epName = String.format(Locale.US, "第%02d集.mp4", i + 1);
+                    long normLen = norm.length();
                     Uri u = exportToDownloads(norm, subDir, epName);
                     if (u != null) { if (outList.length() > 0) outList.append('|'); outList.append(u); }
                     // 删除临时归一化文件（公共 Downloads 已有副本）
                     norm.delete();
                     // 导出成功 → 任务目录里的中间产物也删掉：剧集目录已经是同一集的正片，
                     // 再留一份就是「同一部剧出现两个文件夹、内容完全重复」（用户实测反馈的 dl_xxx
-                    // 与剧情目录并存就是这么来的）。合并阶段改从剧集目录的「第NN集.mp4」读，
-                    // 见 runMerge 的查找顺序；导出失败的集不删，留给合并兜底。
-                    if (u != null) {
-                        File src = plain.get(i);
-                        if (src != null && !src.equals(norm)) src.delete();
+                    // 与剧名目录并存就是这么来的）。合并阶段改从剧集目录的「第NN集.mp4」读，
+                    // 见 runMerge 的查找顺序。
+                    // 但必须先确认公共目录那份**真的能用 File 读到**（个别 ROM 上 MediaStore 写入
+                    // 成功、直接路径却读不了）：读不到就保留中间产物，合并走任务目录那条兜底。
+                    File src = plain.get(i);
+                    File pubEp = publicEpisodeFile(task.title, epName);
+                    if (u != null && src != null && !src.equals(norm)
+                            && pubEp.exists() && pubEp.length() == normLen) {
+                        src.delete();
                     }
                 } catch (Exception ex) {
                     // 单集导出失败不阻塞任务，原始密文仍在 app 私有目录供合并
@@ -711,6 +716,8 @@ final class DownloadManager {
                 //   ③ 剧集目录 epNNN.mp4    —— 旧版本遗留位置
                 File f = new File(dir, String.format(Locale.US, "ep%03d.mp4", i + 1));
                 if (f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(k); continue; }
+                f = publicEpisodeFile(task.title, String.format(Locale.US, "第%02d集.mp4", i + 1));
+                if (f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(""); continue; }
                 f = new File(episodeDir(task.title), String.format(Locale.US, "第%02d集.mp4", i + 1));
                 if (f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(""); continue; }
                 f = new File(episodeDir(task.title), String.format(Locale.US, "ep%03d.mp4", i + 1));
@@ -3045,6 +3052,15 @@ final class DownloadManager {
         String ext = dot > 0 ? displayName.substring(dot) : "";
         return java.util.regex.Pattern.compile(
                 java.util.regex.Pattern.quote(base) + "_\\d{10,}" + java.util.regex.Pattern.quote(ext));
+    }
+
+    /** Download/Veyra/<剧名>/<文件名> 的绝对路径（只拼路径，不建目录）：
+     *  用于确认 MediaStore 导出的分集真能用 File 读到，以及合并时直接读它。 */
+    @SuppressWarnings("deprecation")
+    private static File publicEpisodeFile(String title, String name) {
+        String sub = (title == null || title.isEmpty()) ? "download" : title.replaceAll("[\\\\/:*?\"<>|]", "_");
+        return new File(new File(Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DOWNLOADS), "Veyra/" + sub), name);
     }
 
     /** "Download/Veyra/剧名" → 绝对路径；用于在 MediaStore 之外补一刀实体文件删除。 */
