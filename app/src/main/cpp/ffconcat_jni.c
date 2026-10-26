@@ -369,6 +369,11 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
     if (!vout) { logStage("规范化分集"); logErr("异常: 第%d集 输出视频流创建失败\n", idx); cleanup_output(oc); avformat_close_input(&in); return AVERROR(ENOMEM); }
     avcodec_parameters_copy(vout->codecpar, vin->codecpar);
     vout->time_base = vin->time_base;
+    /* movenc 需要 codec_tag：avc3/hev1（in-band SPS/PPS，TS 源参数集在样本内，不依赖 extradata）。
+     * 默认 avc1 要求完整 avcC extradata，TS 分片参数集不完整时 write_header 报 Invalid data
+     * （rc=-1094995529）——用户"我在寡妇村当老师"第1集即此故障。后端 concat 统一 -tag:v avc3/hev1。 */
+    if (vout->codecpar->codec_id == AV_CODEC_ID_H264) vout->codecpar->codec_tag = MKTAG('a','v','c','3');
+    else if (vout->codecpar->codec_id == AV_CODEC_ID_HEVC) vout->codecpar->codec_tag = MKTAG('h','e','v','1');
     if (aIdx >= 0) {
         AVStream* ain = in->streams[aIdx];
         aout = avformat_new_stream(oc, NULL);
@@ -380,7 +385,8 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
     rc = avformat_write_header(oc, NULL);
     if (rc < 0) {
         char e[128] = {0}; av_strerror(rc, e, sizeof(e));
-        logStage("规范化分集"); logErr("异常: 第%d集 write_header 失败 rc=%d (%s)\n", idx, rc, e);
+        logStage("规范化分集"); logErr("异常: 第%d集 write_header 失败 rc=%d (%s) v_extradata=%d a_extradata=%d\n", idx, rc, e,
+                vout->codecpar->extradata_size, aout ? aout->codecpar->extradata_size : -1);
         cleanup_output(oc); avformat_close_input(&in); return rc;
     }
 
