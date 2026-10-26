@@ -190,3 +190,102 @@ html[data-theme=dark] .search-suggest{box-shadow:0 12px 28px #0008}
 .series-row .poster{height:134px;aspect-ratio:auto}
 .series-row .film-title{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.35;word-break:break-all}
 
+
+/* ===================== 液态玻璃 Dock（Apple Liquid Glass 风格，v0.18.68） =====================
+ * 结构：#dock（毛玻璃底板 + 高光描边） → #dock-blob（跟随焦点/拖动的玻璃透镜） → 4 个按钮
+ * 交互：按下任一按钮即成为「焦点」，可按住横向拖动到其它选项（drag-over 高亮），松手切换。 */
+#dock{
+  height:64px;
+  border-radius:24px;
+  border:0;
+  padding:0 5px;
+  background:linear-gradient(180deg,rgba(255,255,255,.58),rgba(255,255,255,.30));
+  -webkit-backdrop-filter:blur(22px) saturate(190%);
+  backdrop-filter:blur(22px) saturate(190%);
+  box-shadow:
+    0 12px 30px rgba(60,52,24,.20),
+    0 2px 6px rgba(60,52,24,.10),
+    inset 0 1px 0 rgba(255,255,255,.80),
+    inset 0 -1px 0 rgba(255,255,255,.22);
+  isolation:isolate;
+  touch-action:none;
+  transition:transform .18s ease,box-shadow .25s ease;
+}
+html[data-theme=dark] #dock{
+  background:linear-gradient(180deg,rgba(64,72,76,.56),rgba(26,32,35,.44));
+  box-shadow:
+    0 14px 32px rgba(0,0,0,.52),
+    inset 0 1px 0 rgba(255,255,255,.20),
+    inset 0 -1px 0 rgba(255,255,255,.06);
+}
+/* 玻璃高光描边：顶部强、下部弱，模拟镜面折射的亮边 */
+#dock::before{
+  content:"";position:absolute;inset:0;border-radius:inherit;padding:1px;pointer-events:none;
+  background:linear-gradient(180deg,rgba(255,255,255,.95),rgba(255,255,255,.40) 26%,rgba(255,255,255,.05) 58%,rgba(255,255,255,.30));
+  -webkit-mask:linear-gradient(#000,#000) content-box,linear-gradient(#000,#000);
+  -webkit-mask-composite:xor;
+  mask:linear-gradient(#000,#000) content-box,linear-gradient(#000,#000);
+  mask-composite:exclude;
+}
+html[data-theme=dark] #dock::before{
+  background:linear-gradient(180deg,rgba(255,255,255,.55),rgba(255,255,255,.14) 30%,rgba(255,255,255,.03) 62%,rgba(255,255,255,.14));
+}
+/* 镜片反光：左上柔光 + 右下微光，制造玻璃厚度感 */
+#dock::after{
+  content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:0;
+  background:
+    radial-gradient(130% 90% at 16% -40%,rgba(255,255,255,.90),rgba(255,255,255,0) 62%),
+    radial-gradient(90% 70% at 92% 140%,rgba(255,255,255,.35),rgba(255,255,255,0) 66%);
+  opacity:.85;
+}
+html[data-theme=dark] #dock::after{
+  background:
+    radial-gradient(130% 90% at 16% -40%,rgba(255,255,255,.22),rgba(255,255,255,0) 62%),
+    radial-gradient(90% 70% at 92% 140%,rgba(255,255,255,.10),rgba(255,255,255,0) 66%);
+  opacity:.9;
+}
+/* 焦点透镜：当前 tab 停在哪个按钮下面，就滑到哪；拖动时跟手 */
+#dock-blob{
+  position:absolute;top:5px;left:0;
+  height:calc(100% - 10px);width:25%;
+  border-radius:19px;z-index:1;pointer-events:none;
+  background:linear-gradient(180deg,rgba(255,255,255,.92),rgba(255,255,255,.52));
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,1),
+    inset 0 -8px 14px rgba(255,255,255,.45),
+    inset 0 0 0 .5px rgba(255,255,255,.6),
+    0 6px 16px rgba(76,68,35,.18);
+  transform:translate3d(-999px,0,0);
+  transition:transform .46s cubic-bezier(.32,1.34,.28,1),width .46s cubic-bezier(.32,1.34,.28,1),background .2s ease;
+  will-change:transform;
+}
+html[data-theme=dark] #dock-blob{
+  background:linear-gradient(180deg,rgba(255,255,255,.20),rgba(255,255,255,.07));
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.32),
+    inset 0 -8px 14px rgba(255,255,255,.05),
+    0 6px 16px rgba(0,0,0,.35);
+}
+#dock.dragging #dock-blob{transition:background .2s ease}
+#dock.dragging{transform:scale(1.015)}
+#dock button{
+  position:relative;z-index:2;
+  background:transparent!important;
+  border-radius:16px;
+  transition:transform .18s cubic-bezier(.32,1.3,.3,1),color .18s ease,opacity .18s ease;
+}
+#dock button:active{transform:scale(.96);background:transparent!important}
+#dock button.active{color:#2b2210}
+html[data-theme=dark] #dock button.active{color:#ffe6a6}
+/* 选中态不再用实心药丸，交给玻璃透镜；图标保持克制 */
+#dock button.active .nav-icon{background:transparent!important;color:inherit!important}
+#dock button.drag-over{transform:translateY(-3px) scale(1.10);color:#2b2210}
+html[data-theme=dark] #dock button.drag-over{color:#ffe6a6}
+#dock button.drag-over .nav-icon{color:inherit}
+#dock button.dim{opacity:.55}
+#dock button:focus-visible{outline:2px solid var(--accent);outline-offset:-5px}
+@media(prefers-reduced-motion:reduce){
+  #dock,#dock-blob,#dock button{transition:none!important}
+  #dock.dragging{transform:none}
+  #dock button.drag-over{transform:none}
+}

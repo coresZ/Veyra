@@ -457,7 +457,7 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
     scan_fill_extradata(in, vIdx, aIdx, vout, aout);
 
     AVDictionary* _mopts = NULL;
-        av_dict_set(&_mopts, "movflags", "faststart+delay_moov", 0);
+        av_dict_set(&_mopts, "movflags", "faststart", 0);   /* 严禁 delay_moov：会输出分片 MP4(moof/mfra)，Android MediaExtractor 读不出轨 */
         rc = avformat_write_header(oc, &_mopts);
         av_dict_free(&_mopts);
     if (rc < 0) {
@@ -791,7 +791,7 @@ static int transcode_segment(const char* inPath, const char* outPath, int idx, c
     }
 
     AVDictionary* _mopts = NULL;
-        av_dict_set(&_mopts, "movflags", "faststart+delay_moov", 0);
+        av_dict_set(&_mopts, "movflags", "faststart", 0);   /* 严禁 delay_moov：会输出分片 MP4(moof/mfra)，Android MediaExtractor 读不出轨 */
         rc = avformat_write_header(oc, &_mopts);
         av_dict_free(&_mopts);
     if (rc < 0) { logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 write_header 失败 rc=%d\n", idx, rc); swr_free(&swr); avcodec_free_context(&encCtx); if (vencCtx) avcodec_free_context(&vencCtx); if (sws) sws_freeContext(&sws); if (fit) av_frame_free(&fit); if (pv) av_frame_free(&pv); cleanup_output(oc); avcodec_free_context(&decCtx); if (vdecCtx) avcodec_free_context(&vdecCtx); avformat_close_input(&in); return rc; }
@@ -1316,7 +1316,7 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
     stageLog(logBuf, "[nativeConcat] 输出流创建完成(video+audio)");
 
     AVDictionary* _mopts = NULL;
-        av_dict_set(&_mopts, "movflags", "faststart+delay_moov", 0);
+        av_dict_set(&_mopts, "movflags", "faststart", 0);   /* 严禁 delay_moov：会输出分片 MP4(moof/mfra)，Android MediaExtractor 读不出轨 */
         rc = avformat_write_header(oc, &_mopts);
         av_dict_free(&_mopts);
     if (rc < 0) {
@@ -1474,6 +1474,55 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
         logStage("写文件尾"); logErr("异常: av_write_trailer 失败 rc=%d (%s)\n", rc, e);
         return (*env)->NewStringUTF(env, g_err);
     }
+    /* ---- 5. 产物自检：重新打开成片，确认真有视频/音频轨且时长>0，并检出分片 MP4 ----
+     * v0.18.68 根因：movflags 带 delay_moov 会让 movenc 输出分片 MP4（moof/mdat/mfra），
+     * ffmpeg 自己读得动，但 Android MediaExtractor 解析不出任何轨 → Java 侧读出
+     * 「产物音频=0ms 视频=0ms」+「产物没有视频轨」直接判失败，文件白下。
+     * 这里做两道自检：① 头部是否含 moof（分片标志）② 重开容器数轨 + 读时长。 */
+    {
+        FILE* cf = fopen(outBuf, "rb");
+        if (cf) {
+            static unsigned char head[262144];
+            size_t got = fread(head, 1, sizeof(head), cf);
+            fclose(cf);
+            for (size_t i = 0; i + 4 <= got; i++) {
+                if (head[i] == 'm' && head[i+1] == 'o' && head[i+2] == 'o' && head[i+3] == 'f') {
+                    stageLog(logBuf, "[nativeConcat] 失败: 产物是分片 MP4(moof)");
+                    logStage("产物自检"); logErr("异常: 产物为分片 MP4（moof 盒），Android 无法解析，需去掉 delay_moov\n");
+                    return (*env)->NewStringUTF(env, g_err);
+                }
+            }
+        }
+        AVFormatContext* vf = NULL;
+        if (avformat_open_input(&vf, outBuf, NULL, NULL) < 0 || !vf) {
+            stageLog(logBuf, "[nativeConcat] 失败: 产物无法重新打开");
+            logStage("产物自检"); logErr("异常: 产物无法重新打开（容器损坏）: %s\n", outBuf);
+            return (*env)->NewStringUTF(env, g_err);
+        }
+        avformat_find_stream_info(vf, NULL);
+        int nv = 0, na = 0;
+        double vdur = 0, adur = 0;
+        for (unsigned i = 0; i < vf->nb_streams; i++) {
+            AVStream* s = vf->streams[i];
+            if (!s->codecpar) continue;
+            double d = (s->duration != AV_NOPTS_VALUE && s->time_base.den > 0)
+                     ? (double)s->duration * s->time_base.num / s->time_base.den : 0;
+            if (s->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) { nv++; if (d > vdur) vdur = d; }
+            else if (s->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) { na++; if (d > adur) adur = d; }
+        }
+        char vlog[256];
+        int ntotal = (int)vf->nb_streams;
+        snprintf(vlog, sizeof(vlog), "[nativeConcat] 自检: 流数=%d 视频=%d 音频=%d 视频时长=%.2fs 音频时长=%.2fs",
+                 ntotal, nv, na, vdur, adur);
+        stageLog(logBuf, vlog);
+        avformat_close_input(&vf);
+        if (nv < 1) {
+            stageLog(logBuf, "[nativeConcat] 失败: 自检无视频轨");
+            logStage("产物自检");
+            logErr("异常: 产物无视频轨（容器流数=%d 视频=%d 音频=%d）\n", ntotal, nv, na);
+            return (*env)->NewStringUTF(env, g_err);
+        }
+    }
     stageLog(logBuf, "[nativeConcat] 合并成功");
     /* 无规范化中间产物：原始分集/分片由 Java 层负责清理 */
     return NULL;   /* 成功 */
@@ -1556,7 +1605,7 @@ static int hls_remux(const char* playlistPath, const char* outPath, char* logBuf
     }
 
     AVDictionary* _mopts = NULL;
-        av_dict_set(&_mopts, "movflags", "faststart+delay_moov", 0);
+        av_dict_set(&_mopts, "movflags", "faststart", 0);   /* 严禁 delay_moov：会输出分片 MP4(moof/mfra)，Android MediaExtractor 读不出轨 */
         rc = avformat_write_header(oc, &_mopts);
         av_dict_free(&_mopts);
     if (rc < 0) {

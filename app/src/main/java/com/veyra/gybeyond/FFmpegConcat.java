@@ -104,14 +104,34 @@ final class FFmpegConcat {
             throw new java.io.IOException("产物音频校验失败: " + e.getMessage(), e);
         } finally { if (out != null) out.release(); }
         debug.append("[校验] 产物音频=").append(outAudioUs / 1000).append("ms 视频=").append(outVideoUs / 1000)
-                .append("ms 期望音频(分集和)=").append(expectAudioUs / 1000).append("ms\n");
-        if (!hasVideo) throw new java.io.IOException("产物没有视频轨，合并结果异常");
+                .append("ms 期望音频(分集和)=").append(expectAudioUs / 1000).append("ms ").append(boxInfo(output)).append('\n');
+        if (!hasVideo) throw new java.io.IOException("产物没有视频轨，合并结果异常（" + boxInfo(output) + "）");
         if (!hasAudio) throw new java.io.IOException("产物没有音频轨（合并结果无声）：请重新下载分集后重试");
         if (outVideoUs > 0 && outAudioUs > 0 && outAudioUs < outVideoUs * 95 / 100)
             throw new java.io.IOException("产物音频不完整（音频 " + (outAudioUs / 1000) + "ms < 视频 " + (outVideoUs / 1000)
                     + "ms 的 95%）：部分段落无声，请重下异常分集后重试");
         if (expectAudioUs > 0 && outAudioUs > 0 && outAudioUs < expectAudioUs * 92 / 100)
             debug.append("[校验] 警告：产物音频明显短于分集总和（可能部分段丢声）\n");
+    }
+
+    /**
+     * 产物结构快照（写进日志/异常消息）：文件大小 + 头部含 moof 与否。
+     * moof 出现即说明 muxer 输出了分片 MP4（movflags 误带 delay_moov），
+     * 这种文件 ffmpeg 能读、Android MediaExtractor 读不出任何轨。
+     */
+    private static String boxInfo(File f) {
+        StringBuilder sb = new StringBuilder("大小=").append(f.length() / 1024).append("KB");
+        try (java.io.FileInputStream fis = new java.io.FileInputStream(f)) {
+            byte[] buf = new byte[262144];
+            int n = fis.read(buf);
+            if (n >= 12) sb.append(" head=").append(new String(buf, 4, 4, "ISO-8859-1").trim());
+            boolean moof = false;
+            for (int i = 0; i + 4 <= n; i++) {
+                if (buf[i] == 'm' && buf[i + 1] == 'o' && buf[i + 2] == 'o' && buf[i + 3] == 'f') { moof = true; break; }
+            }
+            if (moof) sb.append(" moof=有(分片MP4,Android读不出轨)");
+        } catch (Exception ignored) { }
+        return sb.toString();
     }
 
     /**
