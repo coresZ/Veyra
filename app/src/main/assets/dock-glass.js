@@ -124,12 +124,16 @@
     try { dock.releasePointerCapture(pid); } catch (_) {}
 
     if (wasDragging) {
-      /* 拖动结束的这一下不再当作点击，避免原按钮的 click 又触发一次导航 */
-      suppressClickUntil = performance.now() + 350;
+      /* 先把手势触发的导航发出去（click 同步派发，此时还不能吞），
+       * 然后再挂上「吞 click」窗口，把浏览器在 pointerup 后补发的那次点击吃掉，
+       * 否则原按钮会再导航一次。 */
       if (target && !cancelled && target !== current()) {
         buzz(6);
         target.click();               // 交给 app.js 的 tapDock 处理，含双击回顶逻辑
       }
+      suppressClickUntil = performance.now() + 350;
+    } else {
+      suppressClickUntil = 0;
     }
     animate();                        // 无论成败都弹回合法焦点
   }
