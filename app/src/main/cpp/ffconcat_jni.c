@@ -464,7 +464,10 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
      * 先读包扫描补 avcC/ASC，再写 header（扫描后已倒带，拷贝循环重读全部包） */
     scan_fill_extradata(in, vIdx, aIdx, vout, aout);
 
-    rc = avformat_write_header(oc, NULL);
+    AVDictionary* _mopts = NULL;
+        av_dict_set(&_mopts, "movflags", "faststart+delay_moov", 0);
+        rc = avformat_write_header(oc, &_mopts);
+        av_dict_free(&_mopts);
     if (rc < 0) {
         char e[128] = {0}; av_strerror(rc, e, sizeof(e));
         logStage("规范化分集"); logErr("异常: 第%d集 write_header 失败 rc=%d (%s) v_extradata=%d a_extradata=%d\n", idx, rc, e,
@@ -749,7 +752,10 @@ static int transcode_segment(const char* inPath, const char* outPath, int idx, c
         }
     }
 
-    rc = avformat_write_header(oc, NULL);
+    AVDictionary* _mopts = NULL;
+        av_dict_set(&_mopts, "movflags", "faststart+delay_moov", 0);
+        rc = avformat_write_header(oc, &_mopts);
+        av_dict_free(&_mopts);
     if (rc < 0) { logStageB(logBuf, "规范化分集"); logErrBoth(logBuf, "异常: 第%d集 write_header 失败 rc=%d\n", idx, rc); swr_free(&swr); avcodec_free_context(&encCtx); if (vencCtx) avcodec_free_context(&vencCtx); if (sws) sws_freeContext(&sws); if (fit) av_frame_free(&fit); if (pv) av_frame_free(&pv); cleanup_output(oc); avcodec_free_context(&decCtx); if (vdecCtx) avcodec_free_context(&vdecCtx); avformat_close_input(&in); return rc; }
 
     AVPacket* pkt = av_packet_alloc();
@@ -1375,7 +1381,10 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
     }
     stageLog(logBuf, "[nativeConcat] 输出流创建完成(video+audio)");
 
-    rc = avformat_write_header(oc, NULL);
+    AVDictionary* _mopts = NULL;
+        av_dict_set(&_mopts, "movflags", "faststart+delay_moov", 0);
+        rc = avformat_write_header(oc, &_mopts);
+        av_dict_free(&_mopts);
     if (rc < 0) {
         char e[128] = {0}; av_strerror(rc, e, sizeof(e));
         stageLog(logBuf, "[nativeConcat] 失败: avformat_write_header");
@@ -1562,7 +1571,10 @@ static int hls_remux(const char* playlistPath, const char* outPath, char* logBuf
         aout->time_base = ain->time_base;
     }
 
-    rc = avformat_write_header(oc, NULL);
+    AVDictionary* _mopts = NULL;
+        av_dict_set(&_mopts, "movflags", "faststart+delay_moov", 0);
+        rc = avformat_write_header(oc, &_mopts);
+        av_dict_free(&_mopts);
     if (rc < 0) {
         char e[128] = {0}; av_strerror(rc, e, sizeof(e));
         logStageB(logBuf, "写文件头"); logErrBoth(logBuf, "异常: avformat_write_header 失败 rc=%d (%s)\n", rc, e);
