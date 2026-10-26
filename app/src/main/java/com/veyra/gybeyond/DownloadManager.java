@@ -1424,6 +1424,10 @@ final class DownloadManager {
                         buf.position(0); buf.limit(n);
                         if (vBase < 0) vBase = t;
                         if (t > vMax) vMax = t;
+                        // TS 源 MediaExtractor 不提供 sync 信息（getSampleFlags 恒 0）→ 自行检测
+                        // IDR/参数集并标 KEY_FRAME，否则 MediaMuxer 写不出 stss → 播放器花屏/乱码。
+                        if (sampleIsSync(buf, 0, n, vmime2 != null && vmime2.startsWith("video/hevc")))
+                            flags |= MediaCodec.BUFFER_FLAG_KEY_FRAME;
                         // PTS = 分片全局基准 + 分片内相对偏移（不能逐帧累加，否则时长被拉长=播放慢放）
                         long rel = t - vBase; if (rel < 0) rel = 0;
                         long pts = vSegBase + rel;
@@ -1469,15 +1473,28 @@ final class DownloadManager {
                             if (pts <= aLast) pts = aLast + 1;
                             aLast = pts;
                             // TS 音频 sample 是 ADTS 帧（含头），mp4 的 AAC 轨必须 raw AAC——剥头。
-                            // 头长：protection_absent=1 → 7B，=0 → 9B（第 6 字节 bit0）
+                            // 头长：protection_absent=1 → 7B，=0 → 9B（第 6 字节 bit0）。
+                            // sample 可能含多个 ADTS 帧 → 按 frame_length 循环剥全部帧头、逐帧写入
+                            //（只剥第一个头会把后续帧的 ADTS 头当 AAC 数据 → 解码失败 → 无声）。
                             if (n > 7 && (buf.get(0) & 0xFF) == 0xFF && (buf.get(1) & 0xF0) == 0xF0) {
-                                int hlen = ((buf.get(6) & 0x01) == 0) ? 9 : 7;
-                                if (n - hlen > 0) {
-                                    bi.set(hlen, n - hlen, pts, flags);
-                                    muxer.writeSampleData(aTrack, buf, bi);
-                                    aCnt++;
-                                    continue;
+                                int off = 0;
+                                boolean any = false;
+                                while (off + 7 <= n) {
+                                    int b0 = buf.get(off) & 0xFF, b1 = buf.get(off + 1) & 0xFF;
+                                    if (b0 != 0xFF || (b1 & 0xF0) != 0xF0) break;
+                                    int frameLen = ((b1 & 0x03) << 11) | ((buf.get(off + 2) & 0xFF) << 3) | ((buf.get(off + 3) & 0xE0) >> 5);
+                                    int hlen = ((buf.get(off + 6) & 0x01) == 0) ? 9 : 7;
+                                    if (frameLen < hlen || off + frameLen > n) break;
+                                    int dataLen = frameLen - hlen;
+                                    if (dataLen > 0) {
+                                        bi.set(off + hlen, dataLen, pts, flags);
+                                        muxer.writeSampleData(aTrack, buf, bi);
+                                        aCnt++;
+                                        any = true;
+                                    }
+                                    off += frameLen;
                                 }
+                                if (any) continue;
                             }
                             bi.set(0, n, pts, flags);
                             muxer.writeSampleData(aTrack, buf, bi);
@@ -1509,6 +1526,31 @@ final class DownloadManager {
         byte[] b = new byte[16];
         for (int k = 15; k >= 0; k--) { b[k] = (byte) (seq & 0xff); seq >>>= 8; }
         return b;
+    }
+
+    /** 检测视频样本是否为同步样本（IDR/参数集）。TS 源 MediaExtractor 不提供 sync 信息，
+     *  MediaMuxer 需要 BUFFER_FLAG_KEY_FRAME 才能写出 stss（否则播放器不知道关键帧位置，
+     *  缓存切换/丢帧后从非关键帧解码 → 间歇乱码/花屏）。
+     *  NAL 可为 annex-b（00 00 01 / 00 00 00 01 起始）或 length-prefixed（4 字节大端长度起始）。 */
+    private static boolean sampleIsSync(ByteBuffer buf, int off, int size, boolean hevc) {
+        if (size < 6) return false;
+        byte[] h = new byte[8];
+        for (int i = 0; i < Math.min(8, size); i++) h[i] = buf.get(off + i);
+        int pos = 0;
+        if (h[0] == 0 && h[1] == 0 && h[2] == 1) pos = 3;
+        else if (h[0] == 0 && h[1] == 0 && h[2] == 0 && h[3] == 1) pos = 4;
+        else {
+            long len = ((h[0] & 0xFFL) << 24) | ((h[1] & 0xFFL) << 16) | ((h[2] & 0xFFL) << 8) | (h[3] & 0xFFL);
+            if (len > 0 && len <= size - 4) pos = 4;
+        }
+        if (pos + 1 > size) return false;
+        int t = buf.get(off + pos) & 0xFF;
+        if (hevc) {
+            int nt = (t >> 1) & 0x3f;
+            return (nt >= 16 && nt <= 23) || nt == 32 || nt == 33 || nt == 34;  // IRAP / VPS / SPS / PPS
+        }
+        int nt = t & 0x1f;
+        return nt == 5 || nt == 7 || nt == 8;   // IDR / SPS / PPS
     }
 
     /** 从音频轨首个 ADTS 帧头构造 AudioSpecificConfig（MediaMuxer addTrack 需要 csd-0）。 */
