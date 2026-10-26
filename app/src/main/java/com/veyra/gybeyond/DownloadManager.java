@@ -1397,9 +1397,13 @@ final class DownloadManager {
                 started = true;
             } finally { first.release(); }
 
-            // 3.2 视频轨一遍（源分片 PTS 全局连续——实测片1 末 877151us / 片2 首 883151us 无缝衔接——
-            // 直接透传源 PTS，绝不重写/累加/单调化。B 帧显示序有回退，强制单调会把 B 帧 PTS 压到
-            // 1us 间隔 → 加速播 + 乱码。muxer 依据显示序自动写 ctts。）
+            // 3.2 视频轨一遍。PTS 处理：源分片 PTS 全局连续（实测片1 末 877151us / 片2 首 883151us
+            // 无缝衔接），直接以源 PTS 为基线。但源含 B 帧（显示序回退）——系统 MediaMuxer 要求
+            // 视频样本 PTS 单调（回退会内部 stopped，stop() 才抛 "would have stopped already"），
+            // 又不能像 v0.18.53 那样 +1us（B 帧被压成瞬间闪过 → 加速播/乱码）。
+            // 折中：回退样本补到「前帧 + 真实帧间隔」（帧间隔从递增样本实时学习），
+            // PTS 单调 → muxer 不崩，B 帧保持正常显示时长。
+            long lastOut = -1;          // 已写出的 PTS（跨分片，片间 PTS 连续）
             for (int p = 0; p < decFiles.length; p++) {
                 MediaExtractor ex = new MediaExtractor();
                 try {
@@ -1413,6 +1417,9 @@ final class DownloadManager {
                     ex.selectTrack(ev);
                     String vm = ex.getTrackFormat(ev).getString(MediaFormat.KEY_MIME);
                     boolean hevc = vm != null && vm.startsWith("video/hevc");
+                    long lastPtsIn = -1;
+                    long refInterval = 40_000;   // 帧间隔初始 25fps，随即从递增样本学习
+                    boolean learned = false;
                     while (ex.advance()) {
                         long sz = ex.getSampleSize();
                         if (sz <= 0) continue;
@@ -1423,11 +1430,23 @@ final class DownloadManager {
                         long pts = ex.getSampleTime();
                         int flags = ex.getSampleFlags();
                         buf.position(0); buf.limit(n);
+                        // 学习真实帧间隔（用递增样本的 PTS 差，滑动平滑）
+                        if (lastPtsIn >= 0 && pts > lastPtsIn) {
+                            long d = pts - lastPtsIn;
+                            if (d > 0 && d < 250_000) {
+                                if (!learned) { refInterval = d; learned = true; }
+                                else refInterval = (refInterval * 3 + d) / 4;
+                            }
+                        }
+                        lastPtsIn = pts;
+                        long ptsOut = pts;
+                        if (lastOut >= 0 && ptsOut <= lastOut) ptsOut = lastOut + refInterval;  // B 帧回退
+                        lastOut = ptsOut;
                         // TS 源 MediaExtractor 不提供 sync 信息（getSampleFlags 恒 0）→ 自行检测
                         // IDR/参数集并标 KEY_FRAME，否则 MediaMuxer 写不出 stss → 播放器花屏/乱码。
                         if (sampleIsSync(buf, 0, n, hevc))
                             flags |= MediaCodec.BUFFER_FLAG_KEY_FRAME;
-                        bi.set(0, n, pts, flags);
+                        bi.set(0, n, ptsOut, flags);
                         muxer.writeSampleData(vTrack, buf, bi);
                         vCnt++;
                     }
