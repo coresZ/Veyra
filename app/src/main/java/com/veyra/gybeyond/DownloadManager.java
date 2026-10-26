@@ -188,6 +188,65 @@ final class DownloadManager {
                 }
             }
         } catch (Exception ignored) { }
+        sweepMergedResidue();
+    }
+
+    /** 清理历史残留（启动时跑一次）：
+     *  - 剧集目录里已有正式产物「剧名.mp4」的，把同目录的分集中间产物（ep001.mp4 / 第01集.mp4）
+     *    删掉，避免文件管理器里同一集出现两个文件；
+     *  - Download/Veyra 下已无任务记录且为空的 dl_xxx 任务目录删掉（0 项的空文件夹）。
+     *  判据很保守：没有正式产物就一律不动（合并失败时那些分集是用户唯一的观看文件）。 */
+    private void sweepMergedResidue() {
+        try {
+            File basePub = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Veyra");
+            File[] dirs = basePub.listFiles();
+            if (dirs == null) return;
+            for (File d : dirs) {
+                if (!d.isDirectory()) continue;
+                String dn = d.getName();
+                if (dn.startsWith("dl_")) {
+                    String id2 = dn.substring(3);
+                    Task found = null;
+                    synchronized (tasks) { for (Task t : tasks) if (id2.equals(t.id)) { found = t; break; } }
+                    // 仍在下载/合并中的任务不动（目录可能刚建还是空的）
+                    if (found != null && !"done".equals(found.status) && !"failed".equals(found.status)) continue;
+                    File[] kids = d.listFiles();
+                    if (kids != null && kids.length > 0) continue;   // 有内容（失败重试还要的 ts）：保留
+                    d.delete();
+                    continue;
+                }
+                File official = new File(d, dn + ".mp4");
+                if (!(official.exists() && official.length() > 0)) continue;
+                File[] kids = d.listFiles();
+                if (kids == null) continue;
+                for (File f : kids) {
+                    if (!f.isFile() || !isEpisodeArtifact(f.getName())) continue;
+                    f.delete();
+                    deletePublicFile(Environment.DIRECTORY_DOWNLOADS + "/Veyra/" + dn, f.getName());
+                }
+            }
+        } catch (Exception ignored) { }
+    }
+
+    /** 走 MediaStore 删公共 Downloads 里的单个条目（File.delete 在部分 ROM 上会静默失败）。 */
+    private void deletePublicFile(String rel, String name) {
+        if (Build.VERSION.SDK_INT < 29) return;
+        try {
+            String[] rels = relCandidates(rel);
+            try (android.database.Cursor c = context.getContentResolver().query(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    new String[]{MediaStore.Downloads._ID},
+                    MediaStore.Downloads.RELATIVE_PATH + " IN (?,?) AND "
+                            + MediaStore.Downloads.DISPLAY_NAME + "=?",
+                    new String[]{rels[0], rels[1], name}, null)) {
+                if (c != null) while (c.moveToNext()) {
+                    try {
+                        context.getContentResolver().delete(ContentUris.withAppendedId(
+                                MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)), null, null);
+                    } catch (Exception ignored) { }
+                }
+            }
+        } catch (Exception ignored) { }
     }
 
     // ---- 对外 API（供 MainActivity dispatch 调用）----
@@ -2355,6 +2414,24 @@ final class DownloadManager {
 
     /** 合并成功后清理分集：删除 app 私有分集（ep*.mp4 / norm_*.mp4）与公共 Downloads 分集（第XX集.mp4），
      *  只保留合并产物。合并失败/未合并不动，保证可重试。 */
+    /** MediaStore 的 RELATIVE_PATH 恒带尾部斜杠（Download/Veyra/x/），拿不带斜杠的字符串做 = 匹配
+     *  永远查不到 —— 这正是「合并成功但第NN集.mp4 一直删不掉」的根因。两种写法都放进 IN 里查。 */
+    private static String[] relCandidates(String rel) {
+        String bare = rel.endsWith("/") ? rel.substring(0, rel.length() - 1) : rel;
+        return new String[]{bare + "/", bare};
+    }
+
+    private static String relSelection() {
+        return MediaStore.Downloads.RELATIVE_PATH + " IN (?,?)";
+    }
+
+    /** 分集文件判定：合并产物（剧名.mp4 / ep001.mp4 之外的临时分集）才删 */
+    private static boolean isEpisodeArtifact(String name) {
+        if (name == null) return false;
+        return name.matches("第\\d+集\\.mp4") || name.matches("ep\\d+\\.mp4")
+                || name.startsWith("norm_") || name.endsWith(".part");
+    }
+
     private void deleteEpisodesAfterMerge(Task t, String subDir) {
         try {
             File dir = dlDir(t.id);
@@ -2365,13 +2442,12 @@ final class DownloadManager {
                     if (f.isFile() && (n.startsWith("ep") || n.startsWith("norm_"))) f.delete();
                 }
             }
-            // 剧集目录（新位置）里的分集也清理
+            // 剧集目录里的分集也清理（ep001.mp4 = 第 1 集的中间产物，整理后正名才是「剧名.mp4」）
             File edir = episodeDir(t.title);
             if (edir.exists() && !edir.equals(dir)) {
                 File[] kids = edir.listFiles();
                 if (kids != null) for (File f : kids) {
-                    String n = f.getName();
-                    if (f.isFile() && (n.startsWith("ep") || n.startsWith("norm_"))) f.delete();
+                    if (f.isFile() && isEpisodeArtifact(f.getName())) f.delete();
                 }
             }
             if (Build.VERSION.SDK_INT >= 29) {
@@ -2380,17 +2456,19 @@ final class DownloadManager {
                 try (android.database.Cursor c = context.getContentResolver().query(
                         MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                         new String[]{MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME},
-                        MediaStore.Downloads.RELATIVE_PATH + "=?", new String[]{rel}, null)) {
+                        relSelection(), relCandidates(rel), null)) {
                     if (c != null) {
                         while (c.moveToNext()) {
                             String name = c.getString(1);
-                            if (name != null && name.matches("第\\d+集\\.mp4")) {
-                                try {
-                                    context.getContentResolver().delete(
-                                            ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)),
-                                            null, null);
-                                } catch (Exception ignored) { }
-                            }
+                            if (!isEpisodeArtifact(name)) continue;
+                            // 保留本次合并成功的产物（单集任务时剧名可能与分集同名，不能误删）
+                            if (name != null && t.title != null
+                                    && name.equals(t.title.replaceAll("[\\\\/:*?\"<>|]", "_") + ".mp4")) continue;
+                            try {
+                                context.getContentResolver().delete(
+                                        ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)),
+                                        null, null);
+                            } catch (Exception ignored) { }
                         }
                     }
                 } catch (Exception ignored) { }
@@ -2398,9 +2476,28 @@ final class DownloadManager {
                 File pub = new File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "Veyra/" + subDir);
                 File[] kids = pub.listFiles();
                 if (kids != null) for (File f : kids) {
-                    if (f.isFile() && f.getName().matches("第\\d+集\\.mp4")) f.delete();
+                    if (f.isFile() && isEpisodeArtifact(f.getName())) f.delete();
                 }
             }
+            // 任务目录（Download/Veyra/dl_xxx）在合并成功后已经没有价值：
+            // 清掉 ts/playlist/key/日志，空了就删目录，避免文件管理器里留下一排 0 项的 dl_ 文件夹。
+            cleanupTaskDir(t.id);
+        } catch (Exception ignored) { }
+    }
+
+    /** 清理任务工作目录：删掉全部临时文件/子目录，目录空了再删掉目录本身。
+     *  只在「合并成功」后调用 —— 合并失败必须保留 ts 分片供重试复用。 */
+    private void cleanupTaskDir(String id) {
+        try {
+            File dir = dlDir(id);
+            if (!dir.exists()) return;
+            File[] kids = dir.listFiles();
+            if (kids != null) for (File f : kids) {
+                if (f.isFile()) f.delete();
+                else deleteRecursively(f);
+            }
+            File[] left = dir.listFiles();
+            if (left == null || left.length == 0) dir.delete();
         } catch (Exception ignored) { }
     }
 
@@ -2413,7 +2510,7 @@ final class DownloadManager {
             try (android.database.Cursor c = context.getContentResolver().query(
                     MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                     new String[]{MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME},
-                    MediaStore.Downloads.RELATIVE_PATH + "=?", new String[]{rel}, null)) {
+                    relSelection(), relCandidates(rel), null)) {
                 if (c != null) {
                     while (c.moveToNext()) {
                         if (displayName.equals(c.getString(1))) {

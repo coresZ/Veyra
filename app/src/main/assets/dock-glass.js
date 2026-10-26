@@ -1,8 +1,8 @@
-/* 液态玻璃 Dock 交互层（v0.18.68）
+/* 液态玻璃 Dock 交互层（v0.18.70）
  * 职责：
  *   1) 把 #dock-blob（玻璃透镜）同步到当前 active 按钮下面，切换 tab 时弹簧滑过去；
- *   2) 每个按钮都是「焦点」：按下即吸附过去，按住横向拖动时透镜跟手、
- *      手指所在的按钮放大高亮（drag-over），其余按钮变暗；
+ *   2) 每个按钮都是「焦点」：按住即成为焦点，横向拖动时**透镜**跟手并放大（.dragging），
+ *      图标本身不做任何位移/缩放，只切换颜色与亮度；
  *   3) 松手时若停在别的选项上 → 触发该选项（走 app.js 原有 click 导航链路），
  *      若拖到空白处/原地 → 弹回原焦点。
  * 不接管导航逻辑，只做手势与视觉；导航仍由 app.js 的 #dock [data-nav] click 处理。
@@ -65,9 +65,9 @@
       b.classList.toggle('dim', !!btn && b !== btn);
     });
     if (btn) {
-      /* 透镜略放宽，包住被放大（1.26x）的按钮 */
+      /* 透镜宽度恒定贴住按钮：放大由 CSS 的 scale 完成，不改宽度 */
       const m = metrics(btn);
-      blob.style.width = Math.max(0, m.w - PAD * 2 + 10) + 'px';
+      blob.style.width = Math.max(0, m.w - PAD * 2) + 'px';
     }
   }
 
@@ -90,7 +90,7 @@
     dragging = false;
     hovered = null;
     try { dock.setPointerCapture(pointerId); } catch (_) {}
-    /* 按下即成为焦点：透镜先吸附到按下的按钮，按钮同时放大上浮（holding）；拖动时透镜再跟手 */
+    /* 按下即成为焦点：透镜先吸附到按下的按钮；拖动时透镜再跟手并放大 */
     btn.classList.add('holding');
     paint(btn, true);
   }, { passive: true });
@@ -102,8 +102,8 @@
     if (!dragging) {
       if (Math.hypot(dx, dy) < DRAG_SLOP) return;
       dragging = true;
+      /* .dragging 同时做两件事：外层 blob 关掉过渡（跟手）、内层 b 放大（透镜被拿起来） */
       dock.classList.add('dragging');
-      blob.style.transition = 'background .2s ease';
       buzz(8);
     }
     follow(e.clientX);
