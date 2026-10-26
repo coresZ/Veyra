@@ -1411,6 +1411,8 @@ final class DownloadManager {
                     }
                     if (ev < 0) continue;   // 异常分片无视频轨：跳过（其余片照常写）
                     ex.selectTrack(ev);
+                    String vm = ex.getTrackFormat(ev).getString(MediaFormat.KEY_MIME);
+                    boolean hevc = vm != null && vm.startsWith("video/hevc");
                     long vBase = -1, vMax = 0;
                     while (ex.advance()) {
                         long sz = ex.getSampleSize();
@@ -1426,7 +1428,7 @@ final class DownloadManager {
                         if (t > vMax) vMax = t;
                         // TS 源 MediaExtractor 不提供 sync 信息（getSampleFlags 恒 0）→ 自行检测
                         // IDR/参数集并标 KEY_FRAME，否则 MediaMuxer 写不出 stss → 播放器花屏/乱码。
-                        if (sampleIsSync(buf, 0, n, vmime2 != null && vmime2.startsWith("video/hevc")))
+                        if (sampleIsSync(buf, 0, n, hevc))
                             flags |= MediaCodec.BUFFER_FLAG_KEY_FRAME;
                         // PTS = 分片全局基准 + 分片内相对偏移（不能逐帧累加，否则时长被拉长=播放慢放）
                         long rel = t - vBase; if (rel < 0) rel = 0;
