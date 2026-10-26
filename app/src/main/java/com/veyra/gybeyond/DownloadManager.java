@@ -3032,14 +3032,20 @@ final class DownloadManager {
     }
 
     private Uri exportToDownloads(File file, String subDir, String displayName, String mime) throws Exception {
+        String rel = Environment.DIRECTORY_DOWNLOADS + "/Veyra";
+        if (subDir != null && !subDir.isEmpty()) rel += "/" + subDir;
+        // ① 直接写文件系统 —— 主路径。
+        //    只有这条路能保证文件名一个字符都不变。MediaStore 的 insert 在撞名时会把名字改成
+        //    「剧名_<13位毫秒>.mp4」，而且改完还会再撞（0.18.80 实测：三集里总有一两集被打上后缀，
+        //    合并随即报「分集不完整」）。既然是自家 App 往自家目录写，直接用 File 写最省事。
+        //    本机验证过 App 对 Download/Veyra/** 有直接的读写权限（dl_ 临时目录就是这么建的）。
+        cleanExportTarget(rel, displayName);   // 先清掉旧行与旧文件（含漂移名），避免扫描后出现两条
+        File target = publicFile(subDir, displayName);
+        if (writeDirect(file, target, mime)) return Uri.fromFile(target);
+        // ② 直接写不可用（Android 11+ 无 MANAGE_EXTERNAL_STORAGE 的机型）→ 回退 MediaStore 插入。
         if (Build.VERSION.SDK_INT >= 29) {
-            String rel = Environment.DIRECTORY_DOWNLOADS + "/Veyra";
-            if (subDir != null && !subDir.isEmpty()) rel += "/" + subDir;
-            // 名字必须稳定。MediaStore 插入时如果发现同名条目/同名实体文件还在（自家的删除是**异步**的，
-            // 行列删了、文件还没 unlink），会自作主张把新文件改名成「剧名_<13位毫秒>.mp4」——
-            // 用户看到的就是「合并好了却不叫剧名.mp4，多出一串数字」。所以：
-            //   ① 每次插之前，把同名 + 已经漂移成「剧名_<毫秒>」的条目和实体文件都清掉；
-            //   ② 插完读回真实 DISPLAY_NAME 校验，对不上就原地改名，再不行删掉重来（最多 3 次）。
+            // 名字兜底策略：插之前清同名 + 已漂移的变体；插完读回 DISPLAY_NAME 校验；
+            // 对不上就改名，再不行直接在盘上 rename，全失败才删掉重来。
             for (int attempt = 0; attempt < 3; attempt++) {
                 cleanExportTarget(rel, displayName);
                 ContentValues values = new ContentValues();
@@ -3062,7 +3068,6 @@ final class DownloadManager {
                 ContentValues done = new ContentValues();
                 done.put(MediaStore.Downloads.IS_PENDING, 0);
                 context.getContentResolver().update(uri, done, null, null);
-                MediaScannerConnection.scanFile(context, new String[]{file.getAbsolutePath()}, new String[]{mime}, null);
                 String actual = queryDisplayName(uri);
                 if (displayName.equals(actual)) return uri;
                 // 名字被 ROM 改写（剧名_1793032838265.mp4）：先试着原地改名回原名
@@ -3075,7 +3080,7 @@ final class DownloadManager {
                 try { Thread.sleep(120); } catch (InterruptedException ignored) { }
             }
         }
-        // API 26-28：无存储权限时回退到 app 专属 Download 目录
+        // ③ 公共目录完全写不了 → 回退 app 专属 Download 目录（至少文件还在，App 内可播）
         File dir = new File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "Veyra");
         if (subDir != null && !subDir.isEmpty()) dir = new File(dir, subDir);
         if (!dir.exists()) dir.mkdirs();
@@ -3083,6 +3088,42 @@ final class DownloadManager {
         copyFile(file, fallback);
         MediaScannerConnection.scanFile(context, new String[]{fallback.getAbsolutePath()}, new String[]{mime}, null);
         return Uri.fromFile(fallback);
+    }
+
+    /** Download/Veyra/<subDir>/<name>（只拼路径）。 */
+    @SuppressWarnings("deprecation")
+    private static File publicFile(String subDir, String name) {
+        File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Veyra");
+        if (subDir != null && !subDir.isEmpty()) dir = new File(dir, subDir);
+        return new File(dir, name);
+    }
+
+    /** 直接把内容写到公共 Downloads 目录（不经 MediaStore 的命名逻辑）：
+     *  先写 <name>.part 再 rename，中途失败不会留下半截正片；成功后扫描一次让文件管理器入库。
+     *  返回 true 表示文件名与内容都已就位。 */
+    private boolean writeDirect(File src, File target, String mime) {
+        File tmp = null;
+        try {
+            File dir = target.getParentFile();
+            if (dir == null) return false;
+            if (!dir.exists() && !dir.mkdirs() && !dir.isDirectory()) return false;
+            tmp = new File(dir, target.getName() + ".part");
+            try (InputStream in = new FileInputStream(src);
+                 OutputStream out = new FileOutputStream(tmp)) {
+                byte[] buffer = new byte[256 * 1024];
+                int n;
+                while ((n = in.read(buffer)) > 0) out.write(buffer, 0, n);
+            }
+            if (target.exists() && !target.delete()) { tmp.delete(); return false; }
+            if (!tmp.renameTo(target)) { tmp.delete(); return false; }
+            tmp = null;
+            MediaScannerConnection.scanFile(context, new String[]{target.getAbsolutePath()},
+                    new String[]{mime}, null);
+            return true;
+        } catch (Exception e) {
+            if (tmp != null) { try { tmp.delete(); } catch (Exception ignored) { } }
+            return false;
+        }
     }
 
     /** 导出前清场：删掉同名条目 + 已经漂移成「名字_<13位毫秒>.mp4」的历史残留。
@@ -3123,11 +3164,9 @@ final class DownloadManager {
 
     /** Download/Veyra/<剧名>/<文件名> 的绝对路径（只拼路径，不建目录）：
      *  用于确认 MediaStore 导出的分集真能用 File 读到，以及合并时直接读它。 */
-    @SuppressWarnings("deprecation")
     private static File publicEpisodeFile(String title, String name) {
         String sub = (title == null || title.isEmpty()) ? "download" : title.replaceAll("[\\\\/:*?\"<>|]", "_");
-        return new File(new File(Environment.getExternalStoragePublicDirectory(
-                Environment.DIRECTORY_DOWNLOADS), "Veyra/" + sub), name);
+        return publicFile(sub, name);
     }
 
     /** "Download/Veyra/剧名" → 绝对路径；用于在 MediaStore 之外补一刀实体文件删除。 */
@@ -3250,6 +3289,21 @@ final class DownloadManager {
                                 } catch (Exception ignored) { }
                             }
                         }
+                    }
+                } catch (Exception ignored) { }
+                // 补一刀文件系统删除：直写导出的文件可能还没被扫描入库（扫描是异步的），
+                // 只按 MediaStore 行删会漏，留下删不掉的产物。
+                try {
+                    File pub = new File(Environment.getExternalStoragePublicDirectory(
+                            Environment.DIRECTORY_DOWNLOADS), "Veyra/" + base);
+                    File[] kids = pub.listFiles();
+                    if (kids != null) for (File f : kids) {
+                        if (!f.isFile()) continue;
+                        String n = f.getName();
+                        boolean hit = n.equals(displayBase) || isEpisodeArtifact(n)
+                                || n.endsWith(".part")
+                                || (!base.isEmpty() && n.startsWith(displayBase) && n.endsWith(".mp4"));
+                        if (hit) f.delete();
                     }
                 } catch (Exception ignored) { }
                 // MediaStore 删除后尝试删物理空目录（部分 ROM 删除异步，删不掉就留给系统回收）

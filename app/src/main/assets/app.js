@@ -944,7 +944,8 @@ function downloadTaskRow(task, kind) {
   const sourceBadge = kind === 'nas'
     ? '<span class="dl-source-badge nas">NAS</span>'
     : '<span class="dl-source-badge phone">手机</span>';
-  const output = task.output && task.output.startsWith('content://') ? '已保存到系统下载目录' : task.output || '';
+  // 直写导出后 output 是 file:// 路径（不再走 MediaStore 的 content://），两者都按「已保存」展示
+  const output = task.output && (task.output.startsWith('content://') || task.output.startsWith('file://')) ? '已保存到系统下载目录' : task.output || '';
   const cancelBtn = running ? `<button type="button" class="dl-cancel" data-dl-cancel="${kind}" data-dl-id="${esc(task.id)}">取消</button>` : '';
   const retryBtn = !running && kind === 'phone' && (task.status === 'failed' || task.status === 'canceled') && !(task.error || '').includes('合并失败')
     ? `<button type="button" class="dl-cancel dl-retry" data-dl-retry="phone" data-dl-id="${esc(task.id)}">重试</button>` : '';
