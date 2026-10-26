@@ -191,76 +191,97 @@ html[data-theme=dark] .search-suggest{box-shadow:0 12px 28px #0008}
 .series-row .film-title{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.35;word-break:break-all}
 
 
-/* ===================== 液态玻璃 Dock（Apple Liquid Glass，v0.18.70） =====================
- * 结构：#dock（极淡底板） → #dock-blob > b（玻璃透镜本体，可缩放） → 4 个按钮
- * 三条硬规则：
- *   1) 底板只铺 .08/.025 白雾 + 低模糊(10px)，让底下的封面文字能透过来 —— 高模糊会变毛玻璃，不是液态玻璃；
- *   2) 透镜比底板更透（.05/.012），靠亮边定位；按住拖动时「透镜」放大到 1.16，图标本身绝不位移/缩放；
- *   3) 位移与缩放分层：#dock-blob 负责跟手平移（无过渡），内部 b 负责弹性缩放（有过渡），互不牵制。 */
+/* ===================== 液态玻璃 Dock（Apple Liquid Glass，v0.18.72） =====================
+ * 结构：#dock（极淡底板） -> #dock-blob > b（玻璃透镜本体） -> 4 个按钮
+ * 四条硬规则：
+ *   1) 底板几乎不做模糊（blur 5px），只留一层 .06 白雾 —— 要能看清底下的封面和字，靠亮边出玻璃感；
+ *   2) 透镜比底板更透（.05/.012），拖动时放大到「上下都顶穿底栏」的尺寸（盒模型撑大，圆角不变形）；
+ *   3) 图标绝不动：只改颜色/透明度，唯一被「拿起来」的是透镜；
+ *   4) 边缘折射：底栏与透镜的边缘各铺一条内侧高光 + 竖向渐亮带，模拟光线穿过玻璃厚边时的弯折。 */
 #dock{
   height:64px;
   border-radius:24px;
   border:0;
   padding:0 5px;
-  background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.025));
-  -webkit-backdrop-filter:blur(10px) saturate(175%) brightness(1.05);
-  backdrop-filter:blur(10px) saturate(175%) brightness(1.05);
+  background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.015));
+  -webkit-backdrop-filter:blur(5px) saturate(150%) brightness(1.03);
+  backdrop-filter:blur(5px) saturate(150%) brightness(1.03);
   box-shadow:
     0 8px 22px rgba(20,18,8,.10),
-    inset 0 1px 0 rgba(255,255,255,.48),
-    inset 0 -1px 0 rgba(255,255,255,.10),
-    inset 0 0 0 .5px rgba(255,255,255,.26);
+    inset 0 1px 0 rgba(255,255,255,.62),
+    inset 0 -1px 0 rgba(255,255,255,.14),
+    inset 0 0 0 .5px rgba(255,255,255,.30);
   isolation:isolate;
   touch-action:none;
+  overflow:visible;
   transition:box-shadow .28s ease;
 }
 html[data-theme=dark] #dock{
-  background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.015));
+  background:linear-gradient(180deg,rgba(255,255,255,.055),rgba(255,255,255,.012));
   box-shadow:
     0 10px 26px rgba(0,0,0,.38),
-    inset 0 1px 0 rgba(255,255,255,.18),
-    inset 0 -1px 0 rgba(255,255,255,.03),
-    inset 0 0 0 .5px rgba(255,255,255,.10);
+    inset 0 1px 0 rgba(255,255,255,.22),
+    inset 0 -1px 0 rgba(255,255,255,.05),
+    inset 0 0 0 .5px rgba(255,255,255,.12);
 }
-/* 顶面柔光：只在上沿铺一层薄高光 */
+/* 顶面柔光 */
 #dock::before{
   content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
-  background:linear-gradient(180deg,rgba(255,255,255,.20),rgba(255,255,255,.04) 28%,rgba(255,255,255,0) 44%);
+  background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,.03) 26%,rgba(255,255,255,0) 42%);
 }
 html[data-theme=dark] #dock::before{
-  background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.02) 28%,rgba(255,255,255,0) 46%);
+  background:linear-gradient(180deg,rgba(255,255,255,.09),rgba(255,255,255,.02) 26%,rgba(255,255,255,0) 44%);
 }
-/* 斜向反光：左上角一点镜面炫光 */
+/* 边缘折射：左右各一条竖向渐亮带（玻璃侧壁反光）+ 左上斜向炫光 */
 #dock::after{
   content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:0;
-  background:radial-gradient(120% 80% at 12% -50%,rgba(255,255,255,.26),rgba(255,255,255,0) 58%);
-  opacity:.7;
+  background:
+    linear-gradient(90deg,rgba(255,255,255,.30),rgba(255,255,255,0) 7%,rgba(255,255,255,0) 93%,rgba(255,255,255,.30)),
+    radial-gradient(120% 80% at 12% -50%,rgba(255,255,255,.20),rgba(255,255,255,0) 56%);
 }
 html[data-theme=dark] #dock::after{
-  background:radial-gradient(120% 80% at 12% -50%,rgba(255,255,255,.12),rgba(255,255,255,0) 58%);
+  background:
+    linear-gradient(90deg,rgba(255,255,255,.16),rgba(255,255,255,0) 7%,rgba(255,255,255,0) 93%,rgba(255,255,255,.16)),
+    radial-gradient(120% 80% at 12% -50%,rgba(255,255,255,.10),rgba(255,255,255,0) 56%);
 }
-/* 透镜外层：只定位 + 平移。拖动时禁掉过渡，保证跟手 */
+/* 透镜外层：定位 + 平移。拖动时关掉过渡保证跟手 */
 #dock-blob{
   position:absolute;top:5px;left:0;
   height:calc(100% - 10px);width:25%;
-  border-radius:19px;z-index:1;pointer-events:none;
+  z-index:1;pointer-events:none;
   transform:translate3d(-999px,0,0);
   transition:transform .46s cubic-bezier(.32,1.34,.28,1),width .46s cubic-bezier(.32,1.34,.28,1);
   will-change:transform;
 }
 #dock.dragging #dock-blob{transition:none}
-/* 透镜本体：玻璃质感 + 缩放。比底板更透 */
+/* 透镜本体：玻璃质感。用盒模型缩放（不用 scale），上下能撑出底栏、圆角又不变形 */
 #dock-blob b{
-  display:block;width:100%;height:100%;border-radius:inherit;
+  position:relative;
+  display:block;width:100%;height:100%;border-radius:19px;
   background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.012));
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,.70),
     inset 0 0 0 .5px rgba(255,255,255,.34),
     0 0 0 .5px rgba(255,255,255,.18),
     0 3px 10px rgba(30,26,10,.08);
-  transform:scale(1);
-  transform-origin:50% 50%;
-  transition:transform .24s cubic-bezier(.32,1.34,.28,1),background .2s ease,box-shadow .2s ease;
+  transition:
+    width .26s cubic-bezier(.32,1.34,.28,1),
+    height .26s cubic-bezier(.32,1.34,.28,1),
+    margin .26s cubic-bezier(.32,1.34,.28,1),
+    border-radius .26s cubic-bezier(.32,1.34,.28,1),
+    background .2s ease,box-shadow .2s ease;
+}
+/* 透镜边缘折射环：外沿强高光、内沿暗线、左右侧壁亮带 —— 光穿过玻璃厚边的弯折感 */
+#dock-blob b::after{
+  content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:
+    linear-gradient(90deg,rgba(255,255,255,.36),rgba(255,255,255,0) 10%,rgba(255,255,255,0) 90%,rgba(255,255,255,.36)),
+    radial-gradient(120% 100% at 50% -28%,rgba(255,255,255,.28),rgba(255,255,255,0) 56%);
+  box-shadow:
+    inset 0 1px 1px rgba(255,255,255,.92),
+    inset 0 -1px 1px rgba(0,0,0,.10),
+    inset 1px 0 0 rgba(255,255,255,.58),
+    inset -1px 0 0 rgba(255,255,255,.58);
 }
 html[data-theme=dark] #dock-blob b{
   background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.018));
@@ -269,24 +290,37 @@ html[data-theme=dark] #dock-blob b{
     inset 0 0 0 .5px rgba(255,255,255,.14),
     0 3px 10px rgba(0,0,0,.22);
 }
-/* 按住拖动：只有透镜放大上浮 */
-#dock.dragging #dock-blob b{
-  transform:translateY(-2px) scale(1.16);
-  background:linear-gradient(180deg,rgba(255,255,255,.09),rgba(255,255,255,.03));
+html[data-theme=dark] #dock-blob b::after{
+  background:
+    linear-gradient(90deg,rgba(255,255,255,.18),rgba(255,255,255,0) 10%,rgba(255,255,255,0) 90%,rgba(255,255,255,.18)),
+    radial-gradient(120% 100% at 50% -28%,rgba(255,255,255,.14),rgba(255,255,255,0) 56%);
   box-shadow:
-    inset 0 1px 0 rgba(255,255,255,.88),
-    inset 0 0 0 .5px rgba(255,255,255,.46),
-    0 0 0 .5px rgba(255,255,255,.26),
-    0 8px 20px rgba(30,26,10,.14);
+    inset 0 1px 1px rgba(255,255,255,.40),
+    inset 0 -1px 1px rgba(0,0,0,.24),
+    inset 1px 0 0 rgba(255,255,255,.22),
+    inset -1px 0 0 rgba(255,255,255,.22);
+}
+/* 按住拖动：透镜整体撑大 —— 左右各外扩 8px，向上顶出底栏约 7px、向下溢出约 5px */
+#dock.dragging #dock-blob b{
+  width:calc(100% + 16px);
+  height:calc(100% + 22px);
+  margin:-12px -8px -10px;
+  border-radius:22px;
+  background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.03));
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.92),
+    inset 0 0 0 .5px rgba(255,255,255,.48),
+    0 0 0 .5px rgba(255,255,255,.28),
+    0 10px 24px rgba(30,26,10,.16);
 }
 html[data-theme=dark] #dock.dragging #dock-blob b{
-  background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.04));
+  background:linear-gradient(180deg,rgba(255,255,255,.13),rgba(255,255,255,.04));
   box-shadow:
-    inset 0 1px 0 rgba(255,255,255,.34),
-    inset 0 0 0 .5px rgba(255,255,255,.20),
-    0 8px 20px rgba(0,0,0,.34);
+    inset 0 1px 0 rgba(255,255,255,.38),
+    inset 0 0 0 .5px rgba(255,255,255,.22),
+    0 10px 24px rgba(0,0,0,.36);
 }
-/* 图标：不动。只改颜色/透明度，透镜才是被拿起来的那个 */
+/* 图标：不动。只改颜色/透明度 */
 #dock button{
   position:relative;z-index:2;
   background:transparent!important;
@@ -304,5 +338,4 @@ html[data-theme=dark] #dock button.drag-over{color:#fff1c9}
 #dock button:focus-visible{outline:2px solid var(--accent);outline-offset:-5px}
 @media(prefers-reduced-motion:reduce){
   #dock,#dock-blob,#dock-blob b,#dock button{transition:none!important}
-  #dock.dragging #dock-blob b{transform:translateY(-1px) scale(1.08)}
 }
