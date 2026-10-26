@@ -546,6 +546,35 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
             av_packet_free(&op);
             continue;
         }
+        if (si == aIdx && abf) {
+            /* 音频样本先过 adtstoasc bsf（剥 ADTS 头→raw AAC），再写 mp4 */
+            av_bsf_send_packet(abf, pkt);
+            av_packet_unref(pkt);
+            AVPacket* op = av_packet_alloc();
+            if (!op) {
+                stageLog(logBuf, "[nativeConcat] 失败: av_packet_alloc(bsf)");
+                logStage("拷贝音视频包"); logErr("异常: av_packet_alloc(音频bsf) 失败\n");
+                av_write_trailer(oc); av_packet_free(&pkt); cleanup_output(oc); avformat_close_input(&in); remove(listPath);
+                if (abf) av_bsf_free(&abf); return (*env)->NewStringUTF(env, g_err);
+            }
+            while (av_bsf_receive_packet(abf, op) >= 0) {
+                int orc = av_interleaved_write_frame(oc, op);
+                if (orc < 0) {
+                    char e[128] = {0}; av_strerror(orc, e, sizeof(e));
+                    stageLog(logBuf, "[nativeConcat] 失败: av_interleaved_write_frame(音频bsf) rc<0");
+                    logStage("拷贝音视频包");
+                    logErr("异常: 写包失败(音频bsf) rc=%d (%s) size=%d，已写 %ld 包\n", orc, e, op->size, written);
+                    av_packet_free(&op); av_packet_free(&pkt); av_write_trailer(oc);
+                    cleanup_output(oc); avformat_close_input(&in); remove(listPath);
+                    if (abf) av_bsf_free(&abf); return (*env)->NewStringUTF(env, g_err);
+                }
+                written++;
+                av_packet_unref(op);
+            }
+            av_packet_free(&op);
+            continue;
+        }
+
         rc = av_interleaved_write_frame(oc, pkt);
         int failRc = rc, failSize = pkt->size;
         long long failPts = pkt->pts, failDts = pkt->dts;
@@ -1147,110 +1176,12 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
         stageLog(logBuf, wl);
     }
 
-    /* ---- 0.46 视频编码探测：h264/hevc 混装时少数服从多数（等价后端 buildPlan 的 step.video：
-     * 多数派 hevc → 少数派转 libx265；多数派 h264 → 少数派转 libx264。尺寸取多数派代表集） ---- */
-    VideoTarget vt;
-    memset(&vt, 0, sizeof(vt));
-    {
-        int vCodes[256], vWs[256], vHs[256];
-        int hevcAll = 0, h264All = 0;
-        for (int i = 0; i < n; i++) {
-            char k[64] = {0};
-            if (keys) {
-                jstring ks = (jstring)(*env)->GetObjectArrayElement(env, keys, i);
-                if (ks) { jstring_to_utf8(env, ks, k, sizeof(k)); (*env)->DeleteLocalRef(env, ks); }
-            }
-            probe_video_codec(origPaths[i], k, &vCodes[i], &vWs[i], &vHs[i]);
-            if (vCodes[i] == AV_CODEC_ID_HEVC) hevcAll++;
-            else if (vCodes[i] == AV_CODEC_ID_H264) h264All++;
-        }
-        if (hevcAll > 0 && h264All > 0) {   /* 仅混装需要统一；全同编码时维持现状 -c copy */
-            vt.active = 1;
-            vt.targetCodec = (hevcAll >= h264All) ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264;
-            vt.crf = (vt.targetCodec == AV_CODEC_ID_HEVC) ? 21 : 18;
-            /* 多数派编码代表集的尺寸（转码目标） */
-            for (int i = 0; i < n; i++) {
-                if (vCodes[i] == vt.targetCodec && vWs[i] > 0 && vHs[i] > 0) {
-                    vt.width = vWs[i]; vt.height = vHs[i];
-                    break;
-                }
-            }
-            if (vt.width <= 0 || vt.height <= 0) { vt.width = 0; vt.height = 0; vt.active = 0; }
-        }
-        char wl[192];
-        if (vt.active)
-            snprintf(wl, sizeof(wl), "[nativeConcat] 视频多数派目标: codec=%s crf=%d %dx%d（混装 %d×hevc + %d×h264）",
-                     (vt.targetCodec == AV_CODEC_ID_HEVC) ? "hevc" : "h264", vt.crf, vt.width, vt.height,
-                     hevcAll, h264All);
-        else
-            snprintf(wl, sizeof(wl), "[nativeConcat] 视频编码一致（hevc=%d h264=%d）无需视频转码",
-                     hevcAll, h264All);
-        stageLog(logBuf, wl);
-    }
-
-    /* ---- 0.5 阶段一：逐集规范化（-c copy 重封装，音频参数一致时纯 copy，不一致时统一音轨转码；
-     * 等价后端：先逐集解密重封装/转码成干净分集，再 concat） ---- */
-    char outDir[1024];
-    {
-        char* slash = strrchr(outBuf, '/');
-        if (slash) { int dl = (int)(slash - outBuf); memcpy(outDir, outBuf, dl); outDir[dl] = 0; }
-        else snprintf(outDir, sizeof(outDir), ".");
-    }
-    char segPaths[256][1100];
-    int hevcN = 0, h264N = 0;   /* majority 编码统计（等价后端 majorityKey → tag 判定） */
-    for (int i = 0; i < n; i++) {
-        snprintf(segPaths[i], sizeof(segPaths[i]), "%s/seg_v7_%d.mp4", outDir, i + 1);
-        char okPath[1150];
-        snprintf(okPath, sizeof(okPath), "%s.ok", segPaths[i]);
-        struct stat st;
-        /* 复用条件：文件存在且非空 + .ok 完整标记存在（防止转码失败留下的半成品被误复用） */
-        int reuse = (stat(segPaths[i], &st) == 0 && st.st_size > 0 && stat(okPath, &st) == 0);
-        if (reuse) {
-            char wl[256]; snprintf(wl, sizeof(wl), "[nativeConcat] 第%d集复用已规范化产物", i + 1);
-            stageLog(logBuf, wl);
-            continue;
-        }
-        /* 本集解密 key（可为空串：明文源） */
-        char keyBuf[64] = {0};
-        if (keys) {
-            jstring ks = (jstring)(*env)->GetObjectArrayElement(env, keys, i);
-            if (ks) { jstring_to_utf8(env, ks, keyBuf, sizeof(keyBuf)); (*env)->DeleteLocalRef(env, ks); }
-        }
-        char mimeV[32] = {0}, mimeA[32] = {0};
-        int64_t nVP = 0, nAP = 0;
-        int r = normalize_segment(origPaths[i], segPaths[i], i + 1, keyBuf, &aTarget, &vt, logBuf,
-                                  mimeV, sizeof(mimeV), mimeA, sizeof(mimeA), &nVP, &nAP);
-        if (r < 0) {
-            char wl[256]; snprintf(wl, sizeof(wl), "[nativeConcat] 失败: 第%d集规范化失败 rc=%d", i + 1, r);
-            stageLog(logBuf, wl);
-            /* 失败：删除半成品 seg 与其 .ok（若有），下次合并必须重新规范化，绝不复用残缺分段 */
-            remove(segPaths[i]);
-            char okPath[1150]; snprintf(okPath, sizeof(okPath), "%s.ok", segPaths[i]);
-            remove(okPath);
-            return (*env)->NewStringUTF(env, g_err);
-        }
-        /* 规范化完整成功：写 .ok 完整标记（下次合并凭 seg+ok 复用；半成品无 .ok） */
-        {
-            char okPath[1150]; snprintf(okPath, sizeof(okPath), "%s.ok", segPaths[i]);
-            FILE* okf = fopen(okPath, "w");
-            if (okf) { fprintf(okf, "complete\n"); fclose(okf); }
-        }
-        if (strncmp(mimeV, "hevc", 4) == 0) hevcN++;
-        else if (strncmp(mimeV, "h264", 4) == 0 || strncmp(mimeV, "avc", 3) == 0) h264N++;
-        char wl[256];
-        if (mimeA[0])
-            snprintf(wl, sizeof(wl), "[nativeConcat] 第%d集规范化完成: 视频mime=%s 音频mime=%s 视频包=%lld 音频包=%lld",
-                     i + 1, mimeV[0] ? mimeV : "?", mimeA, (long long)nVP, (long long)nAP);
-        else
-            snprintf(wl, sizeof(wl), "[nativeConcat] 第%d集规范化完成: 视频mime=%s 音频mime=(无音频轨道) 视频包=%lld 音频包=0",
-                     i + 1, mimeV[0] ? mimeV : "?", (long long)nVP);
-        stageLog(logBuf, wl);
-    }
-    /* tag 判定：优先 C 层 majority（探测不到时退回 Java 传入 tag） */
-    if (hevcN || h264N) {
-        snprintf(tagBuf, sizeof(tagBuf), "%s", (hevcN >= h264N) ? "hvc1" : "avc1");
-    }
-    stageLog(logBuf, "[nativeConcat] 全部 N 集规范化完成");
+    /* ---- 0.5 直接 concat 输入分片/分集（等价后端黄果单集 ffmpeg -i playlist -c copy -f mp4、
+     * 整剧 -f concat -i list -c copy）。不做逐片 normalize：两段式会把每片 B 帧 dts 修正/
+     * concat 段边界对齐层层累积，压坏时间轴（501 帧被挤进 9.7s → 播放加速卡顿、seek 崩溃，
+     * 沙箱对比实测）。concat demuxer 按容器自动选 mpegts/mov demuxer，FFmpeg 原生处理
+     * avcC/样本格式/时间轴/stss。tag 由 Java 层探测传入（avc3/hev1 = in-band SPS/PPS）。 ---- */
+    stageLog(logBuf, "[nativeConcat] 直接 concat 输入分片（跳过逐片 normalize，FFmpeg 原生处理时间轴）");
 
     /* ---- 1. 生成 ffconcat 列表（规范化产物 + 绝对路径 + safe=0；与后端 -safe 0 一致）---- */
     char listPath[1100];
@@ -1262,7 +1193,7 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
     }
     fprintf(lf, "ffconcat version 1.0\n");
     for (int i = 0; i < n; i++) {
-        char* q = segPaths[i];
+        char* q = origPaths[i];
         /* 单引号转义：' -> '\'' */
         fprintf(lf, "file '");
         for (; *q; q++) { if (*q == '\'') fputs("'\\''", lf); else fputc(*q, lf); }
@@ -1275,8 +1206,8 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
     AVFormatContext* in = NULL;
     AVDictionary* opts = NULL;
     av_dict_set(&opts, "safe", "0", 0);
-    av_dict_set(&opts, "auto_convert", "0", 0);   /* 禁 h264_mp4toannexb bsf：normalize 产物样本已是
-                                                   * length-prefixed，concat 不再反向转换，最终 movenc 直接写标准 avc1 */
+    /* auto_convert 保持默认 1（CLI 同款）：concat 对 TS 输入（extradata 空）不触发
+     * h264_mp4toannexb，之前显式禁 0 反而破坏 concat 段读取（沙箱实测 5 包后中断） */
     AVInputFormat* fmt = av_find_input_format("concat");
     int rc = avformat_open_input(&in, listPath, fmt, &opts);
     av_dict_free(&opts);
@@ -1313,24 +1244,15 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
     stageLog(logBuf, vs);
 
     AVStream* vin = in->streams[vIdx];
-    if (vin->codecpar->extradata_size <= 0 || !vin->codecpar->extradata) {
-        stageLog(logBuf, "[nativeConcat] 失败: 视频流无 extradata(参数集)");
-        logStage("选择流"); logErr("异常: 视频流无参数集(extradata)，无法 -c copy 合并\n");
-        avformat_close_input(&in); remove(listPath);
-        return (*env)->NewStringUTF(env, g_err);
-    }
-    stageLog(logBuf, "[nativeConcat] 视频 extradata 正常（参数集存在）");
+    /* TS 源视频 extradata 为空是正常情况（SPS/PPS 在样本流内）；CLI concat TS -c copy 无需输入
+     * extradata，movenc 以 avc3/hev1 in-band 方式从首样本写参数集。此处不再拦截。 */
+    stageLog(logBuf, "[nativeConcat] 视频流就绪（TS 源 extradata 可为空，movenc in-band 写参数集）");
 
     /* 音频流也必须有 extradata（mov muxer 写 esds 会解引用，缺失即 native 崩） */
     if (aIdx >= 0) {
-        AVStream* ain = in->streams[aIdx];
-        if (ain->codecpar->extradata_size <= 0 || !ain->codecpar->extradata) {
-            stageLog(logBuf, "[nativeConcat] 失败: 音频流无 extradata(esds)");
-            logStage("选择流"); logErr("异常: 音频流无参数集(extradata)，无法 -c copy 合并\n");
-            avformat_close_input(&in); remove(listPath);
-            return (*env)->NewStringUTF(env, g_err);
-        }
-        stageLog(logBuf, "[nativeConcat] 音频 extradata 正常（esds 存在）");
+        /* TS 源音频 extradata 为空是正常情况；movenc 经 adtstoasc bsf 从样本剥出 ASC，
+         * 无需输入 extradata。此处不再拦截。 */
+        stageLog(logBuf, "[nativeConcat] 音频流就绪（TS 源 extradata 可为空，adtstoasc 从样本提取）");
     }
     /* time_base 有效性：mov muxer 写头时依赖，0/0 会崩 */
     if (vin->time_base.num <= 0 || vin->time_base.den <= 0) {
@@ -1434,6 +1356,19 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
     }
     stageLog(logBuf, "[nativeConcat] 写文件头成功");
 
+    /* 音频手动 adtstoasc：mpegts 输出的 AAC 样本带 ADTS 头，movenc 的 mov_check_bitstream
+     * 自动装配在 6.1.1 此构建下不生效（沙箱实测 AUTO_BSF 设了也不装），ADTS 首帧直接报
+     * "Malformed AAC bitstream" rc=-1；手动装 aac_adtstoasc bsf 剥头成 raw AAC
+     * （mp4 样本标准格式），movenc 不再触发报错。normalize_segment 内同款实现，沙箱验证通过。 */
+    AVBSFContext* abf = NULL;
+    if (aIdx >= 0 && aout) {
+        const AVBitStreamFilter* bf = av_bsf_get_by_name("aac_adtstoasc");
+        if (bf && av_bsf_alloc(bf, &abf) == 0) {
+            avcodec_parameters_copy(abf->par_in, aout->codecpar);
+            if (av_bsf_init(abf) < 0) { av_bsf_free(&abf); abf = NULL; }
+        }
+    }
+
     /* ---- 4. 拷贝包（-c copy，等价后端 concat 阶段）---- */
     AVPacket* pkt = av_packet_alloc();
     if (!pkt) {
@@ -1446,6 +1381,7 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
     int readErr = 0;
     int gapLogN = 0;
     int64_t lastDtsV = AV_NOPTS_VALUE, lastDtsA = AV_NOPTS_VALUE;   /* 逐流 last dts（rescale 后单位） */
+    int64_t gStartDts = AV_NOPTS_VALUE;   /* 全局首包 dts（copy_ts 规整基准） */
     while ((rc = av_read_frame(in, pkt)) >= 0) {
         int si = pkt->stream_index;
         if (si != vIdx && si != aIdx) { av_packet_unref(pkt); continue; }
@@ -1454,6 +1390,15 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
         AVStream* outSt = (si == vIdx) ? vout : aout;
         av_packet_rescale_ts(pkt, inSt->time_base, outSt->time_base);
         pkt->pos = -1;
+
+        /* 对齐 CLI 默认 copy_ts：全局减首包 dts。TS 源音频 dts 从 0、视频从首 I 帧 dts 起，
+         * 不规整则音频 dts 相对视频"回溯"，movenc 逐流 dts 检查拒绝（沙箱实测 rc=-1 5 包中断）；
+         * 规整后音频 dts 为负，movenc AVFMT_TS_NEGATIVE 接受，产物与 CLI 行为一致。 */
+        if (gStartDts == AV_NOPTS_VALUE && pkt->dts != AV_NOPTS_VALUE) gStartDts = pkt->dts;
+        if (gStartDts != AV_NOPTS_VALUE && pkt->dts != AV_NOPTS_VALUE) {
+            pkt->dts -= gStartDts;
+            if (pkt->pts != AV_NOPTS_VALUE) pkt->pts -= gStartDts;
+        }
 
         /* 等价后端 ffmpeg CLI concat 对 Non-monotonous DTS 的处理：CLI 的 mov muxer 默认
          * strict_std_compliance=NORMAL，遇 dts 重复/回退打印 warning 并 +1 修正（不报错）。
@@ -1503,6 +1448,7 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
                    failRc, e, written, si, (si == vIdx) ? "video" : "audio", failPts, failDts, failSize);
             av_write_trailer(oc); av_packet_free(&pkt);
             cleanup_output(oc); avformat_close_input(&in); remove(listPath);
+            if (abf) av_bsf_free(&abf);
             return (*env)->NewStringUTF(env, g_err);
         }
         written++;
@@ -1517,6 +1463,7 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
     rc = av_write_trailer(oc);
     stageLog(logBuf, "[nativeConcat] av_write_trailer 完成");
     av_packet_free(&pkt);
+    if (abf) av_bsf_free(&abf);
     cleanup_output(oc);   /* 关闭 pb（faststart moov 已写回）+ free context */
     avformat_close_input(&in);
     remove(listPath);
@@ -1527,12 +1474,7 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
         return (*env)->NewStringUTF(env, g_err);
     }
     stageLog(logBuf, "[nativeConcat] 合并成功");
-    /* 清理规范化中间产物（保留原始分集文件，方便调试复用） */
-    for (int i = 0; i < n; i++) {
-        remove(segPaths[i]);
-        char okPath[1150]; snprintf(okPath, sizeof(okPath), "%s.ok", segPaths[i]);
-        remove(okPath);
-    }
+    /* 无规范化中间产物：原始分集/分片由 Java 层负责清理 */
     return NULL;   /* 成功 */
 }
 
