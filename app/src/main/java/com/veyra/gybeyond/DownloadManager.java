@@ -891,8 +891,22 @@ final class DownloadManager {
         } finally { conn.disconnect(); }
     }
 
+    /** 全局下载闸：整个任务所有集共享 8 个下载槽（单集并发 8 × 多集同时下载会叠加成 24+ 并发，
+     *  把黄果源/CDN 打成 502 限流——v0.18.50/51 实测三集同时重下全部 502）。 */
+    private static final java.util.concurrent.Semaphore DL_GATE = new java.util.concurrent.Semaphore(8, true);
+
     private void downloadToFile(String url, File out, AtomicLong dlBytes, AtomicLong totalBytes) throws Exception {
         url = curlSafeUrl(url);
+        // 全局闸：多集并发时共享下载槽（获取不到许可就排队，天然限流，总并发恒 ≤8）
+        try { DL_GATE.acquire(); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); throw new java.io.IOException("下载被中断"); }
+        try {
+            dlToFileInner(url, out, dlBytes, totalBytes);
+        } finally {
+            DL_GATE.release();
+        }
+    }
+
+    private void dlToFileInner(String url, File out, AtomicLong dlBytes, AtomicLong totalBytes) throws Exception {
         // 单片 60s 绝对硬超时（看门狗强制断开连接，覆盖部分 ROM readTimeout 对流式挂起失效——read 阻塞时
         // 永不返回，进度卡死）+ 最多 5 次自动重试（换新连接）。5xx（源/代理过载 502/503）退避更久
         // 等过载恢复（0.6s/1.2s/2.4s/4.8s），其他错误 400ms 起步。每片总时长有界，绝不无限卡。
