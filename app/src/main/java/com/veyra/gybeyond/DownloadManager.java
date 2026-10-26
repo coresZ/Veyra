@@ -1733,10 +1733,11 @@ final class DownloadManager {
             muxer.start();
             started = true;
             long[] vLast = {-1}, aLast = {-1};
+            boolean hevc = vmime != null && vmime.startsWith("video/hevc");
             long offset = 0;
             int written = 0, used = 0, skipped = 0;
             for (int i = 0; i < decFiles.length; i++) {
-                SegStat st = writeSegment(decFiles[i], muxer, vt, at, offset, vLast, aLast);
+                SegStat st = writeSegment(decFiles[i], muxer, vt, at, offset, vLast, aLast, hevc);
                 if (st.samples <= 0) { skipped++; continue; }
                 used++;
                 written += st.samples;
@@ -1757,7 +1758,7 @@ final class DownloadManager {
 
     /** 单片写入：视频整轨（解码序）+ 音频按本片视频时长截断；时间戳跨片绝对单调。 */
     private static SegStat writeSegment(File f, MediaMuxer muxer, int vTrack, int aTrack,
-                                        long offset, long[] vLast, long[] aLast) throws Exception {
+                                        long offset, long[] vLast, long[] aLast, boolean hevc) throws Exception {
         SegStat st = new SegStat();
         int vi = -1, ai = -1;
         MediaExtractor probe = openExtractor(f);
@@ -1794,7 +1795,13 @@ final class DownloadManager {
             if (t > st.maxV) st.maxV = t;
             prev = t;
             k++;
-            writeSample(muxer, vTrack, t, s.size, s.flags, s.data, info);
+            // TS 源 MediaExtractor 不报同步帧标志 → 自己从 NAL 头判（IDR / 参数集），
+            // 否则 muxer 写不出 stss，播放器 seek/切换码率会从非关键帧解码 → 花屏、乱码
+            long flags = s.flags;
+            if ((flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) == 0
+                    && (sampleIsSync(s.data, 0, (int) Math.min(s.size, 4096), hevc) || k == 1))
+                flags |= MediaCodec.BUFFER_FLAG_KEY_FRAME;
+            writeSample(muxer, vTrack, t, s.size, flags, s.data, info);
             st.samples++;
         }
         st.maxV = st.maxV - offset;                        // 转成本片相对时长
