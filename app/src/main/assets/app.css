@@ -383,5 +383,7 @@ html[data-theme=dark] #dock button.drag-over{color:var(--accent)}
   width:30px;height:30px;padding:0;border:0;border-radius:50%;
   background:var(--dot,#ccc);box-shadow:inset 0 0 0 1px rgba(0,0,0,.10);
 }
+/* 深色下色点换用该配色的深色版（与 --accent 实际应用的值一致） */
+html[data-theme=dark] .color-dot{background:var(--dot-d,var(--dot,#ccc))}
 .color-dot[aria-pressed=true]{box-shadow:0 0 0 2px var(--surface),0 0 0 4px var(--accent)}
 @media(prefers-reduced-motion:reduce){.appearance *{transition:none!important}}

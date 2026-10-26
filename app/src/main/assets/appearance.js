@@ -64,13 +64,18 @@ var SUNNY_CORNERS = [{"id":"tight","name":"紧致"},{"id":"default","name":"标�
     }).join('');
   }
 
+  // 原稿取色是 item[theme]：色点必须显示「切换后真正会应用的那一版」。
+  // 这里不重渲染，直接把浅/深两版都写进自定义属性，由 [data-theme=dark] 选择器切换。
+  function swatch(v) {
+    return Array.isArray(v)
+      ? 'conic-gradient(from -90deg,' + v[0] + ',' + v[1] + ',' + v[2] + ',' + v[0] + ')'
+      : v;
+  }
+
   function dot(c) {
-    // 单色：一个 hex（字符串）；多色：三色数组 → 主色→辅色→点缀→主色的 conic（原稿规则）
-    var bg = Array.isArray(c.light)
-      ? 'conic-gradient(' + c.light[0] + ',' + c.light[1] + ',' + c.light[2] + ',' + c.light[0] + ')'
-      : c.light;
     return '<button type="button" class="color-dot" data-color="' + c.id + '" aria-pressed="false"'
-      + ' title="' + c.name + '" aria-label="' + c.name + '" style="--dot:' + bg + '"></button>';
+      + ' title="' + c.name + '" aria-label="' + c.name + '"'
+      + ' style="--dot:' + swatch(c.light) + ';--dot-d:' + swatch(c.dark) + '"></button>';
   }
 
   window.renderAppearance = function () {
