@@ -363,8 +363,11 @@ final class DownloadManager {
                         task.doneCount = f;
                         task.detail = "下载中 " + f + "/" + n + " 集完成（并发 " + DL_CONCURRENCY + "）";
                     } catch (Exception e) {
-                        task.canceled = true;   // 一集失败 → 停掉其余并发集（保持"失败即停"语义）
-                        throw new RuntimeException(e);
+                        // 一集失败只记录该集，不再 cancel 全部并发集：已下载/合并完成的集照常落位，
+                        // 避免"某集失败 → 其余集被取消跳过合并"导致反复重试（用户实测痛点）
+                        Throwable c = (e instanceof RuntimeException && e.getCause() != null) ? e.getCause() : e;
+                        task.error = (task.error == null ? "" : task.error + "\n") + "第 " + (idx + 1) + " 集失败: " + c;
+                        throw new RuntimeException(c);
                     }
                 }));
             }
