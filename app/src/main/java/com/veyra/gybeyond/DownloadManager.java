@@ -1453,8 +1453,12 @@ final class DownloadManager {
                 } finally { ex.release(); }
             }
 
-            // 3.3 音频轨一遍（源音频 PTS 同样全局连续——直接透传；ADTS 剥头写 raw AAC）
+            // 3.3 音频轨一遍（源音频 PTS 全局连续；ADTS 剥头写 raw AAC）
+            // MediaMuxer 要求每轨样本 PTS 严格递增：同一 sample 拆出的多个 ADTS 帧不能同 PTS
+            // （v0.18.54/55 多帧剥头同 PTS 写多样本 → 内部 stopped，stop() 抛 would have stopped）。
+            // 每帧 PTS = sample PTS + 帧序号 × AAC 帧时长（1024 samples / 采样率）。
             if (aTrack >= 0) {
+                long aLastOut = -1;
                 for (int p = 0; p < decFiles.length; p++) {
                     MediaExtractor ex = new MediaExtractor();
                     try {
@@ -1466,6 +1470,9 @@ final class DownloadManager {
                         }
                         if (ea < 0) continue;
                         ex.selectTrack(ea);
+                        int aSampleRate = 44100;
+                        try { aSampleRate = ex.getTrackFormat(ea).getInteger(MediaFormat.KEY_SAMPLE_RATE); } catch (Exception ignored) {}
+                        final long aFrameDur = (aSampleRate > 0) ? (1024L * 1_000_000 / aSampleRate) : 23_219L;
                         while (ex.advance()) {
                             long sz = ex.getSampleSize();
                             if (sz <= 0) continue;
@@ -1481,7 +1488,7 @@ final class DownloadManager {
                             // sample 可能含多个 ADTS 帧 → 按 frame_length 循环剥全部帧头、逐帧写入
                             //（只剥第一个头会把后续帧的 ADTS 头当 AAC 数据 → 解码失败 → 无声）。
                             if (n > 7 && (buf.get(0) & 0xFF) == 0xFF && (buf.get(1) & 0xF0) == 0xF0) {
-                                int off = 0;
+                                int off = 0, fidx = 0;
                                 boolean any = false;
                                 while (off + 7 <= n) {
                                     int b0 = buf.get(off) & 0xFF, b1 = buf.get(off + 1) & 0xFF;
@@ -1491,15 +1498,21 @@ final class DownloadManager {
                                     if (frameLen < hlen || off + frameLen > n) break;
                                     int dataLen = frameLen - hlen;
                                     if (dataLen > 0) {
-                                        bi.set(off + hlen, dataLen, pts, flags);
+                                        long fpts = pts + fidx * aFrameDur;
+                                        if (aLastOut >= 0 && fpts <= aLastOut) fpts = aLastOut + aFrameDur;  // 严格递增
+                                        aLastOut = fpts;
+                                        bi.set(off + hlen, dataLen, fpts, flags);
                                         muxer.writeSampleData(aTrack, buf, bi);
                                         aCnt++;
                                         any = true;
                                     }
                                     off += frameLen;
+                                    fidx++;
                                 }
                                 if (any) continue;
                             }
+                            if (aLastOut >= 0 && pts <= aLastOut) pts = aLastOut + aFrameDur;  // 严格递增
+                            aLastOut = pts;
                             bi.set(0, n, pts, flags);
                             muxer.writeSampleData(aTrack, buf, bi);
                             aCnt++;
