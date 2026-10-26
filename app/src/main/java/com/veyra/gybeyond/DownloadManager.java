@@ -1105,8 +1105,11 @@ final class DownloadManager {
                 segOk = true;   // 本集合并成功，产物已落位
                 task.debug = "第 " + n + " 集：合并完成（产物 " + out.length() + "B）";
             } else {
-                task.debug = "第 " + n + " 集：合并产物缺失，请重试";
-                throw new java.io.IOException("第 " + n + " 集合并产物缺失");
+                // 产物为空/缺失：多半是本集分片是旧版错误 IV 下载的乱码（或下载不完整）。
+                // 清掉本地 playlist+ts 强制重新解析下载，避免反复合并空产物死循环
+                task.debug = "第 " + n + " 集：合并产物无效，清理本集旧分片，再点重试将重新下载";
+                try { deleteRecursively(work); } catch (Exception ignored) { }
+                throw new java.io.IOException("第 " + n + " 集合并产物无效，旧分片已清理，请再次重试");
             }
         } finally {
             // 合并成功后清理本集临时目录（ts/KEY/playlist/半成品）；失败保留 ts，
@@ -1245,6 +1248,12 @@ final class DownloadManager {
                         dec = c.doFinal(enc);
                     } catch (Exception ce) {
                         throw new java.io.IOException("分片解密失败 " + segNames.get(i) + ": " + ce);
+                    }
+                    // 解密结果校验：明文 TS 首字节必为 0x47（sync byte）。不是 → IV/KEY 与源不符
+                    // （旧版本地 playlist 写死 MEDIA-SEQUENCE:0 下载的乱码分片），立即报错避免静默空产物
+                    if (dec.length == 0 || (dec[0] & 0xFF) != 0x47) {
+                        throw new java.io.IOException("分片解密结果无效 " + segNames.get(i)
+                            + "（IV/KEY 与源不符，旧版错误分片，需重新下载本集）");
                     }
                 }
                 File df = new File(work, String.format(Locale.US, "dec-%04d.ts", i));
