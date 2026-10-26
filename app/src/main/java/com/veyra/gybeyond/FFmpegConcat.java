@@ -116,6 +116,9 @@ final class FFmpegConcat {
         debug.append("[校验] 产物音频=").append(outAudioUs / 1000).append("ms 视频=").append(outVideoUs / 1000)
                 .append("ms 期望音频(分集和)=").append(expectAudioUs / 1000).append("ms ").append(boxInfo(output)).append('\n');
         if (!hasVideo) throw new java.io.IOException("产物没有视频轨，合并结果异常（" + boxInfo(output) + "）");
+        // 视频轨在、时长却是 0：容器结构合法但没有任何可解画面（播放器打开就是黑屏）。
+        // v0.18.68 那次「视频=0ms head=ftyp」就是这个形态，必须判失败而不是当成功。
+        if (outVideoUs <= 0) throw new java.io.IOException("产物视频轨时长为 0（打开会黑屏）（" + boxInfo(output) + "）");
         if (!hasAudio) throw new java.io.IOException("产物没有音频轨（合并结果无声）：请重新下载分集后重试");
         if (outVideoUs > 0 && outAudioUs > 0 && outAudioUs < outVideoUs * 95 / 100)
             throw new java.io.IOException("产物音频不完整（音频 " + (outAudioUs / 1000) + "ms < 视频 " + (outVideoUs / 1000)

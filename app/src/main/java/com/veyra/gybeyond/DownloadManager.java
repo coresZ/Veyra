@@ -397,8 +397,11 @@ final class DownloadManager {
                     JSONObject ep = task.episodes.optJSONObject(idx);
                     String url = ep.optString("url");
                     String key = ep.optString("key", "");
-                    // 转码成功分集落位剧集目录（Download/Veyra/<剧名>/），任务 ID 目录只放 ts/临时文件
-                    File out = new File(episodeDir(task.title), String.format(Locale.US, "ep%03d.mp4", idx + 1));
+                    // 中间分集一律落在任务目录（Download/Veyra/dl_xxx/），绝不写进剧集目录：
+                    // 剧集目录只允许出现用户要看的正式文件「第01集.mp4」「剧名.mp4」。
+                    // （旧实现在这里写 <剧名>/ep001.mp4，合并前用户就能看到一堆 ep001/ep002，
+                    //   合并失败时更是永久留着 —— 用户实测反馈的「又多出 ep001」就是这个。）
+                    File out = new File(dir, String.format(Locale.US, "ep%03d.mp4", idx + 1));
                     // 重试/复用：仅复用「v0.13.8+ 新格式」分集（dlv=raw-v2，原始密文/明文，合并时由 C 层 ffmpeg
                     // 原生解密重封装保持 CFR）。旧版分集（MediaMuxer 重封装产物，帧率被弄成 VFR）一律不复用，
                     // 强制重新下载，避免"快切鬼畜/MPV 卡顿"翻回来。
@@ -516,6 +519,10 @@ final class DownloadManager {
                 if (kids != null) for (File f : kids) {
                     if (f.isFile() && f.getName().startsWith("inputs_") && f.getName().endsWith(".ffconcat")) f.delete();
                 }
+                // 目录已经空了就顺手删掉：失败/取消的任务会留下 0 项的 dl_xxx 文件夹，
+                // 文件管理器里一排空目录很难看（老用户升级后也能被这里清掉）
+                File[] left = dir.listFiles();
+                if (left != null && left.length == 0) dir.delete();
             } catch (Exception ignored) {}
         }
     }
@@ -615,9 +622,10 @@ final class DownloadManager {
             int n = task.episodes.length();
             List<File> plain = new ArrayList<>();
             for (int i = 0; i < n; i++) {
-                File f = new File(episodeDir(task.title), String.format(Locale.US, "ep%03d.mp4", i + 1));
-                // 兼容旧任务：分集可能还在任务 ID 目录（dl_<id>）
-                if (!(f.exists() && f.length() > 0)) f = new File(dir, String.format(Locale.US, "ep%03d.mp4", i + 1));
+                // 分集现在放任务目录（dl_<id>）；旧版本把它们写在剧集目录，所以两个位置都要找
+                File f = new File(dir, String.format(Locale.US, "ep%03d.mp4", i + 1));
+                if (!(f.exists() && f.length() > 0))
+                    f = new File(episodeDir(task.title), String.format(Locale.US, "ep%03d.mp4", i + 1));
                 if (f.exists() && f.length() > 0) plain.add(f);
             }
             if (plain.size() != n) throw new java.io.IOException("分集不完整（" + plain.size() + "/" + n + "），请重新下载");
@@ -1693,10 +1701,12 @@ final class DownloadManager {
             throw e;
         }
 
-        // 3) 合并。顺序：系统 MediaMuxer 优先（Android 原生 muxer，stsd/avcC/hvcC/esds 由系统生成，
-        //    不可能出现「moov 在、视频轨读不出」），失败才回退 libffconcat.so 的 FFmpeg concat。
-        //    v0.18.68 是反着来的：native 先跑，165 片那集 native 日志一路「成功」，Java 回读只有音频轨
-        //    （视频=0ms head=ftyp）→ 整集白跑还报「产物没有视频轨」。
+        // 3) 合并。顺序：libffconcat（FFmpeg concat）优先 → 失败才回退系统 MediaMuxer。
+        //    ⚠️ v0.18.68~0.18.72 是反着的（muxer 优先），导致【部分源】的单集产物「能播、有时长、
+        //    画面全黑」：TS 里的 H.264 样本是 annex-b，其中不少源用 3 字节起始码（00 00 01），
+        //    MediaMuxer 做 annex-b→长度前缀转换时只认 4 字节（00 00 00 01），样本整体错位 →
+        //    mdat 里没有一个能解的 NAL → 播放器黑屏，而 moov/stbl 结构完全合法，verify 也查不出来。
+        //    FFmpeg concat 自己按 annex-b 解析（3/4 字节都认），0.18.67 全量可播的正是这条路径。
         //    首片视频编码 → tag（回退 native 时用）。
         String tag = "avc3";
         try {
@@ -1712,24 +1722,19 @@ final class DownloadManager {
         try {
             boolean merged = false;
             try {
-                dbg.append("系统 muxer 合并 ").append(decFiles.length).append(" 片…\n");
-                concatTsByMuxer(decFiles, out, dbg);
-                FFmpegConcat.verify(out, java.util.Arrays.asList(decFiles), dbg);
+                dbg.append("libffconcat（FFmpeg concat）合并 ").append(decFiles.length).append(" 片…\n");
+                FFmpegConcat.concat(java.util.Arrays.asList(decFiles), null, out, tag, dbg, nativeLog);
                 merged = true;
-            } catch (Throwable muxErr) {
-                dbg.append("系统 muxer 合并失败：").append(muxErr.getMessage()).append('\n');
+            } catch (Throwable natErr) {
+                dbg.append("libffconcat 合并失败：").append(natErr.getMessage()).append('\n');
                 if (out.exists()) out.delete();
             }
             if (!merged) {
-                dbg.append("回退 libffconcat（FFmpeg concat）合并 ").append(decFiles.length).append(" 片…\n");
-                try {
-                    FFmpegConcat.concat(java.util.Arrays.asList(decFiles), null, out, tag, dbg, nativeLog);
-                    merged = true;
-                } catch (Throwable t) {
-                    if (out.exists()) dbg.append("native 产物结构: ").append(dumpMp4Boxes(out)).append('\n');
-                    if (out.exists()) out.delete();
-                    throw t;
-                }
+                // 兜底：native 库加载不了 / 崩溃时才走这条路。注意它对「3 字节起始码的 TS」会产黑屏，
+                // 所以必须再过一遍 verify（视频轨时长 ≤ 0 直接判失败，不让坏文件落盘）
+                dbg.append("回退系统 muxer 合并 ").append(decFiles.length).append(" 片…\n");
+                concatTsByMuxer(decFiles, out, dbg);
+                FFmpegConcat.verify(out, java.util.Arrays.asList(decFiles), dbg);
             }
             dbg.append("合并完成 ").append(out.length()).append("B 耗时 ").append((System.currentTimeMillis() - t0) / 1000).append("s\n");
         } finally {

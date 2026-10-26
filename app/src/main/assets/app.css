@@ -194,23 +194,24 @@ html[data-theme=dark] .search-suggest{box-shadow:0 12px 28px #0008}
 /* ===================== 液态玻璃 Dock（HyperOS / Liquid Glass 风格，v0.18.72） =====================
  * 结构：#dock（极淡底板） -> #dock-blob > b（玻璃透镜本体） -> 4 个按钮
  * 四条硬规则：
- *   1) 底板几乎不做模糊（blur 1.5px），只留一层 .055 白雾 —— 要能看清底下的封面和字，靠亮边出玻璃感；
- *   2) 透镜比底板更透（.035/.008），拖动时放大到「上下都顶穿底栏」的尺寸（盒模型撑大，圆角不变形）；
+ *   1) 底板必须有「遮罩」：blur 15px 把底下的封面/文字糊成均匀底，再叠一层 .60/.48 暖白 tint。
+ *      之前只给 blur(.8px) 全透，底下「剧场/AI/我的」字样会跟 Dock 自己的图标叠在一起，根本读不出；
+ *   2) 透镜比底板略清一点、亮一档（凸起玻璃球），拖动时放大到「上下都顶穿底栏」的尺寸（盒模型撑大，圆角不变形）；
  *   3) 图标绝不动：只改颜色/透明度，唯一被「拿起来」的是透镜；
- *   4) 边缘折射：底栏与透镜的边缘各铺一条内侧高光 + 竖向渐亮带，模拟光线穿过玻璃厚边时的弯折。 */
+ *   4) 边缘折射：只有【靠近边缘 4~8px】才有明暗与色散变化 —— 顶边高光、左右侧壁亮带、底边反射。
+ *      中心区域一点不加任何东西（不加发光、不加滤镜位移），玻璃才「干净透亮」。
+ *      v0.18.72 曾用 SVG feDisplacementMap 对整个面板做位移折射，结果整块玻璃都在扭，
+ *      图标边缘毛糙、文字发虚 —— 真实的厚玻璃是「边上有折射、中间没有」，所以撤掉了。 */
 #dock{
   height:64px;
   border-radius:24px;
   border:0;
   padding:0 5px;
-  background:linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,.008));
-  /* 只留 1.5px 模糊：底下的封面、文字要能看清 —— 靠边缘高光出玻璃感，不靠雾 */
-  -webkit-backdrop-filter:blur(.8px) saturate(122%) brightness(1.02);
-  backdrop-filter:blur(.8px) saturate(122%) brightness(1.02);
-  /* 折射：再叠一层 SVG 位移（边缘处背景被轻微掰弯）。浏览器不支持 url() 时整条被丢弃，
-     自动回退到上面那条纯模糊，不会变成完全不透明或全透明 */
-  -webkit-backdrop-filter:blur(.8px) saturate(122%) brightness(1.02) url(#lg-refract);
-  backdrop-filter:blur(.8px) saturate(122%) brightness(1.02) url(#lg-refract);
+  background:linear-gradient(180deg,rgba(255,252,244,.62),rgba(255,252,244,.50));
+  /* 遮罩 + 强模糊：底下的封面墙被糊成均匀底色，图标与文字才立得起来。
+     15px 是「轮廓彻底消失、颜色还留一点」的临界值，再大就成磨砂塑料了 */
+  -webkit-backdrop-filter:blur(15px) saturate(150%) brightness(1.04);
+  backdrop-filter:blur(15px) saturate(150%) brightness(1.04);
   box-shadow:
     0 10px 28px rgba(12,14,22,.20),
     0 0 0 1px rgba(255,255,255,.26),
@@ -219,14 +220,16 @@ html[data-theme=dark] .search-suggest{box-shadow:0 12px 28px #0008}
     inset 0 -1px 0 rgba(255,255,255,.22),
     inset 1px 0 0 rgba(255,255,255,.34),
     inset -1px 0 0 rgba(255,255,255,.34),
-    inset 0 0 26px rgba(255,255,255,.10);
+    inset 0 0 18px rgba(255,255,255,.05);
   isolation:isolate;
   touch-action:none;
   overflow:visible;
   transition:box-shadow .28s ease;
 }
 html[data-theme=dark] #dock{
-  background:linear-gradient(180deg,rgba(255,255,255,.042),rgba(255,255,255,.008));
+  background:linear-gradient(180deg,rgba(38,44,47,.74),rgba(23,27,29,.64));
+  -webkit-backdrop-filter:blur(15px) saturate(140%) brightness(.98);
+  backdrop-filter:blur(15px) saturate(140%) brightness(.98);
   box-shadow:
     0 10px 28px rgba(0,0,0,.42),
     0 0 0 1px rgba(255,255,255,.14),
@@ -235,27 +238,32 @@ html[data-theme=dark] #dock{
     inset 0 -1px 0 rgba(255,255,255,.08),
     inset 1px 0 0 rgba(255,255,255,.14),
     inset -1px 0 0 rgba(255,255,255,.14),
-    inset 0 0 26px rgba(255,255,255,.05);
+    inset 0 0 18px rgba(255,255,255,.03);
 }
-/* 顶面柔光 */
+/* 顶面柔光：只压住顶部 18px，不再一路糊到中间 */
 #dock::before{
   content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
-  background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,.03) 26%,rgba(255,255,255,0) 42%);
+  background:linear-gradient(180deg,rgba(255,255,255,.20),rgba(255,255,255,.05) 9px,rgba(255,255,255,0) 18px);
 }
 html[data-theme=dark] #dock::before{
-  background:linear-gradient(180deg,rgba(255,255,255,.09),rgba(255,255,255,.02) 26%,rgba(255,255,255,0) 44%);
+  background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.03) 9px,rgba(255,255,255,0) 18px);
 }
-/* 边缘折射：左右各一条竖向渐亮带（玻璃侧壁反光）+ 左上斜向炫光 */
+/* 边缘厚度感：四条渐变各管一边，全都只延伸 7~9px 就淡到 0，中间那块完全干净。
+   四条叠起来 = 一圈「玻璃厚边」，这就是折射该出现的地方（边上亮、中间透）。 */
 #dock::after{
   content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:0;
   background:
-    linear-gradient(90deg,rgba(255,255,255,.30),rgba(255,255,255,0) 7%,rgba(255,255,255,0) 93%,rgba(255,255,255,.30)),
-    radial-gradient(120% 80% at 12% -50%,rgba(255,255,255,.20),rgba(255,255,255,0) 56%);
+    linear-gradient(90deg,rgba(255,255,255,.34),rgba(255,255,255,.12) 2px,rgba(255,255,255,0) 7px),
+    linear-gradient(270deg,rgba(255,255,255,.34),rgba(255,255,255,.12) 2px,rgba(255,255,255,0) 7px),
+    linear-gradient(180deg,rgba(255,255,255,.26),rgba(255,255,255,0) 9px),
+    linear-gradient(0deg,rgba(255,255,255,.14),rgba(255,255,255,0) 7px);
 }
 html[data-theme=dark] #dock::after{
   background:
-    linear-gradient(90deg,rgba(255,255,255,.16),rgba(255,255,255,0) 7%,rgba(255,255,255,0) 93%,rgba(255,255,255,.16)),
-    radial-gradient(120% 80% at 12% -50%,rgba(255,255,255,.10),rgba(255,255,255,0) 56%);
+    linear-gradient(90deg,rgba(255,255,255,.17),rgba(255,255,255,.06) 2px,rgba(255,255,255,0) 7px),
+    linear-gradient(270deg,rgba(255,255,255,.17),rgba(255,255,255,.06) 2px,rgba(255,255,255,0) 7px),
+    linear-gradient(180deg,rgba(255,255,255,.13),rgba(255,255,255,0) 9px),
+    linear-gradient(0deg,rgba(255,255,255,.07),rgba(255,255,255,0) 7px);
 }
 /* 透镜外层：定位 + 平移。拖动时关掉过渡保证跟手 */
 #dock-blob{
@@ -271,12 +279,10 @@ html[data-theme=dark] #dock::after{
 #dock-blob b{
   position:relative;
   display:block;width:100%;height:100%;border-radius:19px;
-  background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.008));
-  /* 透镜里的内容再清一点、再亮一点：透过透镜看东西比透过底板更「聚」 */
-  -webkit-backdrop-filter:blur(.6px) saturate(132%) brightness(1.05);
-  backdrop-filter:blur(.6px) saturate(132%) brightness(1.05);
-  -webkit-backdrop-filter:blur(.6px) saturate(132%) brightness(1.05) url(#lg-refract);
-  backdrop-filter:blur(.6px) saturate(132%) brightness(1.05) url(#lg-refract);
+  background:linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,.07));
+  /* 透镜是凸起的玻璃球：比底板亮一档、雾更薄一点，浮起来才有「被拿起来」的感觉 */
+  -webkit-backdrop-filter:blur(4px) saturate(165%) brightness(1.10);
+  backdrop-filter:blur(4px) saturate(165%) brightness(1.10);
   box-shadow:
     inset 0 1.5px 0 rgba(255,255,255,.95),
     inset 0 -1px 0 rgba(255,255,255,.30),
@@ -292,36 +298,38 @@ html[data-theme=dark] #dock::after{
     border-radius .26s cubic-bezier(.32,1.34,.28,1),
     background .2s ease,box-shadow .2s ease;
 }
-/* 边缘色散：玻璃厚边把白光拆成一点点色带（外沿偏青、内沿偏洋红），只有 1~2px，
-   这是「边缘有折射」最直观的视觉线索，纯 CSS，任何 WebView 都生效 */
+/* 边缘色散：只在 1~2px 的边上有，像厚玻璃边把白光拆开一点。中心不加任何东西 */
 #dock-blob b::before{
   content:"";position:absolute;inset:-.5px;border-radius:inherit;pointer-events:none;z-index:2;
   box-shadow:
-    inset 0 0 0 1px rgba(150,225,255,.62),
+    inset 0 0 0 1px rgba(150,225,255,.34),
     inset 0 0 0 1.5px rgba(255,255,255,.10),
-    inset 0 0 0 2.5px rgba(255,168,255,.28);
-  filter:blur(.35px);
+    inset 0 0 0 2.5px rgba(255,168,255,.15);
+  filter:blur(.4px);
 }
 html[data-theme=dark] #dock-blob b::before{
   box-shadow:
-    inset 0 0 0 .5px rgba(150,220,255,.34),
+    inset 0 0 0 .5px rgba(150,220,255,.20),
     inset 0 0 0 1.5px rgba(255,255,255,.06),
-    inset 0 0 0 2.5px rgba(255,160,250,.14);
+    inset 0 0 0 2.5px rgba(255,160,250,.09);
 }
-/* 透镜边缘高光环：外沿强高光、内沿暗线、左右侧壁亮带 —— 光穿过玻璃厚边的弯折感 */
+/* 透镜边缘光：四条渐变各管一边、都在 6~8px 内淡到 0 —— 亮边只贴着轮廓，
+   镜心保持干净（之前那条 56% 半径的径向渐变会把整个镜面糊白，看着像塑料） */
 #dock-blob b::after{
   content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
   background:
-    linear-gradient(90deg,rgba(255,255,255,.36),rgba(255,255,255,0) 10%,rgba(255,255,255,0) 90%,rgba(255,255,255,.36)),
-    radial-gradient(120% 100% at 50% -28%,rgba(255,255,255,.28),rgba(255,255,255,0) 56%);
+    linear-gradient(90deg,rgba(255,255,255,.42),rgba(255,255,255,0) 6px),
+    linear-gradient(270deg,rgba(255,255,255,.42),rgba(255,255,255,0) 6px),
+    linear-gradient(180deg,rgba(255,255,255,.34),rgba(255,255,255,0) 8px),
+    linear-gradient(0deg,rgba(255,255,255,.20),rgba(255,255,255,0) 6px);
   box-shadow:
     inset 0 1px 1px rgba(255,255,255,.92),
-    inset 0 -1px 1px rgba(0,0,0,.10),
+    inset 0 -1px 1px rgba(0,0,0,.08),
     inset 1px 0 0 rgba(255,255,255,.58),
     inset -1px 0 0 rgba(255,255,255,.58);
 }
 html[data-theme=dark] #dock-blob b{
-  background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.012));
+  background:linear-gradient(180deg,rgba(255,255,255,.13),rgba(255,255,255,.05));
   box-shadow:
     inset 0 1.5px 0 rgba(255,255,255,.40),
     inset 0 -1px 0 rgba(255,255,255,.12),
@@ -333,8 +341,10 @@ html[data-theme=dark] #dock-blob b{
 }
 html[data-theme=dark] #dock-blob b::after{
   background:
-    linear-gradient(90deg,rgba(255,255,255,.18),rgba(255,255,255,0) 10%,rgba(255,255,255,0) 90%,rgba(255,255,255,.18)),
-    radial-gradient(120% 100% at 50% -28%,rgba(255,255,255,.14),rgba(255,255,255,0) 56%);
+    linear-gradient(90deg,rgba(255,255,255,.22),rgba(255,255,255,0) 6px),
+    linear-gradient(270deg,rgba(255,255,255,.22),rgba(255,255,255,0) 6px),
+    linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,0) 8px),
+    linear-gradient(0deg,rgba(255,255,255,.10),rgba(255,255,255,0) 6px);
   box-shadow:
     inset 0 1px 1px rgba(255,255,255,.40),
     inset 0 -1px 1px rgba(0,0,0,.24),
@@ -347,7 +357,7 @@ html[data-theme=dark] #dock-blob b::after{
   height:calc(100% + 22px);
   margin:-12px -8px -10px;
   border-radius:22px;
-  background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.016));
+  background:linear-gradient(180deg,rgba(255,255,255,.22),rgba(255,255,255,.09));
   box-shadow:
     inset 0 2px 0 rgba(255,255,255,1),
     inset 0 -1px 0 rgba(255,255,255,.34),
@@ -358,7 +368,7 @@ html[data-theme=dark] #dock-blob b::after{
     0 10px 26px rgba(30,26,10,.18);
 }
 html[data-theme=dark] #dock.dragging #dock-blob b{
-  background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.02));
+  background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,.07));
   box-shadow:
     inset 0 2px 0 rgba(255,255,255,.48),
     inset 0 -1px 0 rgba(255,255,255,.14),
@@ -368,13 +378,15 @@ html[data-theme=dark] #dock.dragging #dock-blob b{
     0 0 0 1px rgba(255,255,255,.14),
     0 10px 26px rgba(0,0,0,.38);
 }
-/* 图标：不动。只改颜色/透明度 */
+/* 图标：不动。只改颜色/透明度。非激活色比 --muted 再深一档，免得遮罩底上发灰读不出来 */
 #dock button{
   position:relative;z-index:2;
   background:transparent!important;
+  color:#4f4b42;
   border-radius:16px;
   transition:color .2s ease,opacity .2s ease;
 }
+html[data-theme=dark] #dock button{color:#d9d2c3}
 #dock button:active{background:transparent!important}
 #dock button.active{color:#20180a;font-weight:800}
 html[data-theme=dark] #dock button.active{color:#ffe6a6}

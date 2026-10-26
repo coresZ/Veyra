@@ -8,18 +8,9 @@
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
-  <!-- 液态玻璃折射滤镜：低频率噪声做位移，让透过 Dock / 透镜看到的内容在边缘被轻微弯折。
-       用在 backdrop-filter 里（url(#lg-refract)），浏览器不支持时整条声明失效、回退到纯模糊版本。 -->
-  <svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute;pointer-events:none">
-    <defs>
-      <filter id="lg-refract" x="-15%" y="-15%" width="130%" height="130%" color-interpolation-filters="sRGB">
-        <feTurbulence type="fractalNoise" baseFrequency="0.006 0.009" numOctaves="1" seed="7" result="noise"/>
-        <feGaussianBlur in="noise" stdDeviation="5" result="softNoise"/>
-        <feDisplacementMap in="SourceGraphic" in2="softNoise" scale="16"
-                           xChannelSelector="R" yChannelSelector="G"/>
-      </filter>
-    </defs>
-  </svg>
+  <!-- Dock 的「折射」已经改成纯 CSS 的边缘光带（只在靠近边框的 6~8px 内有明暗，中心保持干净），
+       不再用 feDisplacementMap 对整块面板做位移 —— 那会把中间的图标和文字一起扭，看着发虚。
+       这段 SVG 暂时留空占位，方便以后需要时再挂真正局限于边缘的滤镜。 -->
   <div id="app">
     <header class="app-top">
       <button id="account-avatar" class="account-avatar" type="button" aria-label="登录账号">
