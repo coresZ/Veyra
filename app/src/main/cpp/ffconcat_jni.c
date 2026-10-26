@@ -153,6 +153,84 @@ static void pick_streams(AVFormatContext* in, int* vIdx, int* aIdx) {
     }
 }
 
+/* 从源上下文读包扫描，为视频/音频补 extradata：
+ * TS 分片参数集（h264 SPS/PPS、AAC ADTS）不在开头时，mpegts demuxer 的 find_stream_info
+ * 提取不到 → codecpar->extradata_size=0 → movenc write_header 写 avcC/esds 失败
+ * （rc=-1094995529 Invalid data，v_extradata=0 a_extradata=0 即此场景）。
+ * 扫描后构造标准 avcC / AudioSpecificConfig 写入 codecpar；随后 avio_seek 倒带，
+ * 拷贝循环重读全部包（TS 本地文件 seek 安全，PTS 保持源值）。 */
+static void scan_fill_extradata(AVFormatContext* in, int vIdx, int aIdx,
+                                AVStream* vout, AVStream* aout) {
+    if (vout->codecpar->extradata_size > 0 && aout->codecpar->extradata_size > 0) return;
+    for (int k = 0; k < 256; k++) {
+        AVPacket* pk = av_packet_alloc();
+        if (!pk) break;
+        if (av_read_frame(in, pk) < 0) { av_packet_free(&pk); break; }
+        if (vout->codecpar->extradata_size == 0 && pk->stream_index == vIdx) {
+            const uint8_t* d = pk->data; int n = pk->size;
+            const uint8_t* sps = NULL; int spsLen = 0;
+            const uint8_t* pps = NULL; int ppsLen = 0;
+            int off = 0;
+            while (off + 4 <= n) {
+                int sc = -1;
+                for (int i = off; i + 3 < n; i++) {
+                    if (d[i] == 0 && d[i+1] == 0 && d[i+2] == 1) { sc = i + 3; break; }
+                    if (i + 4 < n && d[i] == 0 && d[i+1] == 0 && d[i+2] == 0 && d[i+3] == 1) { sc = i + 4; break; }
+                }
+                if (sc < 0) break;
+                int end = n;
+                for (int i = sc; i + 3 < n; i++) {
+                    if ((d[i] == 0 && d[i+1] == 0 && d[i+2] == 1) ||
+                        (i + 4 < n && d[i] == 0 && d[i+1] == 0 && d[i+2] == 0 && d[i+3] == 1)) { end = i; break; }
+                }
+                int nalLen = end - sc;
+                if (nalLen > 0) {
+                    int type = d[sc] & 0x1F;
+                    if (type == 7 && !sps) { sps = d + sc; spsLen = nalLen; }
+                    else if (type == 8 && !pps) { pps = d + sc; ppsLen = nalLen; }
+                }
+                off = end;
+                if (sps && pps) break;
+            }
+            if (sps && pps && spsLen >= 4) {
+                int total = 11 + spsLen + ppsLen;
+                uint8_t* avcc = (uint8_t*)av_mallocz(total + AV_INPUT_BUFFER_PADDING_SIZE);
+                if (avcc) {
+                    int p = 0;
+                    avcc[p++] = 1; avcc[p++] = sps[1]; avcc[p++] = sps[2]; avcc[p++] = sps[3];
+                    avcc[p++] = 0xFF; avcc[p++] = 0xE1;
+                    avcc[p++] = (uint8_t)((spsLen >> 8) & 0xFF); avcc[p++] = (uint8_t)(spsLen & 0xFF);
+                    memcpy(avcc + p, sps, spsLen); p += spsLen;
+                    avcc[p++] = 1;
+                    avcc[p++] = (uint8_t)((ppsLen >> 8) & 0xFF); avcc[p++] = (uint8_t)(ppsLen & 0xFF);
+                    memcpy(avcc + p, pps, ppsLen); p += ppsLen;
+                    vout->codecpar->extradata = avcc;
+                    vout->codecpar->extradata_size = total;
+                }
+            }
+        }
+        if (aout->codecpar->extradata_size == 0 && pk->stream_index == aIdx) {
+            const uint8_t* d = pk->data; int n = pk->size;
+            if (n >= 4 && d[0] == 0xFF && (d[1] & 0xF0) == 0xF0) {
+                int profile = ((d[2] >> 6) & 3) + 1;
+                int freqIdx = (d[2] >> 2) & 0xF;
+                int ch = ((d[2] & 1) << 2) | ((d[3] >> 6) & 3);
+                uint8_t asc[2];
+                asc[0] = (uint8_t)((profile << 3) | (freqIdx >> 1));
+                asc[1] = (uint8_t)(((freqIdx & 1) << 7) | (ch << 3));
+                aout->codecpar->extradata = (uint8_t*)av_mallocz(2 + AV_INPUT_BUFFER_PADDING_SIZE);
+                if (aout->codecpar->extradata) {
+                    memcpy(aout->codecpar->extradata, asc, 2);
+                    aout->codecpar->extradata_size = 2;
+                }
+            }
+        }
+        av_packet_free(&pk);
+        if (vout->codecpar->extradata_size > 0 && aout->codecpar->extradata_size > 0) break;
+    }
+    if (in && in->pb) avio_seek(in->pb, 0, SEEK_SET);
+}
+
 /* 音频参数（等价后端 probeFile 的 audioKey 要素：codec|aProfile|sampleRate|layout） */
 typedef struct {
     int codec;        /* AVCodecID */
@@ -381,6 +459,10 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
         avcodec_parameters_copy(aout->codecpar, ain->codecpar);
         aout->time_base = ain->time_base;
     }
+
+    /* TS 源参数集不在开头时 extradata=0 → movenc write_header 报 Invalid data：
+     * 先读包扫描补 avcC/ASC，再写 header（扫描后已倒带，拷贝循环重读全部包） */
+    scan_fill_extradata(in, vIdx, aIdx, vout, aout);
 
     rc = avformat_write_header(oc, NULL);
     if (rc < 0) {
