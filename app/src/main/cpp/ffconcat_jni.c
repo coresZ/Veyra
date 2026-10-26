@@ -449,7 +449,7 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
     vout->time_base = vin->time_base;
     /* movenc 需要 codec_tag：avc3/hev1（in-band SPS/PPS，TS 源参数集在样本内，不依赖 extradata）。
      * 默认 avc1 要求完整 avcC extradata，TS 分片参数集不完整时 write_header 报 Invalid data
-     * （rc=-1094995529）——用户"我在寡妇村当老师"第1集即此故障。后端 concat 统一 -tag:v avc3/hev1。 */
+     * （rc=-1094995529）——用户"我在寡妇村当老师"第1集即此故障。movenc 表仅 avc1/hvc1；avc3/hev1 会被 validate_codec_tag 拒绝。 */
     if (vout->codecpar->codec_id == AV_CODEC_ID_H264) vout->codecpar->codec_tag = MKTAG('a','v','c','3');
     else if (vout->codecpar->codec_id == AV_CODEC_ID_HEVC) vout->codecpar->codec_tag = MKTAG('h','e','v','1');
     if (aIdx >= 0) {
@@ -711,7 +711,7 @@ static int transcode_segment(const char* inPath, const char* outPath, int idx, c
             }
         }
         avcodec_parameters_from_context(vout->codecpar, vencCtx);
-        vout->codecpar->codec_tag = make_tag(vt->targetCodec == AV_CODEC_ID_HEVC ? "hev1" : "avc3");
+        vout->codecpar->codec_tag = make_tag(vt->targetCodec == AV_CODEC_ID_HEVC ? "hvc1" : "avc1");
         vout->time_base = vencCtx->time_base;
     } else {
         avcodec_parameters_copy(vout->codecpar, vin->codecpar);
@@ -1211,7 +1211,7 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
     }
     /* tag 判定：优先 C 层 majority（探测不到时退回 Java 传入 tag） */
     if (hevcN || h264N) {
-        snprintf(tagBuf, sizeof(tagBuf), "%s", (hevcN >= h264N) ? "hev1" : "avc3");
+        snprintf(tagBuf, sizeof(tagBuf), "%s", (hevcN >= h264N) ? "hvc1" : "avc1");
     }
     stageLog(logBuf, "[nativeConcat] 全部 N 集规范化完成");
 
@@ -1356,7 +1356,7 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
         cleanup_output(oc); avformat_close_input(&in); remove(listPath);
         return (*env)->NewStringUTF(env, g_err);
     }
-    vout->codecpar->codec_tag = make_tag(tagBuf);   /* -tag:v hev1/avc3（in-band 参数集） */
+    vout->codecpar->codec_tag = make_tag(tagBuf);   /* -tag:v hvc1/avc1（movenc 表仅收录 avc1/hvc1；avc3/hev1 被 validate_codec_tag 拒绝） */
     vout->time_base = vin->time_base;
 
     AVStream* aout = NULL;
@@ -1555,8 +1555,8 @@ static int hls_remux(const char* playlistPath, const char* outPath, char* logBuf
         cleanup_output(oc); avformat_close_input(&in); return AVERROR(ENOMEM);
     }
     avcodec_parameters_copy(vout->codecpar, vin->codecpar);
-    /* in-band 参数集 tag（等价 concat 的 hev1/avc3），保持 APK 播放/后续合并一致 */
-    vout->codecpar->codec_tag = make_tag(vin->codecpar->codec_id == AV_CODEC_ID_HEVC ? "hev1" : "avc3");
+    /* in-band 参数集 tag（等价 concat 的 hvc1/avc1），保持 APK 播放/后续合并一致 */
+    vout->codecpar->codec_tag = make_tag(vin->codecpar->codec_id == AV_CODEC_ID_HEVC ? "hvc1" : "avc1");
     vout->time_base = vin->time_base;
 
     AVStream* aout = NULL;
