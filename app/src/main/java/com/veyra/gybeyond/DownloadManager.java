@@ -1331,6 +1331,10 @@ final class DownloadManager {
         File nativeLog = new File(work, "native-concat.log");
         try {
             FFmpegConcat.concat(java.util.Arrays.asList(decFiles), null, out, tag, dbg, nativeLog);
+        } catch (Throwable t) {
+            // 合并失败：删除 out 半成品（否则 84KB 残片留盘占位、重试时被当成"分集完成"复用 → 恶性循环）
+            if (out.exists()) out.delete();
+            throw t;
         } finally {
             for (File df : decFiles) if (df != null) df.delete();
         }

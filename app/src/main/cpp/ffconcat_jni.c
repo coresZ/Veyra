@@ -23,6 +23,7 @@
 extern int backtrace(void** buffer, int size);
 extern char** backtrace_symbols(void* const* buffer, int size);
 #include <libavformat/avformat.h>
+#include <libavformat/avc.h>
 #include <libavcodec/avcodec.h>
 #include <libavcodec/bsf.h>
 #include <libavutil/opt.h>
@@ -497,6 +498,20 @@ static int normalize_segment(const char* inPath, const char* outPath, int idx, c
         AVStream* outSt = isV ? vout : aout;
         av_packet_rescale_ts(pkt, inSt->time_base, outSt->time_base);
         pkt->pos = -1;
+        /* 视频样本 annex-b → length-prefixed：TS 源样本为 annex-b(start code)，movenc 对
+         * 标准 avcC(0x01) 不做样本转换直接写 annex-b，导致 concat 的 h264_mp4toannexb bsf
+         * 反向处理失败（"filter failed to receive output packet"→ 合并早期失败半成品）。
+         * 用 libavformat 内部 ff_avc_parse_nal_units_buf（movenc 同款实现）转成标准 length-prefixed。 */
+        if (isV) {
+            uint8_t* nb = NULL;
+            int nsz = 0;
+            if (ff_avc_parse_nal_units_buf(pkt->data, &nb, &nsz) >= 0 && nsz > 0) {
+                av_packet_unref(pkt);
+                pkt->data = nb;
+                pkt->size = nsz;
+                pkt->buf = NULL;
+            }
+        }
         /* 等价后端 ffmpeg CLI 对 Non-monotonous DTS 的处理：CLI 的 mov muxer 默认
          * strict_std_compliance=NORMAL，遇 dts 重复/回退打印 warning 并 +1 修正（不报错）。
          * concat demuxer 在段边界会把下集首帧对齐到上集末帧（dts 重复），做同款 +1 修正，
@@ -1260,6 +1275,8 @@ Java_com_veyra_gybeyond_FFmpegConcat_nativeConcat(JNIEnv* env, jclass cls,
     AVFormatContext* in = NULL;
     AVDictionary* opts = NULL;
     av_dict_set(&opts, "safe", "0", 0);
+    av_dict_set(&opts, "auto_convert", "0", 0);   /* 禁 h264_mp4toannexb bsf：normalize 产物样本已是
+                                                   * length-prefixed，concat 不再反向转换，最终 movenc 直接写标准 avc1 */
     AVInputFormat* fmt = av_find_input_format("concat");
     int rc = avformat_open_input(&in, listPath, fmt, &opts);
     av_dict_free(&opts);
