@@ -2285,9 +2285,10 @@ final class DownloadManager {
                 JSONObject ep = task.episodes.optJSONObject(i);
                 keys.add(ep != null ? ep.optString("key", "") : "");
             }
-            // 合并引擎与「ts 分片 → 单集 mp4」统一：系统 MediaMuxer 优先，失败才回退 libffconcat。
-            // v0.18.70 之前这里只有 native —— native 日志一路「合并成功」，产物 head=ftyp、音频轨正常、
-            // 视频轨 0ms（movenc 写的视频 trak 系统解析器不认），所以手动「多集合并」必然失败。
+            // 合并引擎：系统 MediaMuxer 优先，失败才回退 libffconcat。
+            // 与「ts 分片 → 单集 mp4」的顺序**故意相反**：单集那个必须 native 优先（TS 的 annex-b
+            // 3 字节起始码 muxer 处理不了），而这里的输入是已经成型的 mp4，muxer 读得到 csd/sync、
+            // 写得出标准 stsd，v0.18.71/72 实测播放流畅，不要为了「统一」去动它。
             File nativeLog = new File(context.getFilesDir(), "native.log");
             boolean muxerOk = false;
             try {
