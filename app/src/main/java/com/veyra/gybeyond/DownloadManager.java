@@ -1040,7 +1040,10 @@ final class DownloadManager {
             } finally {
                 pool.shutdownNow();
             }
-            if (task.canceled) return;
+            if (task.canceled) {
+                task.debug = "第 " + n + " 集：任务已取消，跳过合并";
+                return;
+            }
             for (int i = 0; i < segN; i++) {
                 if (segFiles[i] == null) throw new java.io.IOException("分片下载不完整（第 " + (i + 1) + "/" + segN + " 片缺失）");
                 File sf = new File(work, segFiles[i]);
@@ -1068,7 +1071,7 @@ final class DownloadManager {
             }
             }   // else：本地已有 playlist → 跳过解析/下载，直接进合并
             // 下载/复用后：把密文 TS 统一解密为明文（TS 文件可直接播放；合并检测 0x47 直接用明文）
-            try { decryptTsToPlain(work, playlist); } catch (Exception de) { /* 解密失败保留密文，合并时再试 */ }
+            try { decryptTsToPlain(work, playlist, task, n); } catch (Exception de) { /* 解密失败保留密文，合并时再试 */ }
             StringBuilder dbg = new StringBuilder();
             // 合并产物直接写最终路径（无 .tmp 改名落位步骤）：MediaMuxer 写完 out 即产物，
             // 杜绝"合并完成但产物未落位"（rename/copy 在 Android 上不可靠）。半成品由重试覆盖。
@@ -1123,7 +1126,7 @@ final class DownloadManager {
     /** 下载完成后把密文 TS 解密为明文（0x47 开头）：TS 文件可直接播放（用户要求"之前版本可播"），
      *  合并也直接用明文（mergeTsToMp4 检测 0x47 跳过再解密）。已明文的片跳过；解密失败保留密文
      *  （合并时再尝试），不阻塞下载。IV 规则与 mergeTsToMp4 一致（显式 IV / mediaSeq 大端 fallback）。 */
-    private static void decryptTsToPlain(File work, File playlist) throws Exception {
+    private static void decryptTsToPlain(File work, File playlist, Task task, int n) throws Exception {
         String text = new String(java.nio.file.Files.readAllBytes(playlist.toPath()), StandardCharsets.UTF_8);
         List<String> segNames = new ArrayList<>();
         List<String> segKeys = new ArrayList<>();
@@ -1151,15 +1154,21 @@ final class DownloadManager {
             if (kf.exists() && kf.length() > 0) keyBytes.put(k, java.nio.file.Files.readAllBytes(kf.toPath()));
         }
         int decOk = 0;
-        for (int i = 0; i < segNames.size(); i++) {
+        int total = segNames.size();
+        for (int i = 0; i < total; i++) {
             File seg = new File(work, segNames.get(i));
             if (!seg.exists() || seg.length() == 0) continue;
             byte[] head = new byte[2];
             try (java.io.FileInputStream fis = new java.io.FileInputStream(seg)) {
-                if (fis.read(head) == 2 && (head[0] & 0xFF) == 0x47 && (head[1] & 0xFF) == 0x40) continue;   // 已明文
+                if (fis.read(head) == 2 && (head[0] & 0xFF) == 0x47 && (head[1] & 0xFF) == 0x40) { decOk++; continue; }   // 已明文
             }
             byte[] key = keyBytes.get(segKeys.get(i));
             if (key == null || key.length != 16) continue;
+            // 逐片进度：65 片大分片解密可达 1-2 分钟，无进度会被误判成卡死
+            if (task != null) {
+                task.detail = "第 " + n + " 集解密 " + (i + 1) + "/" + total + " 片…";
+                task.debug = "第 " + n + " 集：解密 " + (i + 1) + "/" + total + " 片…";
+            }
             try {
                 byte[] enc = java.nio.file.Files.readAllBytes(seg.toPath());
                 Cipher c = Cipher.getInstance("AES/CBC/NoPadding");
@@ -1169,8 +1178,9 @@ final class DownloadManager {
                 decOk++;
             } catch (Exception ignored) {}
         }
-        if (decOk > 0) {
-            // 记录解密成功（合并日志可见；失败保留密文合并时再试）
+        if (task != null) {
+            task.detail = "第 " + n + " 集解密完成 " + decOk + "/" + total + " 片";
+            task.debug = "第 " + n + " 集：解密完成 " + decOk + "/" + total + " 片";
         }
     }
 
