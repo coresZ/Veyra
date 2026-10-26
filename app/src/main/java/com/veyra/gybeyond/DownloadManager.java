@@ -236,7 +236,9 @@ final class DownloadManager {
                     d.delete();
                     continue;
                 }
-                // 历史遗留的名字漂移（剧名_1793032838265.mp4）：有正式名就以正式名为准，没有就正名回来。
+                // 历史遗留的名字漂移：「第01集_1793034343293.mp4」→「第01集.mp4」，
+                // 「剧名_1793032838265.mp4」→ 有正式名就删重复、没有就正名回来。
+                normalizeEpisodeNames(d);
                 fixDriftName(d, dn);
                 File official = new File(d, dn + ".mp4");
                 if (!(official.exists() && official.length() > 0)) continue;
@@ -571,6 +573,9 @@ final class DownloadManager {
                     // 单集导出失败不阻塞任务，原始密文仍在 app 私有目录供合并
                 }
             }
+            // 兜一层：个别 ROM 连「直接改名」都不让，名字会留成「第01集_1793034343293.mp4」。
+            // 导出全部结束后再统一正名一次，保证文件管理器里看到的就是「第01集.mp4」。
+            normalizeEpisodeNames(episodeDir(task.title));
             task.status = "ready";
             task.percent = 100;
             task.detail = "已下载 " + n + " 集，待合并";
@@ -703,6 +708,11 @@ final class DownloadManager {
         boolean mergedOk = false;
         try {
             int n = task.episodes.length();
+            // 先把名字漂移（第01集_1793034343293.mp4）的集数正名回来，再按「集号」找人。
+            // 分集文件名是合并找人的依据，名字被动过就报「分集不完整」，所以这里既修名、也不依赖名。
+            File edir = episodeDir(task.title);
+            normalizeEpisodeNames(edir);
+            java.util.Map<Integer, File> named = episodeFilesIn(edir);
             List<File> plain = new ArrayList<>();
             // 与 plain 一一对应的解密密钥：中间产物可能是 CENC 密文 → 要 key；
             // 剧集目录里的「第NN集.mp4」是已解密归一化的正式分集 → 传空串，让 C 层按明文处理。
@@ -713,14 +723,15 @@ final class DownloadManager {
                 // 查找顺序：
                 //   ① 任务目录 epNNN.mp4    —— 下载中间产物（导出失败时还在，可能是密文）
                 //   ② 剧集目录 第NN集.mp4   —— 正常路径：用户看得见的正式分集（明文）
-                //   ③ 剧集目录 epNNN.mp4    —— 旧版本遗留位置
+                //   ③ 剧集目录 集号匹配      —— 兼容被 ROM 改成「第NN集_<毫秒>.mp4」的
+                //   ④ 剧集目录 epNNN.mp4    —— 旧版本遗留位置
                 File f = new File(dir, String.format(Locale.US, "ep%03d.mp4", i + 1));
                 if (f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(k); continue; }
                 f = publicEpisodeFile(task.title, String.format(Locale.US, "第%02d集.mp4", i + 1));
                 if (f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(""); continue; }
-                f = new File(episodeDir(task.title), String.format(Locale.US, "第%02d集.mp4", i + 1));
-                if (f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(""); continue; }
-                f = new File(episodeDir(task.title), String.format(Locale.US, "ep%03d.mp4", i + 1));
+                f = named.get(i + 1);
+                if (f != null && f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(""); continue; }
+                f = new File(edir, String.format(Locale.US, "ep%03d.mp4", i + 1));
                 if (f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(k); }
             }
             if (plain.size() != n) throw new java.io.IOException("分集不完整（" + plain.size() + "/" + n + "），请重新下载");
@@ -2885,13 +2896,66 @@ final class DownloadManager {
         return MediaStore.Downloads.RELATIVE_PATH + " IN (?,?)";
     }
 
-    /** 分集文件判定：合并产物（剧名.mp4 / ep001.mp4 之外的临时分集）才删 */
+    /** 分集文件判定：合并产物（剧名.mp4 / ep001.mp4 之外的临时分集）才删。
+     *  注意要覆盖 MediaStore 去重改名后的「第01集_1793034343293.mp4」——否则这些变体既匹配不到
+     *  分集规则、也匹配不到清理规则，会永久留在剧集目录里。 */
     private static boolean isEpisodeArtifact(String name) {
         if (name == null) return false;
-        return name.matches("第\\d+集\\.mp4") || name.matches("ep\\d+\\.mp4")
+        return name.matches("第\\d+集\\.mp4") || name.matches("第\\d+集_\\d{10,}\\.mp4")
+                || name.matches("ep\\d+\\.mp4")
                 // 调试模式下导出的素材包，删任务时也要一起清掉，别留在剧集目录里
                 || name.matches("第\\d+集_调试包\\.zip")
                 || name.startsWith("norm_") || name.endsWith(".part");
+    }
+
+    /** 剧集目录里的分集：集号 → 文件。名字兼容「第01集.mp4」与「第01集_1793034343293.mp4」
+     *  （MediaStore 去重给的尾巴），这样合并永远不会因为文件名被动过就找不到分集。 */
+    private java.util.Map<Integer, File> episodeFilesIn(File dir) {
+        java.util.Map<Integer, File> map = new java.util.HashMap<>();
+        File[] kids = dir == null ? null : dir.listFiles();
+        if (kids == null) return map;
+        java.util.regex.Pattern p = java.util.regex.Pattern.compile("^第(\\d+)集(?:_\\d{10,})?\\.mp4$");
+        for (File f : kids) {
+            if (!f.isFile() || f.length() <= 0) continue;
+            java.util.regex.Matcher m = p.matcher(f.getName());
+            if (!m.matches()) continue;
+            int no;
+            try { no = Integer.parseInt(m.group(1)); } catch (Exception e) { continue; }
+            File old = map.get(no);
+            // 同一集出现两份（正式名 + 漂移名）时优先正式名（名字更短的那个）
+            if (old == null || f.getName().length() < old.getName().length()) map.put(no, f);
+        }
+        return map;
+    }
+
+    /** 把「第01集_1793034343293.mp4」正名回「第01集.mp4」。
+     *  ROM 的 MediaStore 在插入时撞到同名文件会把名字改掉，而分集文件名是合并找人的依据，
+     *  一旦漂移就报「分集不完整」。合并前、启动清理时都过一遍。 */
+    private void normalizeEpisodeNames(File dir) {
+        try {
+            File[] kids = dir == null ? null : dir.listFiles();
+            if (kids == null) return;
+            java.util.regex.Pattern p = java.util.regex.Pattern.compile("^第(\\d+)集_(\\d{10,})\\.mp4$");
+            String rel = Environment.DIRECTORY_DOWNLOADS + "/Veyra/" + dir.getName();
+            for (File f : kids) {
+                if (!f.isFile()) continue;
+                java.util.regex.Matcher m = p.matcher(f.getName());
+                if (!m.matches()) continue;
+                String clean = "第" + m.group(1) + "集.mp4";
+                File target = new File(dir, clean);
+                if (target.exists() && target.length() > 0) {      // 正式名已经在：漂移的那份是重复文件
+                    f.delete();
+                    deletePublicFile(rel, f.getName());
+                    continue;
+                }
+                if (Build.VERSION.SDK_INT >= 29 && renamePublicEntry(rel, f.getName(), clean)) continue;
+                if (f.renameTo(target)) {
+                    deletePublicFile(rel, f.getName());
+                    MediaScannerConnection.scanFile(context, new String[]{target.getAbsolutePath()},
+                            new String[]{"video/mp4"}, null);
+                }
+            }
+        } catch (Exception ignored) { }
     }
 
     private void deleteEpisodesAfterMerge(Task t, String subDir) {
@@ -3003,7 +3067,10 @@ final class DownloadManager {
                 if (displayName.equals(actual)) return uri;
                 // 名字被 ROM 改写（剧名_1793032838265.mp4）：先试着原地改名回原名
                 if (renameEntry(uri, displayName)) return uri;
-                // 改不回去就删掉这次的结果，等物理删除落地后重来
+                // MediaStore 的 update 也会被去重逻辑再次改写，最后一招是在文件系统上直接改名
+                //（rename 不会被自动加后缀），改完删旧条目 + 扫一次新文件让库和盘一致。
+                if (forceRenameOnDisk(uri, rel, displayName)) return uri;
+                // 都失败：删掉这次的结果，等物理删除落地后重来
                 try { context.getContentResolver().delete(uri, null, null); } catch (Exception ignored) { }
                 try { Thread.sleep(120); } catch (InterruptedException ignored) { }
             }
@@ -3115,6 +3182,36 @@ final class DownloadManager {
         return false;
     }
 
+    /** 直接在文件系统上改名（不受 MediaStore 的去重改名逻辑影响）。
+     *  顺序很重要：先 rename 实体文件，再删旧条目，最后扫新文件——反过来会让 provider 把文件一起删掉。 */
+    private boolean forceRenameOnDisk(Uri uri, String rel, String displayName) {
+        try {
+            if (Build.VERSION.SDK_INT < 29) return false;
+            String path = null;
+            try (android.database.Cursor c = context.getContentResolver().query(
+                    uri, new String[]{MediaStore.Downloads.DATA}, null, null, null)) {
+                if (c != null && c.moveToFirst()) path = c.getString(0);
+            }
+            String actual = queryDisplayName(uri);
+            if (path == null || actual == null) {
+                String dir = publicPathOf(rel);
+                if (dir == null || actual == null) return false;
+                path = new File(dir, actual).getAbsolutePath();
+            }
+            File from = new File(path);
+            if (!from.exists()) return false;
+            File to = new File(from.getParentFile(), displayName);
+            if (to.exists()) to.delete();
+            if (!from.renameTo(to)) return false;
+            try { context.getContentResolver().delete(uri, null, null); } catch (Exception ignored) { }
+            MediaScannerConnection.scanFile(context, new String[]{to.getAbsolutePath()},
+                    new String[]{"video/mp4"}, null);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private static void copyFile(File src, File dst) throws Exception {
         try (InputStream in = new FileInputStream(src); OutputStream out = new FileOutputStream(dst)) {
             byte[] buffer = new byte[256 * 1024];
@@ -3141,7 +3238,7 @@ final class DownloadManager {
                             String name = c.getString(1);
                             if (name == null) continue;
                             boolean hit = name.equals(displayBase)
-                                    || name.matches("第\\d+集\\.mp4")   // 分集（下载后解密导出）
+                                    || isEpisodeArtifact(name)        // 分集（含第01集_<毫秒>.mp4 这种漂移名）
                                     || (!base.isEmpty() && name.length() > displayBase.length()
                                     && name.startsWith(displayBase) && name.charAt(displayBase.length()) == '_'
                                     && name.endsWith(".mp4"));
