@@ -30,8 +30,14 @@ object HongguoSigner {
         return out
     }
 
-    private fun hexToBase64(hex: String): String {
-        val bytes = ByteArray(hex.length / 2)
+    /** 随机 19 位设备 ID（与 hongguo-dl `1e18 + random % 8e18` 同款范围） */
+    private fun randomDeviceId(): String {
+        val base = 1_000_000_000_000_000_000L
+        val span = 8_000_000_000_000_000_000L
+        return (base + Math.floorMod(kotlin.random.Random.nextLong(), span)).toString()
+    }
+
+    private fun hexToBase64(hex: String): String {        val bytes = ByteArray(hex.length / 2)
         for (i in bytes.indices) {
             bytes[i] = ((Character.digit(hex[i*2], 16) shl 4) or Character.digit(hex[i*2+1], 16)).toByte()
         }
@@ -66,8 +72,10 @@ object HongguoSigner {
     fun resolve(vid: String): StreamInfo {
         val now = System.currentTimeMillis()
         val stamp = now / 1000
-        val deviceId = "2720754845237044145"
-        val installId = "2684923656717301508"
+        // 随机设备 ID（与 hongguo-dl/juku-backend 同款）：固定 ID 长期使用会被红果设备级风控标记，
+        // 每次进程启动随机生成 1e18~9e18 的 19 位数字，绕过设备指纹封禁。
+        val deviceId = randomDeviceId()
+        val installId = randomDeviceId()
 
         val qp = sortedMapOf(
             "ac" to "wifi",

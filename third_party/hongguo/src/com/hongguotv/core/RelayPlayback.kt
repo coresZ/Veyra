@@ -71,7 +71,9 @@ object RelayPlayback {
                 if (best != null) return best
             }
         } catch (e: Exception) {
-            // 中转失败，继续网页抓流
+            // 中转失败，继续网页抓流；把中转失败原因拼进诊断，便于定位降级到 360p 的原因
+            signerError = if (signerError == null) "中转: ${e.message}" else "$signerError; 中转: ${e.message}"
+            android.util.Log.e("Veyra", "红果中转取流失败: ${e.message}")
         }
         return scrapeWebPlayer(seriesId, vid, signerError)
     }
