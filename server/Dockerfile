@@ -13,10 +13,6 @@ RUN npm ci --omit=dev --no-audit --no-fund --prefer-offline
 # hongguo-sign.js：红果签名链 JS 内嵌实现（hongguo-app.js require 依赖，缺失会导致取流失败）
 COPY index.js webui.html downloader.js hongguo-app.js hongguo-decrypt.js proxy-fetch.js hls.min.js hongguo-sign.js ./
 
-# Go 签名器（红果直连取流，全清晰度 1080p，hongguo-app.js 通过 child_process 调用）
-COPY hongguo_sign ./hongguo_sign
-RUN chmod +x ./hongguo_sign
-
 ENV PORT=8080
 EXPOSE 8080
 VOLUME /data
