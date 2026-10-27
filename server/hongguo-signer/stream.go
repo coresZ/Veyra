@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -20,10 +21,10 @@ import (
 
 // Sample represents an encrypted range within the MP4
 type Sample struct {
-	Start         int64
-	End           int64
-	IV            [16]byte
-	EncryptedOff  int64
+	Start        int64
+	End          int64
+	IV           [16]byte
+	EncryptedOff int64
 }
 
 type preparedVideo struct {
@@ -45,7 +46,6 @@ type cachedStream struct {
 
 func init() {
 	http.HandleFunc("/stream", handleStream)
-	// cleanup old cache entries
 	go func() {
 		for range time.Tick(5 * time.Minute) {
 			streamCache.Lock()
@@ -74,7 +74,6 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	streamCache.Unlock()
 
-	// Fetch video model from fqnovel
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -84,11 +83,25 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vmStr, _ := result["data"].(map[string]any)["video_model"].(string)
+	// video_model 可能是 JSON 字符串 / base64(JSON)（guoapp 对齐：先 JSON 后 base64）
+	vmRaw := result["data"].(map[string]any)["video_model"]
+	vmStr := ""
+	if s, ok := vmRaw.(string); ok {
+		vmStr = strings.TrimSpace(s)
+		if !strings.HasPrefix(vmStr, "{") {
+			if dec, derr := base64.StdEncoding.DecodeString(vmStr); derr == nil {
+				vmStr = string(dec)
+			}
+		}
+	} else if b, ok := vmRaw.([]byte); ok {
+		vmStr = string(b)
+	}
 	var vm struct {
 		VideoList []struct {
-			MainURL     string `json:"main_url"`
-			BackupURL   string `json:"backup_url"`
+			MainURL    string   `json:"main_url"`
+			BackupURL  string   `json:"backup_url"`
+			BackupURLs []string `json:"backup_urls"`
+			GearDesKey string   `json:"gear_des_key"`
 			EncryptInfo struct {
 				Encrypt bool   `json:"encrypt"`
 				SpadeA  string `json:"spade_a"`
@@ -96,6 +109,9 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 			} `json:"encrypt_info"`
 			VideoMeta struct {
 				Definition string `json:"definition"`
+				CodecType  string `json:"codec_type"`
+				VWidth     int64  `json:"vwidth"`
+				VHeight    int64  `json:"vheight"`
 			} `json:"video_meta"`
 		} `json:"video_list"`
 	}
@@ -108,25 +124,50 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pick 1080p (highest quality)
-	order := map[string]int{"1080p": 5, "720p": 4, "540p": 3, "480p": 2, "360p": 1}
+	// 选最高清晰度：height*10（h264/avc1 +1），跳过 bytevc2（含 gear_des_key）
 	best := vm.VideoList[0]
-	bestScore := order[best.VideoMeta.Definition]
+	bestScore := scoreVariant(best)
 	for _, v := range vm.VideoList {
-		if s := order[v.VideoMeta.Definition]; s > bestScore {
+		if s := scoreVariant(v); s > bestScore {
 			best = v
 			bestScore = s
 		}
 	}
 
 	cdnURL := best.MainURL
-	if cdnURL == "" {
+	if !strings.HasPrefix(cdnURL, "http") {
+		if dec, derr := base64.StdEncoding.DecodeString(cdnURL); derr == nil && strings.HasPrefix(string(dec), "http") {
+			cdnURL = string(dec)
+		}
+	}
+	if cdnURL == "" || !strings.HasPrefix(cdnURL, "http") {
 		cdnURL = best.BackupURL
+	}
+	if !strings.HasPrefix(cdnURL, "http") {
+		if dec, derr := base64.StdEncoding.DecodeString(cdnURL); derr == nil && strings.HasPrefix(string(dec), "http") {
+			cdnURL = string(dec)
+		}
+	}
+	for _, u := range best.BackupURLs {
+		if cdnURL != "" && strings.HasPrefix(cdnURL, "http") {
+			break
+		}
+		if strings.HasPrefix(u, "http") {
+			cdnURL = u
+		} else if dec, derr := base64.StdEncoding.DecodeString(u); derr == nil && strings.HasPrefix(string(dec), "http") {
+			cdnURL = string(dec)
+		}
+	}
+	if cdnURL == "" || !strings.HasPrefix(cdnURL, "http") {
+			http.Error(w, "无可用播放地址", 502)
+		return
 	}
 
 	// Derive AES key from spade_a
 	var key []byte
 	if best.EncryptInfo.Encrypt && best.EncryptInfo.SpadeA != "" {
+		key = deriveKey(best.EncryptInfo.SpadeA)
+	} else if strings.EqualFold(best.EncryptInfo.Method, "cenc-aes-ctr") && best.EncryptInfo.SpadeA != "" {
 		key = deriveKey(best.EncryptInfo.SpadeA)
 	}
 
@@ -162,10 +203,6 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveDecrypted(w http.ResponseWriter, r *http.Request, data []byte) {
-	// We need to re-prepare to get samples for range decryption.
-	// Actually, the data is already decrypted in-place by prepareDecrypt.
-	// But wait - we need to serve the DECRYPTED data. Let me restructure.
-	// Actually, prepareDecrypt modifies data in-place. So data IS decrypted now.
 	w.Header().Set("Content-Type", "video/mp4")
 	w.Header().Set("Accept-Ranges", "bytes")
 
@@ -176,7 +213,6 @@ func serveDecrypted(w http.ResponseWriter, r *http.Request, data []byte) {
 		return
 	}
 
-	// Parse Range: bytes=start-end
 	parts := strings.SplitN(strings.TrimPrefix(rangeHeader, "bytes="), "-", 2)
 	start, _ := strconv.ParseInt(parts[0], 10, 64)
 	end := int64(len(data) - 1)
@@ -214,8 +250,101 @@ func downloadFull(ctx context.Context, url string) ([]byte, error) {
 	return data, err
 }
 
-// deriveKey ports MediaCrypto.deriveKey: spade_a → AES-128 key
+func scoreVariant(v struct {
+	MainURL    string   `json:"main_url"`
+	BackupURL  string   `json:"backup_url"`
+	BackupURLs []string `json:"backup_urls"`
+	GearDesKey string   `json:"gear_des_key"`
+	EncryptInfo struct {
+		Encrypt bool   `json:"encrypt"`
+		SpadeA  string `json:"spade_a"`
+		Method  string `json:"encryption_method"`
+	} `json:"encrypt_info"`
+	VideoMeta struct {
+		Definition string `json:"definition"`
+		CodecType  string `json:"codec_type"`
+		VWidth     int64  `json:"vwidth"`
+		VHeight    int64  `json:"vheight"`
+	} `json:"video_meta"`
+}) int {
+	codec := strings.ToLower(v.VideoMeta.CodecType)
+	if strings.Contains(codec, "bytevc2") || strings.Contains(strings.ToLower(v.GearDesKey), "bytevc2") {
+		return -1
+	}
+	h := v.VideoMeta.VHeight
+	w := v.VideoMeta.VWidth
+	if h <= 0 {
+		h = w
+	}
+	score := int(h) * 10
+	if codec == "h264" || codec == "avc1" {
+		score++
+	}
+	return score
+}
+
 func deriveKey(spadeA string) []byte {
+	if k, err := deriveKeyNew(spadeA); err == nil {
+		return k
+	}
+	return deriveKeyLegacy(spadeA)
+}
+
+func deriveKeyNew(spadeA string) ([]byte, error) {
+	raw, err := base64.StdEncoding.DecodeString(spadeA)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) < 3 {
+		return nil, fmt.Errorf("spade_a 过短")
+	}
+	tagLength := int(raw[0]^raw[1]^raw[2]) - 48
+	contentLength := len(raw) - tagLength - 1
+	if tagLength < 1 || contentLength < 33 || contentLength >= len(raw) {
+		return nil, fmt.Errorf("spade_a 结构不匹配")
+	}
+	seed := raw[len(raw)-tagLength-2] ^ raw[len(raw)-tagLength-1]
+	tag := make([]byte, tagLength)
+	for i := 0; i < tagLength; i++ {
+		tag[i] = raw[len(raw)-tagLength+i] ^ seed
+	}
+	if string(tag) == "app_v2" || string(tag) == "web_v2" {
+		return nil, fmt.Errorf("不支持的 spade_a 新格式")
+	}
+	decoded := make([]byte, contentLength)
+	prevEven, prevOdd := 250, 85
+	for idx := 0; idx < contentLength; idx++ {
+		cur := raw[1+idx]
+		var prev byte
+		if idx&1 == 0 {
+			prev = byte(prevEven)
+			prevEven = int(cur)
+		} else {
+			prev = byte(prevOdd)
+			prevOdd = int(cur)
+		}
+		decoded[idx] = byte((int(prev) ^ int(cur)) - 21 - bits.OnesCount(uint(idx)))
+	}
+	var padding int
+	c0 := decoded[0]
+	if c0 >= '0' && c0 <= '9' {
+		padding = int(c0 - '0')
+	} else if c0 >= 'a' && c0 <= 'z' {
+		padding = int(c0-'a') + 10
+	} else {
+		return nil, fmt.Errorf("spade_a padding 非法")
+	}
+	if contentLength-padding-1 != 32 {
+		return nil, fmt.Errorf("spade_a key 长度异常")
+	}
+	key, err := hex.DecodeString(string(decoded[1:33]))
+	if err != nil || len(key) != 16 {
+		return nil, fmt.Errorf("spade_a key 解码异常")
+	}
+	return key, nil
+}
+
+func deriveKeyLegacy(spadeA string) []byte {
 	raw, err := base64.StdEncoding.DecodeString(spadeA)
 	if err != nil {
 		raw, _ = base64.URLEncoding.DecodeString(spadeA)
@@ -246,7 +375,6 @@ func deriveKey(spadeA string) []byte {
 		}
 		work[i] = ((prev ^ old) - 21 - byte(bits.OnesCount(uint(i))))
 	}
-	// Extract hex string from work[1:33], decode to 16 bytes
 	hexStr := string(work[1:33])
 	key, _ := hexDecode(hexStr)
 	return key
@@ -303,7 +431,7 @@ func readBox(data []byte, at int) (*mp4Box, error) {
 	if size < hs || at+size > len(data) {
 		return nil, fmt.Errorf("box size out of range")
 	}
-	return &mp4Box{start: at, end: at + size, body: at + hs, btype: bt, size: size}, nil
+	return &mp4Box{start: at, end: at + size, btype: bt, size: size}, nil
 }
 
 func findBox(data []byte, btype string, start, end int) (*mp4Box, error) {
@@ -321,7 +449,6 @@ func findBox(data []byte, btype string, start, end int) (*mp4Box, error) {
 	return nil, fmt.Errorf("box %s not found", btype)
 }
 
-// prepareDecrypt parses MP4 and decrypts encrypted samples in-place
 func prepareDecrypt(data []byte, key []byte) (*preparedVideo, error) {
 	if len(data) < 16 || string(data[4:8]) != "ftyp" {
 		return nil, fmt.Errorf("not MP4")
@@ -384,7 +511,6 @@ func prepareDecrypt(data []byte, key []byte) (*preparedVideo, error) {
 			}
 		}
 
-		// stsz
 		sampleSizeDefault := binary.BigEndian.Uint32(data[stsz.body+4 : stsz.body+8])
 		sampleCount := int(binary.BigEndian.Uint32(data[stsz.body+8 : stsz.body+12]))
 		sizes := make([]int64, sampleCount)
@@ -398,11 +524,10 @@ func prepareDecrypt(data []byte, key []byte) (*preparedVideo, error) {
 			}
 		}
 
-		// stsc
 		stscCount := int(binary.BigEndian.Uint32(data[stsc.body+4 : stsc.body+8]))
 		type stscEntry struct {
-			firstChunk   uint32
-			samplesPer   uint32
+			firstChunk uint32
+			samplesPer uint32
 		}
 		entries := make([]stscEntry, stscCount)
 		for i := 0; i < stscCount; i++ {
@@ -410,7 +535,6 @@ func prepareDecrypt(data []byte, key []byte) (*preparedVideo, error) {
 			entries[i].samplesPer = binary.BigEndian.Uint32(data[stsc.body+12+i*12:])
 		}
 
-		// stco/co64
 		stcoCount := int(binary.BigEndian.Uint32(data[stco.body+4 : stco.body+8]))
 		offWidth := 4
 		if stco.btype == "co64" {
@@ -426,7 +550,6 @@ func prepareDecrypt(data []byte, key []byte) (*preparedVideo, error) {
 			}
 		}
 
-		// saiz
 		saizFlags := binary.BigEndian.Uint32(data[saiz.body:])
 		saizBase := saiz.body + 4
 		if saizFlags&1 != 0 {
@@ -445,7 +568,6 @@ func prepareDecrypt(data []byte, key []byte) (*preparedVideo, error) {
 			}
 		}
 
-		// saio
 		saioFlags := binary.BigEndian.Uint32(data[saio.body:])
 		saioBase := saio.body + 4
 		if saioFlags&1 != 0 {
@@ -462,7 +584,6 @@ func prepareDecrypt(data []byte, key []byte) (*preparedVideo, error) {
 			auxOffset = int64(binary.BigEndian.Uint32(data[saioBase+4:]))
 		}
 
-		// Walk chunks/samples
 		sampleIdx := 0
 		entryIdx := 0
 		for chunkIdx := 0; chunkIdx < len(offsets); chunkIdx++ {
@@ -502,18 +623,15 @@ func prepareDecrypt(data []byte, key []byte) (*preparedVideo, error) {
 			}
 		}
 
-		// Clear sinf boxes (replace with free)
 		at2 := stbl.body
 		for at2+8 <= stbl.end {
 			sinf, err := findBox(data, "sinf", at2, stbl.end)
 			if err != nil {
 				break
 			}
-			// Replace "encv"/"enca" with original codec (frma)
 			frma, err := findBox(data, "frma", sinf.body, sinf.end)
 			if err == nil && frma.body+4 <= frma.end {
 				original := data[frma.body : frma.body+4]
-				// Look backwards for encv/enca
 				entryAt := sinf.start - 1
 				for entryAt >= stbl.body {
 					bt := string(data[entryAt : entryAt+4])
@@ -536,7 +654,6 @@ func prepareDecrypt(data []byte, key []byte) (*preparedVideo, error) {
 		return &preparedVideo{header: data, samples: samples, total: int64(len(data))}, nil
 	}
 
-	// Decrypt all samples with AES-CTR
 	if key != nil && len(key) == 16 {
 		block, err := aes.NewCipher(key)
 		if err != nil {
@@ -547,19 +664,15 @@ func prepareDecrypt(data []byte, key []byte) (*preparedVideo, error) {
 			if sLen <= 0 {
 				continue
 			}
-			// AES-CTR: counter = IV + (EncryptedOff / 16)
 			ivInt := new(big.Int).SetBytes(smp.IV[:])
 			ctrOff := big.NewInt(smp.EncryptedOff / 16)
 			ivInt.Add(ivInt, ctrOff)
 			ivBytes := ivInt.FillBytes(make([]byte, 16))
 
 			skip := int(smp.EncryptedOff % 16)
-			// Create CTR stream
 			stream := cipher.NewCTR(block, ivBytes)
-			// Skip first skip bytes
 			dummy := make([]byte, skip)
 			stream.XORKeyStream(dummy, dummy)
-			// Decrypt the actual range
 			buf := make([]byte, sLen)
 			copy(buf, data[smp.Start:smp.End])
 			stream.XORKeyStream(buf, buf)

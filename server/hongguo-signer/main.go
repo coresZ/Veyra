@@ -16,7 +16,9 @@ import (
 	"math/bits"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -24,43 +26,103 @@ const hongguoAppUserAgent = "com.phoenix.read/73532 (Linux; U; Android 16; zh_CN
 const hongguoAppBaseURL = "https://api5-normal-sinfonlineb.fqnovel.com"
 
 func main() {
+	// CLI 模式：hongguo_sign <stamp> <deviceId>，stdin 输入 rawQuery\nbody，stdout 输出签名行
+	// （hongguo-app.js 通过 child_process 调用）；无参数时启动 HTTP 服务（/play /stream）。
+	if len(os.Args) >= 2 {
+		runCLI(os.Args[1:])
+		return
+	}
 	http.HandleFunc("/play", handlePlay)
 	fmt.Println("hongguo-signer listening on :18099")
 	http.ListenAndServe("127.0.0.1:18099", nil)
 }
 
-func baseQuery() url.Values {
-	return url.Values{
-		"aid": {"8662"}, "app_name": {"novelread"}, "version_code": {"73532"},
-		"version_name": {"7.3.5.32"}, "manifest_version_code": {"73532"},
-		"update_version_code": {"73532"}, "channel": {"update_64"},
-		"device_platform": {"android"}, "os": {"android"}, "ssmix": {"a"},
-		"device_type": {"25053RT47C"}, "device_brand": {"Redmi"},
-		"language": {"zh"}, "os_api": {"36"}, "os_version": {"16"},
-		"resolution": {"1280*2772"}, "dpi": {"520"}, "ac": {"wifi"},
+func runCLI(args []string) {
+	stamp, _ := strconv.ParseUint(args[0], 10, 32)
+	deviceID := args[1]
+	input, _ := io.ReadAll(os.Stdin)
+	text := string(input)
+	rawQuery := text
+	body := []byte{}
+	if idx := strings.IndexByte(text, '\n'); idx >= 0 {
+		rawQuery = text[:idx]
+		body = []byte(text[idx+1:])
 	}
+	h := signRequest(uint32(stamp), deviceID, rawQuery, body)
+	fmt.Printf("GORGON=%s\n", h["X-Gorgon"])
+	fmt.Printf("ARGUS=%s\n", h["ARGUS_HEX"])
+	fmt.Printf("LADON=%s\n", h["LADON_HEX"])
+	fmt.Printf("NONCE=%d\n", uint32(stamp))
+	fmt.Printf("STUB=%s\n", h["X-SS-STUB"])
 }
 
-func handlePlay(w http.ResponseWriter, r *http.Request) {
-	vid := r.URL.Query().Get("vid")
-	if vid == "" { http.Error(w, "missing vid", 400); return }
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	result, err := resolveVideo(ctx, vid)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(502)
-		fmt.Fprintf(w, `{"error":%q}`, err.Error())
-		return
+// signRequest 生成完整签名头（CLI 与 HTTP 共用）
+func signRequest(stamp uint32, deviceID string, rawQuery string, body []byte) map[string]string {
+	reqHeaders := map[string]string{}
+	queryHash := md5.Sum([]byte(rawQuery))
+	var signPayload [20]byte
+	copy(signPayload[:4], queryHash[:4])
+	bodyHash := md5.Sum(body)
+	copy(signPayload[4:8], bodyHash[:4])
+	reqHeaders["X-SS-STUB"] = fmt.Sprintf("%X", bodyHash)
+	copy(signPayload[12:16], []byte{0, 6, 11, 28})
+	binary.BigEndian.PutUint32(signPayload[16:], stamp)
+	signKey := [20]byte{0x44, 0xb9, 0xb9, 0xd9, 0xa4, 0xae, 0xf9, 0xfc, 0xa4, 0x93, 0xaa, 0x75, 0x7c, 0xa3, 0xc2, 0xc4, 0xa4, 0x96, 0x93, 0x8f}
+	for i := range signPayload {
+		signPayload[i] ^= signKey[i]
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	for i := range signPayload {
+		mixed := bits.RotateLeft8(signPayload[i], 4) ^ signPayload[(i+1)%len(signPayload)]
+		signPayload[i] = bits.Reverse8(mixed) ^ 0xff ^ byte(len(signPayload))
+	}
+	gorgon := append([]byte{0x84, 0x04, 0x40, 0x1c, 0, 0}, signPayload[:]...)
+	nonce := make([]byte, 11)
+	rand.Read(nonce)
+	reqHeaders["X-Khronos"] = strconv.FormatUint(uint64(stamp), 10)
+	reqHeaders["X-Gorgon"] = strings.ToUpper(hex.EncodeToString(gorgon))
+	reqHeaders["X-Argus"] = hongguoArgus(rawQuery, body, stamp, deviceID, nonce)
+	reqHeaders["X-Ladon"] = hongguoLadon("8662", stamp, nonce[2:6])
+	reqHeaders["ARGUS_HEX"] = hex.EncodeToString([]byte(hongguoArgus(rawQuery, body, stamp, deviceID, nonce)))
+	reqHeaders["LADON_HEX"] = hex.EncodeToString([]byte(hongguoLadon("8662", stamp, nonce[2:6])))
+	return reqHeaders
 }
 
 func resolveVideo(ctx context.Context, videoID string) (map[string]any, error) {
-	deviceID, installID := newDeviceID(), newDeviceID()
-	fmt.Printf("device=%s install=%s\n", deviceID, installID)
+	deviceID, installID := "", ""
+	if d, i, err := registerDevice(ctx); err == nil && d != "" {
+		deviceID, installID = d, i
+		fmt.Printf("device=%s install=%s (registered)\n", deviceID, installID)
+	} else {
+		deviceID, installID = newDeviceID(), newDeviceID()
+		fmt.Printf("device=%s install=%s (random, reg err: %v)\n", deviceID, installID, err)
+	}
 
+	var lastErr error
+	for rotation := 0; rotation < 3; rotation++ {
+		for attempt := 0; attempt < 2; attempt++ {
+			result, err := resolveVideoOnce(ctx, videoID, deviceID, installID)
+			if err == nil {
+				return result, nil
+			}
+			lastErr = err
+			if strings.Contains(err.Error(), "HTTP 4") {
+				return nil, err
+			}
+			if attempt == 0 {
+				time.Sleep(1500 * time.Millisecond)
+			}
+		}
+		if d, i, err := registerDevice(ctx); err == nil && d != "" {
+			deviceID, installID = d, i
+		} else {
+			deviceID, installID = newDeviceID(), newDeviceID()
+		}
+		time.Sleep(1200 * time.Millisecond)
+	}
+	return nil, lastErr
+}
+
+func resolveVideoOnce(ctx context.Context, videoID string, deviceID, installID string) (map[string]any, error) {
 	query := baseQuery()
 	query.Set("device_id", deviceID)
 	query.Set("iid", installID)
@@ -81,33 +143,19 @@ func resolveVideo(ctx context.Context, videoID string) (map[string]any, error) {
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-XS-From-Web", "0")
 	req.Header.Set("Sdk-Version", "2")
-
-	queryHash := md5.Sum([]byte(rawQuery))
-	var signPayload [20]byte
-	copy(signPayload[:4], queryHash[:4])
-	bodyHash := md5.Sum(body)
-	copy(signPayload[4:8], bodyHash[:4])
-	req.Header.Set("X-SS-STUB", fmt.Sprintf("%X", bodyHash))
-	copy(signPayload[12:16], []byte{0, 6, 11, 28})
-	binary.BigEndian.PutUint32(signPayload[16:], stamp)
-	signKey := [20]byte{0x44, 0xb9, 0xb9, 0xd9, 0xa4, 0xae, 0xf9, 0xfc, 0xa4, 0x93, 0xaa, 0x75, 0x7c, 0xa3, 0xc2, 0xc4, 0xa4, 0x96, 0x93, 0x8f}
-	for i := range signPayload { signPayload[i] ^= signKey[i] }
-	for i := range signPayload {
-		mixed := bits.RotateLeft8(signPayload[i], 4) ^ signPayload[(i+1)%len(signPayload)]
-		signPayload[i] = bits.Reverse8(mixed) ^ 0xff ^ byte(len(signPayload))
+	h := signRequest(stamp, deviceID, rawQuery, body)
+	for k, v := range h {
+		if k == "ARGUS_HEX" || k == "LADON_HEX" {
+			continue
+		}
+		req.Header.Set(k, v)
 	}
-	gorgon := append([]byte{0x84, 0x04, 0x40, 0x1c, 0, 0}, signPayload[:]...)
-	req.Header.Set("X-Khronos", strconv.FormatUint(uint64(stamp), 10))
-	req.Header.Set("X-Gorgon", hex.EncodeToString(gorgon))
 	req.Header.Set("X-SS-Req-Ticket", strconv.FormatInt(time.Now().UnixMilli(), 10))
 
-	nonce := make([]byte, 11)
-	rand.Read(nonce)
-	req.Header.Set("X-Argus", hongguoArgus(rawQuery, body, stamp, deviceID, nonce))
-	req.Header.Set("X-Ladon", hongguoLadon("8662", stamp, nonce[2:6]))
-
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
 	content, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	fmt.Printf("fqnovel HTTP %d, body %d bytes: %.200s\n", resp.StatusCode, len(content), string(content))
@@ -120,6 +168,37 @@ func resolveVideo(ctx context.Context, videoID string) (map[string]any, error) {
 	var result map[string]any
 	json.Unmarshal(content, &result)
 	return result, nil
+}
+
+func baseQuery() url.Values {
+	return url.Values{
+		"aid": {"8662"}, "app_name": {"novelread"}, "version_code": {"73532"},
+		"version_name": {"7.3.5.32"}, "manifest_version_code": {"73532"},
+		"update_version_code": {"73532"}, "channel": {"update_64"},
+		"device_platform": {"android"}, "os": {"android"}, "ssmix": {"a"},
+		"device_type": {"25053RT47C"}, "device_brand": {"Redmi"},
+		"language": {"zh"}, "os_api": {"36"}, "os_version": {"16"},
+		"resolution": {"1280*2772"}, "dpi": {"520"}, "ac": {"wifi"},
+	}
+}
+
+func handlePlay(w http.ResponseWriter, r *http.Request) {
+	vid := r.URL.Query().Get("vid")
+	if vid == "" {
+		http.Error(w, "missing vid", 400)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	result, err := resolveVideo(ctx, vid)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(502)
+		fmt.Fprintf(w, `{"error":%q}`, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 func registerDevice(ctx context.Context) (string, string, error) {
@@ -139,7 +218,9 @@ func registerDevice(ctx context.Context) (string, string, error) {
 	req.Header.Set("User-Agent", hongguoAppUserAgent)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil { return "", "", err }
+	if err != nil {
+		return "", "", err
+	}
 	defer resp.Body.Close()
 	content, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	var result map[string]any
@@ -155,38 +236,56 @@ func registerDevice(ctx context.Context) (string, string, error) {
 func hongguoSM3(input []byte) [32]byte {
 	length := uint64(len(input)) * 8
 	data := append(append([]byte(nil), input...), 0x80)
-	for len(data)%64 != 56 { data = append(data, 0) }
-	var lb [8]byte; binary.BigEndian.PutUint64(lb[:], length)
+	for len(data)%64 != 56 {
+		data = append(data, 0)
+	}
+	var lb [8]byte
+	binary.BigEndian.PutUint64(lb[:], length)
 	data = append(data, lb[:]...)
 	state := [8]uint32{0x7380166f, 0x4914b2b9, 0x172442d7, 0xda8a0600, 0xa96f30bc, 0x163138aa, 0xe38dee4d, 0xb0fb0e4e}
 	for off := 0; off < len(data); off += 64 {
 		var words [68]uint32
-		for i := 0; i < 16; i++ { words[i] = binary.BigEndian.Uint32(data[off+i*4:]) }
+		for i := 0; i < 16; i++ {
+			words[i] = binary.BigEndian.Uint32(data[off+i*4:])
+		}
 		for i := 16; i < 68; i++ {
 			v := words[i-16] ^ words[i-9] ^ bits.RotateLeft32(words[i-3], 15)
 			words[i] = v ^ bits.RotateLeft32(v, 15) ^ bits.RotateLeft32(v, 23) ^ bits.RotateLeft32(words[i-13], 7) ^ words[i-6]
 		}
-		a,b,c,d,e,f,g,h := state[0],state[1],state[2],state[3],state[4],state[5],state[6],state[7]
+		a, b, c, d, e, f, g, h := state[0], state[1], state[2], state[3], state[4], state[5], state[6], state[7]
 		for i := 0; i < 64; i++ {
 			t, ff, gg := uint32(0x79cc4519), a^b^c, e^f^g
-			if i >= 16 { t, ff, gg = 0x7a879d8a, (a&b)|(a&c)|(b&c), (e&f)|(^e&g) }
-			ss1 := bits.RotateLeft32(bits.RotateLeft32(a,12)+e+bits.RotateLeft32(t,i), 7)
-			tt1 := ff + d + (ss1 ^ bits.RotateLeft32(a,12)) + (words[i] ^ words[i+4])
+			if i >= 16 {
+				t, ff, gg = 0x7a879d8a, (a&b)|(a&c)|(b&c), (e&f)|(^e&g)
+			}
+			ss1 := bits.RotateLeft32(bits.RotateLeft32(a, 12)+e+bits.RotateLeft32(t, i), 7)
+			tt1 := ff + d + (ss1 ^ bits.RotateLeft32(a, 12)) + (words[i] ^ words[i+4])
 			tt2 := gg + h + ss1 + words[i]
-			a,b,c,d = tt1, a, bits.RotateLeft32(b,9), c
-			e,f,g,h = tt2^bits.RotateLeft32(tt2,9)^bits.RotateLeft32(tt2,17), e, bits.RotateLeft32(f,19), g
+			a, b, c, d = tt1, a, bits.RotateLeft32(b, 9), c
+			e, f, g, h = tt2^bits.RotateLeft32(tt2, 9)^bits.RotateLeft32(tt2, 17), e, bits.RotateLeft32(f, 19), g
 		}
-		state[0]^=a; state[1]^=b; state[2]^=c; state[3]^=d; state[4]^=e; state[5]^=f; state[6]^=g; state[7]^=h
+		state[0] ^= a
+		state[1] ^= b
+		state[2] ^= c
+		state[3] ^= d
+		state[4] ^= e
+		state[5] ^= f
+		state[6] ^= g
+		state[7] ^= h
 	}
 	var result [32]byte
-	for i, v := range state { binary.BigEndian.PutUint32(result[i*4:], v) }
+	for i, v := range state {
+		binary.BigEndian.PutUint32(result[i*4:], v)
+	}
 	return result
 }
 
 func hongguoPad(data []byte) []byte {
 	p := 16 - len(data)%16
 	out := append([]byte(nil), data...)
-	for i := 0; i < p; i++ { out = append(out, byte(p)) }
+	for i := 0; i < p; i++ {
+		out = append(out, byte(p))
+	}
 	return out
 }
 
@@ -202,37 +301,45 @@ func hongguoArgus(query string, body []byte, timestamp uint32, deviceID string, 
 		return append(msg, value...)
 	}
 	bodyHash := hongguoSM3(make([]byte, 16))
-	if body != nil { stub := md5.Sum(body); bodyHash = hongguoSM3(stub[:]) }
+	if body != nil {
+		stub := md5.Sum(body)
+		bodyHash = hongguoSM3(stub[:])
+	}
 	queryHash := hongguoSM3([]byte(query))
-	counters := varint(varint(varint(varint(nil,1,1),2,1),3,1),7,3348294860)
-	environment := bytesField(nil,1,[]byte("25053RT47C"))
-	environment = bytesField(environment,2,[]byte("16"))
-	environment = bytesField(environment,3,[]byte("update_64"))
-	environment = varint(environment,4,2147483648)
-	message := varint(nil,1,0x20200929*2)
-	message = varint(message,2,2)
-	message = bytesField(message,4,[]byte("8662"))
-	message = bytesField(message,5,[]byte(deviceID))
-	message = bytesField(message,6,[]byte("1611921764"))
-	message = bytesField(message,7,[]byte("7.3.5.32"))
-	message = bytesField(message,8,[]byte("v04.07.01-ml-android"))
-	message = varint(message,9,135135744)
-	message = bytesField(message,10,make([]byte,8))
-	message = varint(message,11,0)
-	message = varint(message,12,uint64(timestamp)*2)
-	message = bytesField(message,13,bodyHash[:6])
-	message = bytesField(message,14,queryHash[:6])
-	message = bytesField(message,15,counters)
-	message = bytesField(message,16,nil)
-	message = bytesField(message,20,[]byte("none"))
-	message = varint(message,21,738)
-	message = bytesField(message,23,environment)
-	message = varint(message,25,2)
+	counters := varint(varint(varint(varint(nil, 1, 1), 2, 1), 3, 1), 7, 3348294860)
+	environment := bytesField(nil, 1, []byte("25053RT47C"))
+	environment = bytesField(environment, 2, []byte("16"))
+	environment = bytesField(environment, 3, []byte("update_64"))
+	environment = varint(environment, 4, 2147483648)
+	message := varint(nil, 1, 0x20200929*2)
+	message = varint(message, 2, 2)
+	if len(nonce) >= 10 {
+		message = varint(message, 3, uint64(binary.LittleEndian.Uint32(nonce[6:10]))&0x7fffffff)
+	}
+	message = bytesField(message, 4, []byte("8662"))
+	message = bytesField(message, 5, []byte(deviceID))
+	message = bytesField(message, 6, []byte("1611921764"))
+	message = bytesField(message, 7, []byte("7.3.5.32"))
+	message = bytesField(message, 8, []byte("v04.07.01-ml-android"))
+	message = varint(message, 9, 135135744)
+	message = bytesField(message, 10, make([]byte, 8))
+	message = varint(message, 11, 0)
+	message = varint(message, 12, uint64(timestamp)*2)
+	message = bytesField(message, 13, bodyHash[:6])
+	message = bytesField(message, 14, queryHash[:6])
+	message = bytesField(message, 15, counters)
+	message = bytesField(message, 16, nil)
+	message = bytesField(message, 20, []byte("none"))
+	message = varint(message, 21, 738)
+	message = bytesField(message, 23, environment)
+	message = varint(message, 25, 2)
 	data := hongguoPad(message)
-	seed := append(append(append([]byte(nil), key...), 0x3c,0xcc,0x56,0x7b), key...)
+	seed := append(append(append([]byte(nil), key...), 0x3c, 0xcc, 0x56, 0x7b), key...)
 	derived := hongguoSM3(seed)
 	var rounds [72]uint64
-	for i := 0; i < 4; i++ { rounds[i] = binary.LittleEndian.Uint64(derived[i*8:]) }
+	for i := 0; i < 4; i++ {
+		rounds[i] = binary.LittleEndian.Uint64(derived[i*8:])
+	}
 	for i := 4; i < 72; i++ {
 		mixed := bits.RotateLeft64(rounds[i-1], -3) ^ rounds[i-3]
 		mixed ^= bits.RotateLeft64(mixed, -1)
@@ -241,22 +348,26 @@ func hongguoArgus(query string, body []byte, timestamp uint32, deviceID string, 
 	for off := 0; off < len(data); off += 16 {
 		left, right := binary.LittleEndian.Uint64(data[off:]), binary.LittleEndian.Uint64(data[off+8:])
 		for _, round := range rounds {
-			nl, nr := right, left^(bits.RotateLeft64(right,1)&bits.RotateLeft64(right,8))^bits.RotateLeft64(right,2)^round
+			nl, nr := right, left^(bits.RotateLeft64(right, 1)&bits.RotateLeft64(right, 8))^bits.RotateLeft64(right, 2)^round
 			left, right = nl, nr
 		}
 		binary.LittleEndian.PutUint64(data[off:], left)
 		binary.LittleEndian.PutUint64(data[off+8:], right)
 	}
-	xor := []byte{0xd0,0x4f,0xfd,0xff,0xd0,0x4f,0xfd,0xff}
-	for i := range data { data[i] ^= xor[i%8] }
+	xor := []byte{0xd0, 0x4f, 0xfd, 0xff, 0xd0, 0x4f, 0xfd, 0xff}
+	for i := range data {
+		data[i] ^= xor[i%8]
+	}
 	data = append(xor, data...)
-	for l, r := 0, len(data)-1; l < r; l, r = l+1, r-1 { data[l], data[r] = data[r], data[l] }
-	container := append([]byte{0xa6,0xe7,0x83,0xee,0x70,0x01,0x10,0x09,0x18}, data...)
+	for l, r := 0, len(data)-1; l < r; l, r = l+1, r-1 {
+		data[l], data[r] = data[r], data[l]
+	}
+	container := append([]byte{0xa6, 0xe7, 0x83, 0xee, 0x70, 0x01, 0x10, 0x09, 0x18}, data...)
 	container = hongguoPad(append(container, 0x56, 0x7b))
 	aesKey, iv := md5.Sum(key[:16]), md5.Sum(key[16:])
 	block, _ := aes.NewCipher(aesKey[:])
 	cipher.NewCBCEncrypter(block, iv[:]).CryptBlocks(container, container)
-	return base64.StdEncoding.EncodeToString(append([]byte{0x3c,0xcc}, container...))
+	return base64.StdEncoding.EncodeToString(append([]byte{0x3c, 0xcc}, container...))
 }
 
 func hongguoLadon(aid string, timestamp uint32, prefix []byte) string {
@@ -272,7 +383,7 @@ func hongguoLadon(aid string, timestamp uint32, prefix []byte) string {
 		left = mixed ^ bits.RotateLeft64(left, 3)
 		right, queue = queue[0], queue[1:]
 	}
-	data := hongguoPad([]byte(strconv.FormatUint(uint64(timestamp),10)+"-1611921764-"+aid))
+	data := hongguoPad([]byte(strconv.FormatUint(uint64(timestamp), 10) + "-1611921764-" + aid))
 	for off := 0; off < len(data); off += 16 {
 		lv, rv := binary.LittleEndian.Uint64(data[off:]), binary.LittleEndian.Uint64(data[off+8:])
 		for _, k := range keys {
