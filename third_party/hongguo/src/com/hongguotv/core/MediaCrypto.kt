@@ -7,13 +7,46 @@ import java.math.BigInteger
 object MediaCrypto {
     data class Sample(val start: Long, val end: Long, val iv: ByteArray, val encryptedOffset: Long = 0)
     data class Prepared(val header: ByteArray, val samples: List<Sample>)
+    /** spade_a → CENC key：新算法（guoapp hongguoContentKey，对齐 server/hongguo-app.js deriveKey）优先，旧算法兜底。 */
     fun deriveKey(value: String): ByteArray {
-        val raw=decode64(value); require(raw.size>=3) { "内容密钥格式异常" }
-        val length=minOf(raw.size-(raw[0].u() xor raw[1].u() xor raw[2].u())+47,raw.size-1)
-        require(length>=33)
-        val work=raw.copyOfRange(1,1+length); var a=85; var b=246
-        for(i in work.indices) { val old=work[i].u(); val previous=if(i and 1 != 0) a else b; if(i and 1 != 0) a=old else b=old; work[i]=(-21-Integer.bitCount(i)+(previous xor old)).toByte() }
-        return hex(String(work.copyOfRange(1,33),Charsets.US_ASCII)).also { require(it.size==16) }
+        val raw = decode64(value); require(raw.size >= 3) { "内容密钥格式异常" }
+        // 新算法：tag 结构（tag 为 app_v2/web_v2 时拒绝并走旧算法）
+        try {
+            val tagLength = (raw[0].u() xor raw[1].u() xor raw[2].u()) - 48
+            val contentLength = raw.size - tagLength - 1
+            if (tagLength >= 1 && contentLength >= 33 && contentLength < raw.size) {
+                val seed = raw[raw.size - tagLength - 2].u() xor raw[raw.size - tagLength - 1].u()
+                val tag = ByteArray(tagLength) { (raw[raw.size - tagLength + it].u() xor seed).toByte() }
+                val tagStr = String(tag, Charsets.UTF_8)
+                if (tagStr != "app_v2" && tagStr != "web_v2") {
+                    val decoded = ByteArray(contentLength)
+                    var prevEven = 250; var prevOdd = 85
+                    for (idx in 0 until contentLength) {
+                        val cur = raw[1 + idx].u()
+                        val prev = if (idx % 2 == 0) prevEven else prevOdd
+                        if (idx % 2 == 0) prevEven = cur else prevOdd = cur
+                        decoded[idx] = ((prev xor cur) - 21 - Integer.bitCount(idx)).toByte()
+                    }
+                    val c0 = decoded[0].u()
+                    val padding = when {
+                        c0 in 0x30..0x39 -> c0 - 0x30
+                        c0 in 0x61..0x7a -> c0 - 0x61 + 10
+                        else -> null
+                    }
+                    if (padding != null && contentLength - padding - 1 == 32) {
+                        val hexKey = String(decoded.copyOfRange(1, 33), Charsets.US_ASCII)
+                        val key = hex(hexKey)
+                        if (key.size == 16) return key
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        // 旧算法兜底
+        val length = minOf(raw.size - (raw[0].u() xor raw[1].u() xor raw[2].u()) + 47, raw.size - 1)
+        require(length >= 33)
+        val work = raw.copyOfRange(1, 1 + length); var a = 85; var b = 246
+        for (i in work.indices) { val old = work[i].u(); val previous = if (i and 1 != 0) a else b; if (i and 1 != 0) a = old else b = old; work[i] = (-21 - Integer.bitCount(i) + (previous xor old)).toByte() }
+        return hex(String(work.copyOfRange(1, 33), Charsets.US_ASCII)).also { require(it.size == 16) }
     }
     fun decryptUrl(value: String, seed: ByteArray): String {
         val raw=decode64(value); require(raw.size>=20 && raw[0].u()==0xa8 && raw[2].u()==1 && raw[3].u()==0)
