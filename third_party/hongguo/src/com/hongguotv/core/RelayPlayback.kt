@@ -20,6 +20,26 @@ object RelayPlayback {
     private val http = OkHttpClient.Builder().build()
 
     fun stream(seriesId: String, vid: String): StreamInfo {
+        // 0) 优先 Veyra 后端签名取流：/api/web/hongguo/stream 由后端完成
+        //    device_register + X-Argus/X-Ladon/X-Gorgon 官方签名链 + video_model 1080p 选档
+        //    + ffmpeg -decryption_key 解密转封装，直接返回明文 MP4（支持 Range 拖动）
+        if (proxyBaseUrl.isNotEmpty()) {
+            try {
+                val url = "${proxyBaseUrl.trimEnd('/')}/api/web/hongguo/stream?vid=$vid"
+                val req = Request.Builder().url(url)
+                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 16; 25053RT47C) AppleWebKit/537.36")
+                    .build()
+                val resp = http.newCall(req).execute()
+                val code = resp.code
+                val isMp4 = (resp.header("Content-Type") ?: "").contains("video", true)
+                    || (resp.header("Content-Disposition") ?: "").contains("mp4", true)
+                resp.close()
+                if (code == 200 && isMp4) return StreamInfo(url, null, "1080")
+                android.util.Log.e("Veyra", "后端 stream 不可用 code=$code，降级直连")
+            } catch (e: Exception) {
+                android.util.Log.e("Veyra", "后端 stream 失败: ${e.message}", e)
+            }
+        }
         // 优先 APK 内置签名器直连 fqnovel.com（1080p 全清晰度）
         var signerError: String? = null
         try {
