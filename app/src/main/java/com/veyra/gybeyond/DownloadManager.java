@@ -3039,16 +3039,37 @@ final class DownloadManager {
                 if (!m.matches()) continue;
                 String clean = "第" + m.group(1) + "集.mp4";
                 File target = new File(dir, clean);
-                if (target.exists() && target.length() > 0) {      // 正式名已经在：漂移的那份是重复文件
-                    f.delete();
-                    deletePublicFile(rel, f.getName());
-                    continue;
+                if (target.exists() && target.length() > 0) {
+                    // 正式名和时间戳名并存：留「新写入」的那份当正式名（时间戳名通常是刚下载的新内容，
+                    // 正式名可能是上一批的旧文件，按 mtime 判新），旧的让位/删除，绝不静默删新留旧。
+                    if (f.lastModified() > target.lastModified()) {
+                        if (!target.delete()) {
+                            // 删除失败（占用/只读）：先把旧正式名改名让位，时间戳名随后正名回正式名
+                            target.renameTo(new File(dir, clean + "." + System.currentTimeMillis() + ".old"));
+                        }
+                    } else {
+                        f.delete();
+                        deletePublicFile(rel, f.getName());
+                        continue;
+                    }
                 }
-                if (Build.VERSION.SDK_INT >= 29 && renamePublicEntry(rel, f.getName(), clean)) continue;
-                if (f.renameTo(target)) {
-                    deletePublicFile(rel, f.getName());
-                    MediaScannerConnection.scanFile(context, new String[]{target.getAbsolutePath()},
-                            new String[]{"video/mp4"}, null);
+                // 正名（MediaStore rename → 文件系统 rename），失败重试 5 次 × 300ms：
+                // 系统扫描刚写完的大文件可能短暂占用，rename 一次失败被吞 → 时间戳残留（用户实测）。
+                boolean ok = false;
+                for (int retry = 0; retry < 5 && !ok; retry++) {
+                    if (retry > 0) try { Thread.sleep(300); } catch (InterruptedException ignored) { }
+                    if (Build.VERSION.SDK_INT >= 29 && renamePublicEntry(rel, f.getName(), clean)) { ok = true; break; }
+                    if (f.renameTo(target)) {
+                        deletePublicFile(rel, f.getName());
+                        MediaScannerConnection.scanFile(context, new String[]{target.getAbsolutePath()},
+                                new String[]{"video/mp4"}, null);
+                        ok = true;
+                    }
+                }
+                if (!ok) {
+                    try (java.io.FileWriter fw = new java.io.FileWriter(new File(context.getFilesDir(), "native.log"), true)) {
+                        fw.append("正名失败（5 次仍失败）: ").append(f.getAbsolutePath()).append('\n');
+                    } catch (Exception ignored) { }
                 }
             }
         } catch (Exception ignored) { }
@@ -3155,12 +3176,14 @@ final class DownloadManager {
         if (writeDirect(file, target, mime)) { lastExportDirect = true; return Uri.fromFile(target); }
         // ② 直接写不可用（Android 11+ 无 MANAGE_EXTERNAL_STORAGE 的机型）→ 回退 MediaStore 插入。
         if (Build.VERSION.SDK_INT >= 29) {
-            // 名字兜底策略：插之前清同名 + 已漂移的变体；插完读回 DISPLAY_NAME 校验；
-            // 对不上就改名，再不行直接在盘上 rename，全失败才删掉重来。
+            // 名字兜底策略：**用临时名插入**（唯一后缀，insert 阶段永远不会撞名 → 不会被打上
+            // 「_<毫秒>.mp4」），内容写完再改名为正式名（改名阶段若撞名，cleanExportTarget 已
+            // 先清旧正式名并等待盘上消失）；插完读回 DISPLAY_NAME 校验，对不上再 rename/盘上 rename。
             for (int attempt = 0; attempt < 3; attempt++) {
                 cleanExportTarget(rel, displayName);
+                String pendName = displayName + "." + Long.toHexString(System.nanoTime()) + ".pend";
                 ContentValues values = new ContentValues();
-                values.put(MediaStore.Downloads.DISPLAY_NAME, displayName);
+                values.put(MediaStore.Downloads.DISPLAY_NAME, pendName);
                 values.put(MediaStore.Downloads.MIME_TYPE, mime);
                 values.put(MediaStore.Downloads.RELATIVE_PATH, rel);
                 values.put(MediaStore.Downloads.IS_PENDING, 1);
@@ -3179,9 +3202,14 @@ final class DownloadManager {
                 ContentValues done = new ContentValues();
                 done.put(MediaStore.Downloads.IS_PENDING, 0);
                 context.getContentResolver().update(uri, done, null, null);
+                // 改名正式名：先确保旧正式名（含漂移变体）已清并等盘上消失，再 update DISPLAY_NAME
+                cleanExportTarget(rel, displayName);
+                ContentValues rn = new ContentValues();
+                rn.put(MediaStore.Downloads.DISPLAY_NAME, displayName);
+                context.getContentResolver().update(uri, rn, null, null);
                 String actual = queryDisplayName(uri);
                 if (displayName.equals(actual)) return uri;
-                // 名字被 ROM 改写（剧名_1793032838265.mp4）：先试着原地改名回原名
+                // 名字仍不对（ROM 去重逻辑把 update 也改写）：先原地改名回原名
                 if (renameEntry(uri, displayName)) return uri;
                 // MediaStore 的 update 也会被去重逻辑再次改写，最后一招是在文件系统上直接改名
                 //（rename 不会被自动加后缀），改完删旧条目 + 扫一次新文件让库和盘一致。
