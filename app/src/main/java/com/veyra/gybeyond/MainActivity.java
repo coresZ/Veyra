@@ -615,8 +615,24 @@ public final class MainActivity extends Activity {
             case "change-password": return account.changePassword(args.optString("oldPassword"), args.optString("newPassword"));
             case "logout": account.logout(); return account.profile();
             case "sync": return account.sync();
-            case "download-start": return DownloadManager.get(this).start(args.optString("source"), args.optString("title"), args.optJSONArray("episodes"), args.optBoolean("debug", false));
+            case "download-start": return DownloadManager.get(this).start(args.optString("source"), args.optString("title"), args.optJSONArray("episodes"), args.optBoolean("debug", false), args.optString("cover"));
             case "download-list": return DownloadManager.get(this).list();
+            case "download-files": return DownloadManager.get(this).localFiles(args.optString("id"));
+            case "open-local-player": {
+                JSONObject files = DownloadManager.get(this).localFiles(args.optString("id"));
+                JSONArray list = files.optJSONArray("episodes");
+                String mergedFile = files.optString("merged", "");
+                String pick = !mergedFile.isEmpty() ? mergedFile
+                        : (list != null && list.length() > 0 ? list.optJSONObject(0).optString("path") : "");
+                if (pick.isEmpty()) throw new IllegalStateException("本剧还没有可播放的成品文件，可先合并");
+                Intent intent = new Intent(this, LocalPlayerActivity.class);
+                intent.putExtra("title", files.optString("title", ""));
+                intent.putExtra("merged", !mergedFile.isEmpty());
+                intent.putExtra("episodes", (list == null ? "[]" : list.toString()));
+                intent.putExtra("path", pick);
+                runOnUiThread(() -> startActivity(intent));
+                return true;
+            }
             case "download-cancel": DownloadManager.get(this).cancel(args.optString("id")); return new JSONObject().put("ok", true);
             case "download-delete": DownloadManager.get(this).delete(args.optString("id")); return new JSONObject().put("ok", true);
             case "download-retry": DownloadManager.get(this).retry(args.optString("id")); return new JSONObject().put("ok", true);

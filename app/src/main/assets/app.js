@@ -377,9 +377,17 @@ function itemCard(item) {
     <span class="film-title">${title}</span><span class="film-info">${info}</span></button>`;
 }
 
+function moreCard(kind) {
+  return `<button class="film-card more-tile" type="button" data-more="${esc(kind)}" aria-label="查看更多推荐">
+    <span class="poster more-poster"><span class="more-tile-label">更多推荐 ${icon('arrow')}</span></span>
+    <span class="film-title">查看全部</span><span class="film-info">打开完整列表</span></button>`;
+}
 function section(title, items, kind = '') {
   if (!items.length) return '';
-  return `<section class="film-section"><div class="section-heading"><h2>${esc(title)}</h2>${kind ? `<button class="more" data-more="${kind}" type="button">更多 ${icon('arrow')}</button>` : ''}</div><div class="film-row">${items.map(itemCard).join('')}</div></section>`;
+  // 3×2 固定六格：前 5 个放推荐位，第 6 格就是原来右上角「更多」的入口，板块标题行不再带按钮。
+  const cells = items.slice(0, 5).map(itemCard);
+  if (kind) cells.push(moreCard(kind));
+  return `<section class="film-section"><div class="section-heading"><h2>${esc(title)}</h2></div><div class="film-row">${cells.join('')}</div></section>`;
 }
 function homeTagBar() {
   const choices = privateMode() ? popularTags : publicPopularTags;
@@ -862,7 +870,7 @@ async function renderLibraryDownloads() {
   const phoneTasks = phone.map(t => Object.assign({}, t, { kind: 'phone' }));
   // 手机转发任务关联的 NAS 任务不在下载页单独显示（由"下载到手机"触发，属内部步骤；主动下载到 NAS 的任务正常显示）
   const forwardNas = new Set(phone.filter(t => t.nasTaskId).map(t => String(t.nasTaskId)));
-  const nasTasks = nas.filter(t => !forwardNas.has(String(t.id))).map(t => Object.assign({}, t, { kind: 'nas' }));
+  const nasTasks = nas.filter(t => !forwardNas.has(String(t.id)) && (!t.source || t.source === contentSource)).map(t => Object.assign({}, t, { kind: 'nas' }));
   list.innerHTML = renderDownloadList([...phoneTasks, ...nasTasks]);
 }
 
@@ -941,7 +949,7 @@ async function refreshDownloads(token, keepTimer) {
   const phoneTasks = phone.map(t => Object.assign({}, t, { kind: 'phone' }));
   // 手机转发任务关联的 NAS 任务不在下载页单独显示（由"下载到手机"触发，属内部步骤；主动下载到 NAS 的任务正常显示）
   const forwardNas = new Set(phone.filter(t => t.nasTaskId).map(t => String(t.nasTaskId)));
-  const nasTasks = nas.filter(t => !forwardNas.has(String(t.id))).map(t => Object.assign({}, t, { kind: 'nas' }));
+  const nasTasks = nas.filter(t => !forwardNas.has(String(t.id)) && (!t.source || t.source === contentSource)).map(t => Object.assign({}, t, { kind: 'nas' }));
   list.innerHTML = renderDownloadList([...phoneTasks, ...nasTasks]);
 }
 
@@ -1011,12 +1019,15 @@ function downloadTaskRow(task, kind) {
   const errBlock = errLog
     ? `<span class="dl-error" data-dl-copy="${esc(task.id)}" data-dl-log="${esc(errLog.replace(/\n/g, '\\n'))}" title="点击复制全部日志">${task.error ? esc(task.error.split('\n').slice(0, 4).join('<br>')) : '<span class="dl-log-link">复制合并日志</span>'}</span>` : '';
   const detailHint = task.detail && (/片/.test(task.detail) || task.detail.includes('合并中')) ? ` · <span class="dl-detail-hint">${esc(task.detail)}</span>` : '';
-  return `<div class="download-task">
+  const playTile = `<button type="button" class="download-cover" data-dl-play="${esc(task.id)}" aria-label="本地播放《${esc(task.title || '未知剧集')}》">
+    <span class="poster loading"><span class="poster-letter">${esc(String(task.title || '影').slice(0, 1))}</span><img data-cover="${esc(task.cover || '')}" alt=""></span>
+    <span class="download-cover-hint">本地播放</span></button>`;
+  return `<div class="download-card">${playTile}<div class="download-task">
     <div class="download-task-head"><strong>${esc(task.title || '未知剧集')}</strong>${sourceBadge}<span class="dl-status ${running ? 'is-running' : ''}">${statusText}</span></div>
     <div class="download-task-meta">${task.doneCount}/${task.totalCount} 集 · ${task.doneCount === task.totalCount && task.status !== 'running' ? '已下载全部集' : (failedList.length ? `失败 ${failedList.length} 集` : '')}${srcNote ? ` · <b class="dl-src-note">${esc(srcNote)}</b>` : ''}${detailHint}</div>
     <div class="download-track"><i style="width:${Math.max(0, Math.min(100, Number(task.percent) || 0))}%"></i></div>
     <div class="download-task-foot">${output ? `<span class="dl-output">${esc(output)}</span>` : ''}${failedInfo}${errBlock}${mergeBtn}${retryFailedBtn}${retryBtn}${cancelBtn}${deleteBtn}</div>
-  </div>`;
+  </div></div>`;
 }
 
 function downloadStatusText(task, kind) {
@@ -1158,7 +1169,7 @@ async function submitDownloadTo(target) {
   try {
     if (target === 'nas') {
       // NAS 自主解析：只推 seriesId/title/集数，由后端调红果 App 接口取流（最高画质档）
-      await api('nas-download-start', { source: contentSource, title: state.detail.title, seriesId: String(state.detail.seriesId || state.detail.id), episodes });
+      await api('nas-download-start', { source: contentSource, title: state.detail.title, seriesId: String(state.detail.seriesId || state.detail.id), episodes, cover: state.detail.cover || '' });
       toast('已提交 NAS 下载任务（后端自行解析取流）');
     } else {
       // 下载到手机。
@@ -1181,7 +1192,7 @@ async function submitDownloadTo(target) {
         if (!resolved.length) throw new Error('没有可下载的分集');
         // 调试模式：仍是「下载到手机」，但要求原生保留 TS/KEY、不自动合并，最后打成一个调试包
         const debug = target === 'phone-debug';
-        await api('download-start', { source: sourceNow, title: state.detail.title, episodes: resolved, debug });
+        await api('download-start', { source: sourceNow, title: state.detail.title, episodes: resolved, debug, cover: state.detail.cover || '' });
         toast(debug
           ? `调试模式已开始（${resolved.length} 集）：分片下完后会导出「第NN集_调试包.zip」到 Download/Veyra/${state.detail.title}`
           : `判定[源=${sourceNow} 通道=${proxyModeNow}] 已开始下载到手机（手机经代理拉源合并）`);
@@ -2446,6 +2457,11 @@ document.addEventListener('click', async event => {
     const n = Number(event.target.closest('[data-dl-ep]').dataset.dlEp);
     if (downloadSelection.has(n)) downloadSelection.delete(n); else downloadSelection.add(n);
     renderDownloadSheet();
+    return;
+  }
+  if (event.target.closest('[data-dl-play]')) {
+    const id = event.target.closest('[data-dl-play]').dataset.dlPlay;
+    api('open-local-player', { id }).then(() => toast('正在播放本地成品')).catch(error => toast(error.message || '本地文件不可播放', true));
     return;
   }
   if (event.target.closest('[data-dl-cancel]')) {

@@ -88,6 +88,7 @@ final class DownloadManager {
         final String id;
         final String source;   // hongguo | huangguo
         final String title;
+        volatile String cover = "";   // 封面地址：我的下载按观看历史排版展示
         final JSONArray episodes;   // [{index,url,key?}]
         volatile String status = "running";   // running | ready(已下载待合并) | done | failed | canceled
         volatile int doneCount = 0;
@@ -112,7 +113,7 @@ final class DownloadManager {
         JSONObject snapshot() {
             try {
                 return new JSONObject()
-                        .put("id", id).put("source", source).put("title", title)
+                        .put("id", id).put("source", source).put("title", title).put("cover", cover)
                         .put("status", status).put("doneCount", doneCount).put("totalCount", totalCount)
                         .put("percent", percent).put("detail", detail)
                         .put("nasTaskId", nasTaskId).put("keepRaw", keepRaw)
@@ -128,7 +129,7 @@ final class DownloadManager {
             synchronized (tasks) {
                 for (Task t : tasks) {
                     arr.put(new JSONObject()
-                            .put("id", t.id).put("source", t.source).put("title", t.title)
+                            .put("id", t.id).put("source", t.source).put("title", t.title).put("cover", t.cover)
                             .put("status", t.status).put("percent", t.percent)
                             .put("doneCount", t.doneCount).put("totalCount", t.totalCount)
                             .put("detail", t.detail).put("output", t.output).put("error", t.error).put("debug", t.debug)
@@ -153,6 +154,7 @@ final class DownloadManager {
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject o = arr.getJSONObject(i);
                 Task t = new Task(o.optString("id"), o.optString("source"), o.optString("title"), new JSONArray());
+                t.cover = o.optString("cover", "");
                 boolean wasRunning = "running".equals(o.optString("status"));
                 t.status = wasRunning ? "failed" : o.optString("status");
                 t.detail = wasRunning ? "已中断（应用重启）" : o.optString("detail", "");
@@ -307,11 +309,15 @@ final class DownloadManager {
 
     // ---- 对外 API（供 MainActivity dispatch 调用）----
     JSONObject start(String source, String title, JSONArray episodes) throws Exception {
-        return start(source, title, episodes, false);
+        return start(source, title, episodes, false, "");
     }
 
     /** @param keepRaw 调试模式：保留 TS/KEY 并打包导出，不自动合并（私密模式「下载到手机（调试）」）。 */
     JSONObject start(String source, String title, JSONArray episodes, boolean keepRaw) throws Exception {
+        return start(source, title, episodes, keepRaw, "");
+    }
+
+    JSONObject start(String source, String title, JSONArray episodes, boolean keepRaw, String cover) throws Exception {
         if (!"hongguo".equals(source) && !"huangguo".equals(source)) throw new IllegalArgumentException("无效来源");
         if (episodes == null || episodes.length() == 0) throw new IllegalArgumentException("没有可下载的分集");
         for (int i = 0; i < episodes.length(); i++) {
@@ -323,6 +329,7 @@ final class DownloadManager {
         String id = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         Task task = new Task(id, source, title, episodes);
         task.keepRaw = keepRaw;
+        task.cover = cover == null ? "" : cover;
         tasks.add(0, task);
         persist();
         pool.execute(() -> run(task));
@@ -330,9 +337,53 @@ final class DownloadManager {
     }
 
     JSONArray list() {
+        // 手机下载按内容模式隔离：红果（公开）与黄果（私密）的任务互不出现在对方列表里。
+        // 任务 source 字段就是下载时的模式（hongguo | huangguo），旧记录同样适用。
+        String active = ContentMode.get(context).active();
         JSONArray out = new JSONArray();
-        synchronized (tasks) { for (Task t : tasks) out.put(t.snapshot()); }
+        synchronized (tasks) { for (Task t : tasks) if (active.equals(t.source)) out.put(t.snapshot()); }
         return out;
+    }
+
+    /** 该任务在本机的可播放产物：合并整剧文件优先，其次逐集文件（第NN集.mp4）。 */
+    JSONObject localFiles(String id) {
+        Task found = null;
+        synchronized (tasks) {
+            for (Task t : tasks) if (t.id.equals(id)) { found = t; break; }
+        }
+        if (found == null) throw new IllegalStateException("任务不存在");
+        if (!ContentMode.get(context).active().equals(found.source))
+            throw new IllegalStateException("内容已切换，请重新打开");
+        String safe = found.title == null || found.title.isEmpty() ? "download"
+                : found.title.replaceAll("[\\/:*?"<>|]", "_");
+        File dir = episodeDir(found.title);
+        JSONObject out = new JSONObject();
+        JSONArray episodes = new JSONArray();
+        String merged = "";
+        try {
+            File official = new File(dir, safe + ".mp4");
+            if (official.exists() && official.length() > 0) merged = official.getAbsolutePath();
+            File[] children = dir.listFiles();
+            if (children != null) {
+                java.util.List<File> parts = new java.util.ArrayList<>();
+                for (File f : children) {
+                    String n = f.getName();
+                    if (f.length() > 0 && n.matches("第\\d+集\\.mp4")) parts.add(f);
+                }
+                java.util.Collections.sort(parts, (a, b) -> episodeNo(a.getName()) - episodeNo(b.getName()));
+                for (File f : parts) {
+                    episodes.put(new JSONObject().put("index", episodeNo(f.getName())).put("path", f.getAbsolutePath()));
+                }
+            }
+            out.put("title", found.title).put("cover", found.cover).put("source", found.source)
+                    .put("merged", merged).put("episodes", episodes);
+        } catch (Exception e) { throw new IllegalStateException("读取本地文件失败：" + e.getMessage()); }
+        return out;
+    }
+
+    private static int episodeNo(String name) {
+        try { return Integer.parseInt(name.replaceAll("^第(\\d+)集\\.mp4$", "$1")); }
+        catch (Exception e) { return 0; }
     }
 
     void cancel(String id) {
