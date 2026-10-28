@@ -1,0 +1,152 @@
+diff --git a/app/src/main/java/com/veyra/gybeyond/DownloadManager.java b/app/src/main/java/com/veyra/gybeyond/DownloadManager.java
+index d2c0400..d26587b 100644
+--- a/app/src/main/java/com/veyra/gybeyond/DownloadManager.java
++++ b/app/src/main/java/com/veyra/gybeyond/DownloadManager.java
+@@ -549,13 +549,21 @@ final class DownloadManager {
+                                 java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                         }
+                     } else if (!norm.exists() || norm.length() == 0) {
+-                        List<File> single = new ArrayList<>();
+-                        single.add(plain.get(i));
+-                        List<String> singleKey = new ArrayList<>();
+-                        singleKey.add(key);
+-                        StringBuilder dbg = new StringBuilder();
+-                        FFmpegConcat.concat(single, singleKey, norm, "hvc1", dbg,
+-                            new File(context.getFilesDir(), "native.log"));
++                        // 红果 CENC 密文分集：先本地解密成明文 MP4（等价后端 ffmpeg -decryption_key -c copy）。
++                        // 不能直接走 native concat —— C 层"直接 concat"路径打开分集时不传 decryption_key，
++                        // 产物是未解密的密文（大小完整、容器/时长正常，但样本全是密文，任何播放器都播不了）。
++                        byte[] kb = com.hongguotv.core.LocalRemux.INSTANCE.keyFromHex(key);
++                        if (kb != null) {
++                            com.hongguotv.core.LocalRemux.INSTANCE.decrypt(plain.get(i), norm, kb);
++                        } else {
++                            List<File> single = new ArrayList<>();
++                            single.add(plain.get(i));
++                            List<String> singleKey = new ArrayList<>();
++                            singleKey.add(key);
++                            StringBuilder dbg = new StringBuilder();
++                            FFmpegConcat.concat(single, singleKey, norm, "hvc1", dbg,
++                                new File(context.getFilesDir(), "native.log"));
++                        }
+                     }
+                     String epName = String.format(Locale.US, "第%02d集.mp4", i + 1);
+                     long normLen = norm.length();
+@@ -758,12 +766,18 @@ final class DownloadManager {
+                 task.detail = "合并分集";
+                 File merged = new File(dir, "merged.mp4");
+                 if (plain.size() == 1) {
+-                    // 单集也要 C 层规范化（解密+时间轴归零），不能直接复制密文分集
+-                    List<String> k1 = new ArrayList<>();
+-                    k1.add(plainKeys.get(0));
+-                    StringBuilder dbg = new StringBuilder();
+-                    FFmpegConcat.concat(plain, k1, merged, "hvc1", dbg, new File(context.getFilesDir(), "native.log"));
+-                    task.debug = dbg.toString();
++                    // 红果 CENC 密文：本地解密成明文 MP4（等价后端 ffmpeg -decryption_key -c copy）。
++                    // 不能直接走 native concat —— C 层"直接 concat"路径不传 decryption_key，产物是密文播不了。
++                    byte[] kb = com.hongguotv.core.LocalRemux.INSTANCE.keyFromHex(plainKeys.get(0));
++                    if (kb != null) {
++                        com.hongguotv.core.LocalRemux.INSTANCE.decrypt(plain.get(0), merged, kb);
++                    } else {
++                        List<String> k1 = new ArrayList<>();
++                        k1.add(plainKeys.get(0));
++                        StringBuilder dbg = new StringBuilder();
++                        FFmpegConcat.concat(plain, k1, merged, "hvc1", dbg, new File(context.getFilesDir(), "native.log"));
++                        task.debug = dbg.toString();
++                    }
+                 } else mergeMp4(plain, plainKeys, merged, task);
+                 if (task.canceled) return;
+                 task.percent = 97;
+@@ -2690,6 +2704,7 @@ final class DownloadManager {
+     private void mergeMp4(List<File> inputs, List<String> keys, File output, Task task) throws Exception {
+         StringBuilder debug = new StringBuilder("合并详细日志\n分集数=").append(inputs.size()).append('\n');
+         String stage = "初始化";
++        java.util.List<File> decryptTmp = new java.util.ArrayList<>();
+         try {
+             // 0 集保护：分集列表为空（如旧版本任务未持久化 episodes 被重试）直接报明确错误，不进 concat（避免 native 层异常/闪退）
+             if (inputs == null || inputs.isEmpty()) {
+@@ -2746,38 +2761,69 @@ final class DownloadManager {
+             // MediaExtractor 读不了 → muxer 直接失败 → 自动落到 native；私密模式（黄果）的分集已是
+             // 明文 mp4，muxer 能读 → 于是正好走了那条会毁 B 帧的路。
+             File nativeLog = new File(context.getFilesDir(), "native.log");
+-            boolean nativeOk = false;
++            // 合并引擎：FFmpeg concat（修之前 v0.18.71+ 一直用的 C 层 direct concat 引擎，时间轴正确
++            // —— concat demuxer 保留源 stts/ctts）。上轮试过"系统 MediaMuxer 优先"，实测卡顿/音画
++            // 不同步：muxer 逐片写入必须按写入序单调化时间戳，交错时间轴被压平（C 层注释同款教训：
++            // 两段式把 501 帧挤进 9.7s → 播放加速卡顿、seek 崩溃）。
++            // 红果分集是 CENC 密文，先本地解密成明文再交给 concat（修之前直接 concat 密文，
++            // 产物是未解密密文，大小完整但样本全是密文，任何播放器都播不了）。
++            java.util.List<File> plainInputs = new java.util.ArrayList<>();
++            java.util.List<String> plainKeys = new java.util.ArrayList<>();
++            boolean ok = false;
+             try {
++                stage = "解密分集";
++                debug.append("解密 CENC 分集 ").append(inputs.size()).append(" 集…\n");
++                for (int i = 0; i < inputs.size(); i++) {
++                    String k = keys.get(i);
++                    byte[] kb = com.hongguotv.core.LocalRemux.INSTANCE.keyFromHex(k);
++                    if (kb != null) {
++                        File tmp = new File(output.getParentFile(), "dec_" + i + ".mp4");
++                        com.hongguotv.core.LocalRemux.INSTANCE.decrypt(inputs.get(i), tmp, kb);
++                        decryptTmp.add(tmp);
++                        plainInputs.add(tmp);
++                    } else {
++                        plainInputs.add(inputs.get(i));   // 明文源（黄果已解密 mp4 / 无 key 源）
++                    }
++                    plainKeys.add("");
++                }
+                 stage = "libffconcat 合并多集";
+-                debug.append("libffconcat（FFmpeg concat）合并 ").append(inputs.size()).append(" 集…\n");
++                debug.append("libffconcat（FFmpeg concat）合并 ").append(plainInputs.size()).append(" 集…\n");
+                 if (output.exists()) output.delete();   // native 侧「存在即不覆盖」，残片会让它直接失败
+-                FFmpegConcat.concat(inputs, keys, output, tag, debug, nativeLog);
++                FFmpegConcat.concat(plainInputs, plainKeys, output, tag, debug, nativeLog);
+                 stage = "校验产物";
+-                FFmpegConcat.verify(output, inputs, debug);
++                FFmpegConcat.verify(output, plainInputs, debug);
+                 if (checkPicture(output, debug) == 2)
+                     throw new java.io.IOException("产物抽帧全是纯色/全黑（打开会黑屏）");
+-                nativeOk = true;
+-            } catch (Throwable natErr) {
+-                debug.append("libffconcat 合并失败：").append(natErr.getMessage()).append('\n');
++                ok = true;
++            } catch (Throwable e1) {
++                debug.append("libffconcat 合并失败：").append(e1.getMessage()).append('\n');
+                 if (output.exists()) output.delete();
++                try {
++                    stage = "兜底系统 muxer 合并";
++                    debug.append("兜底系统 MediaMuxer 合并（时间轴可能被压平）").append(plainInputs.size()).append(" 集…\n");
++                    concatTsByMuxer(plainInputs.toArray(new File[0]), output, debug);
++                    stage = "兜底产物校验";
++                    FFmpegConcat.verify(output, plainInputs, debug);
++                    if (checkPicture(output, debug) == 2)
++                        throw new java.io.IOException("兜底合并后抽帧仍是纯色/全黑（打开会黑屏）");
++                    ok = true;
++                } catch (Throwable e2) {
++                    debug.append("兜底合并也失败：").append(e2.getMessage()).append('\n');
++                    if (output.exists()) output.delete();
++                }
+             }
+-            if (!nativeOk) {
+-                stage = "回退系统 muxer 合并";
+-                debug.append("回退系统 muxer 合并 ").append(inputs.size()).append(" 集…\n");
+-                concatTsByMuxer(inputs.toArray(new File[0]), output, debug);
+-                FFmpegConcat.verify(output, inputs, debug);
+-                if (checkPicture(output, debug) == 2)
+-                    throw new java.io.IOException("回退 muxer 合并后抽帧仍是纯色/全黑（打开会黑屏）");
+-            }
++            if (!ok) throw new java.io.IOException("两种合并引擎均失败（详见合并日志）");
+             stage = "完成";
+             debug.append("完成: 产物=").append(output.length() / 1048576).append("MB 引擎=")
+-                    .append(nativeOk ? "libffconcat(tag=" + tag + ")" : "系统 muxer（B 帧时间戳可能被压平）").append('\n');
++                    .append(ok ? "libffconcat(tag=" + tag + ")" : "系统 muxer（B 帧时间戳可能被压平）").append('\n');
+             task.debug = debug.toString();
+         } catch (Exception e) {
+             debug.append("失败阶段: ").append(stage).append('\n');
+             debug.append("异常: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append('\n');
+             task.debug = debug.toString();
+             throw e;
++        } finally {
++            for (File tmp : decryptTmp) try { tmp.delete(); } catch (Exception ignored) {}
+         }
+     }
+ 
