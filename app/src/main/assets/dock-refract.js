@@ -178,6 +178,9 @@
     if (searchForm) applyLens(searchForm, { id: 'search-lens', depth: 12, push: 9 });
     var suggest = document.getElementById('search-suggest');
     if (suggest) applyLens(suggest, { id: 'search-lens-suggest', depth: 16, push: 11 });
+    // v0.18.106：设置按钮（我的页右上）同款玻璃折射。初始 hidden，显示后 RO 自动补挂。
+    var settings = document.querySelector('.header-settings');
+    if (settings) applyLens(settings, { id: 'header-settings-lens', depth: 10, push: 7 });
   }
 
   if (document.readyState === 'loading') {
