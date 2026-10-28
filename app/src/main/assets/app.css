@@ -409,13 +409,12 @@ html[data-theme=dark] .color-dot{background:var(--dot-d,var(--dot,#ccc))}
 @media(prefers-reduced-motion:reduce){.appearance *{transition:none!important}}
 
 /* v0.18.111 第二轮改动：黄果网络通道弹窗加高 + 点头像换头像 + 用户名下方显示用户组 */
-.appearance-pop.proxy-pop{min-height:min(520px,88vh)}
+.appearance-pop.proxy-pop{height:auto}
 .proxy-pop .settings-storage{margin-top:2px}
 .proxy-mode-dd-menu{max-height:min(240px,40vh);overflow:auto}
 .account-avatar-pick{position:relative;flex:none;width:56px;height:56px;padding:0;border:0;background:none;border-radius:50%;overflow:visible}
 .account-avatar-pick img{width:56px;height:56px;object-fit:cover;border-radius:50%;background:var(--panel)}
 .account-avatar-pick:active{transform:scale(.94)}
-.account-avatar-pick-hint{position:absolute;left:50%;bottom:-3px;transform:translateX(-50%);padding:2px 6px;border-radius:calc(7px * var(--corner-scale,1));background:var(--mat-fill);border:1px solid var(--line);color:var(--muted);font-size:9px;line-height:1.4;white-space:nowrap;opacity:.92}
 .account-role{font-size:12px;font-weight:700;color:var(--muted)}
 .account-role.is-admin{color:#b3332a}
 .account-role.is-vip{color:#a0741f}

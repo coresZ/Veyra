@@ -1225,6 +1225,16 @@ function setProxyModeLabel(mode) {
   }
   updateProxySummary();
 }
+// 让弹窗只增长到“展开的下拉底部 + 12px”，不够时仍允许滚动兜底。
+function fitPopToMenu(menu) {
+  const pop = menu.closest('.appearance-pop');
+  if (!pop || menu.hidden) return;
+  pop.style.minHeight = '';
+  const overflow = menu.getBoundingClientRect().bottom - pop.getBoundingClientRect().bottom;
+  if (overflow > 0) pop.style.minHeight = `${Math.ceil(pop.offsetHeight + overflow + 12)}px`;
+  menu.scrollIntoView({ block: 'nearest' });
+}
+
 function initProxyModeDropdown() {
   const root = document.getElementById('proxy-mode-dd');
   if (!root) return;
@@ -1235,10 +1245,11 @@ function initProxyModeDropdown() {
   toggle.addEventListener('click', event => {
     event.stopPropagation();
     menu.hidden = !menu.hidden;
-    // 面板空间不足时把展开的菜单滚进可视区，避免选项被弹窗底边裁掉。
-    if (!menu.hidden) requestAnimationFrame(() => menu.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
     toggle.setAttribute('aria-expanded', String(!menu.hidden));
     root.dataset.open = String(!menu.hidden);
+    // 展开时按菜单实际溢出量把弹窗“刚好”加高（多留 12px），收起后恢复原高度。
+    if (!menu.hidden) requestAnimationFrame(() => fitPopToMenu(menu));
+    else { const pop = menu.closest('.appearance-pop'); if (pop) pop.style.minHeight = ''; }
   });
   for (const item of menu.querySelectorAll('[data-mode]')) {
     item.addEventListener('click', event => {
@@ -1273,18 +1284,17 @@ function accountRoleInfo() {
 function accountIdentityHtml() {
   const account = state.account;
   const role = accountRoleInfo();
-  return `<section class="account-identity"><button type="button" class="account-avatar-pick" data-choose-avatar="1" aria-label="点击头像从相册更换"><img src="${esc(account.avatar || 'user.svg')}" alt=""><span class="account-avatar-pick-hint">更换头像</span></button><div><strong>${esc(account.username)}</strong><span class="account-role is-${role.key}">${role.label}</span></div></section>`;
+  return `<section class="account-identity"><button type="button" class="account-avatar-pick" data-choose-avatar="1" aria-label="点击头像从相册更换"><img src="${esc(account.avatar || 'user.svg')}" alt=""></button><div><strong>${esc(account.username)}</strong><span class="account-role is-${role.key}">${role.label}</span></div></section>`;
 }
 
 function renderAccountManagement() {
   const account = state.account;
   content.innerHTML = `<div class="settings-page account-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回设置</button><h1>账号管理</h1>
     ${account.loggedIn ? `${accountIdentityHtml()}
-      <section class="settings-account"><h2>修改密码</h2><p>先验证旧密码，再设置新密码（1 位起，不限长度）。</p>
+      <section class="settings-account"><h2>修改密码</h2><p>先验证旧密码，再设置新密码。</p>
         <form id="password-form" class="password-form">
           <label for="old-password">旧密码</label><input id="old-password" type="password" autocomplete="current-password" required>
           <label for="new-password">新密码</label><input id="new-password" type="password" autocomplete="new-password" required>
-          <label for="confirm-password">再次输入新密码</label><input id="confirm-password" type="password" autocomplete="new-password" required>
           <p id="password-error" class="auth-error" role="alert" hidden></p><button type="submit">确认修改</button>
         </form></section>
       <section class="settings-account"><h2>同步与登录</h2><button type="button" data-sync-now="1">立即同步片单</button><button type="button" data-logout="1" aria-live="polite">退出登录</button></section>` : `<section class="settings-account"><p>登录后可同步收藏和观看历史，并管理头像与密码。</p><button type="button" data-account-action="1">登录或注册</button></section>`}</div>`;
@@ -1296,11 +1306,10 @@ function buildAccountPopHtml() {
   const account = state.account;
   const body = account.loggedIn
     ? `${accountIdentityHtml()}
-      <section class="settings-account"><h2>修改密码</h2><p>先验证旧密码，再设置新密码（1 位起，不限长度）。</p>
+      <section class="settings-account"><h2>修改密码</h2><p>先验证旧密码，再设置新密码。</p>
         <form id="password-form" class="password-form">
           <label for="old-password">旧密码</label><input id="old-password" type="password" autocomplete="current-password" required>
           <label for="new-password">新密码</label><input id="new-password" type="password" autocomplete="new-password" required>
-          <label for="confirm-password">再次输入新密码</label><input id="confirm-password" type="password" autocomplete="new-password" required>
           <p id="password-error" class="auth-error" role="alert" hidden></p><button type="submit">确认修改</button>
         </form></section>
       <section class="settings-account"><h2>同步与登录</h2><button type="button" data-sync-now="1">立即同步片单</button><button type="button" data-logout="1" aria-live="polite">退出登录</button></section>`
@@ -2323,11 +2332,9 @@ document.addEventListener('submit', async event => {
   const form = event.target;
   const oldPassword = form.querySelector('#old-password').value;
   const newPassword = form.querySelector('#new-password').value;
-  const repeated = form.querySelector('#confirm-password').value;
   const error = form.querySelector('#password-error');
   const button = form.querySelector('[type="submit"]');
   error.hidden = true;
-  if (newPassword !== repeated) { error.textContent = '两次输入的新密码不一致'; error.hidden = false; return; }
   if (newPassword === oldPassword) { error.textContent = '新密码不能与旧密码相同'; error.hidden = false; return; }
   button.disabled = true;
   try { setAccount(await api('change-password', { oldPassword, newPassword })); toast('密码已修改'); }
