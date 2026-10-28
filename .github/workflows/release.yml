@@ -23,24 +23,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply DownloadManager concat-engine patch
-        run: |
-          if git apply --check --reverse patches/downloadmanager-concat-engine.patch 2>/dev/null; then
-            echo "concat-engine 补丁已包含在源码中，跳过"
-          else
-            git apply patches/downloadmanager-concat-engine.patch
-            echo "concat-engine 补丁已应用"
-          fi
-
-      - name: Apply DownloadManager episode-timestamp patch
-        run: |
-          if git apply --check --reverse patches/downloadmanager-episode-timestamp.patch 2>/dev/null; then
-            echo "episode-timestamp 补丁已包含在源码中，跳过"
-          else
-            git apply patches/downloadmanager-episode-timestamp.patch
-            echo "episode-timestamp 补丁已应用"
-          fi
-
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
