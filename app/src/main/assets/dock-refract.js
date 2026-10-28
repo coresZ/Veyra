@@ -171,6 +171,13 @@
     // 透镜：体积小、曲率大，深度 12 / 位移 9，免得把自己撑变形
     var blob = dock.querySelector('#dock-blob b');
     if (blob) applyLens(blob, { id: 'dock-lens-blob', depth: 12, push: 9 });
+    // v0.18.105：搜索框 + 搜索历史/联想面板，同款液态玻璃折射。
+    // 搜索框小体积高曲率（同透镜参数 12/9）；面板大一点用 16/11。
+    // 面板初始 hidden（尺寸 0），显示后 ResizeObserver 会自动补挂 data-lens。
+    var searchForm = document.querySelector('.search-form');
+    if (searchForm) applyLens(searchForm, { id: 'search-lens', depth: 12, push: 9 });
+    var suggest = document.getElementById('search-suggest');
+    if (suggest) applyLens(suggest, { id: 'search-lens-suggest', depth: 16, push: 11 });
   }
 
   if (document.readyState === 'loading') {
