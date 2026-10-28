@@ -9,6 +9,10 @@ on:
         description: '可选：release tag 名（留空则按运行时间自动生成，如 v20261021-1430）'
         required: false
         type: string
+      release_notes:
+        description: '可选：本次 release 介绍（留空则自动根据 commit 生成 changelog）'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -87,10 +91,21 @@ jobs:
           echo "Creating release for $TAG"
           # 删除已存在的 release（tag push 会自动创建空 release）
           gh release delete "$TAG" --yes --cleanup-tag=false 2>/dev/null || true
-          # 创建新 release 并上传 APK + 后端镜像 tar.gz
-          gh release create "$TAG" \
-            "Veyra-$TAG.apk" \
-            veyra-backend-latest.tar.gz \
-            --title "Veyra $TAG" \
-            --notes "$TAG: 红果直连签名取流1080p + NAS按剧名目录 + WebUI分类/播放/下载 + 自动检测更新 + 多集合并concat明文版" \
-            --latest
+          NOTES="${{ github.event.inputs.release_notes }}"
+          if [ -n "$NOTES" ]; then
+            echo "使用自定义 release notes"
+            gh release create "$TAG" \
+              "Veyra-$TAG.apk" \
+              veyra-backend-latest.tar.gz \
+              --title "Veyra $TAG" \
+              --notes "$NOTES" \
+              --latest
+          else
+            echo "自动生成 changelog"
+            gh release create "$TAG" \
+              "Veyra-$TAG.apk" \
+              veyra-backend-latest.tar.gz \
+              --title "Veyra $TAG" \
+              --generate-notes \
+              --latest
+          fi
