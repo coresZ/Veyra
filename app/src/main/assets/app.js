@@ -1235,6 +1235,8 @@ function initProxyModeDropdown() {
   toggle.addEventListener('click', event => {
     event.stopPropagation();
     menu.hidden = !menu.hidden;
+    // 面板空间不足时把展开的菜单滚进可视区，避免选项被弹窗底边裁掉。
+    if (!menu.hidden) requestAnimationFrame(() => menu.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
     toggle.setAttribute('aria-expanded', String(!menu.hidden));
     root.dataset.open = String(!menu.hidden);
   });
@@ -1261,11 +1263,23 @@ function initProxyModeDropdown() {
   });
 }
 
+function accountRoleInfo() {
+  const role = state.account?.role;
+  return role === 'admin' ? { key: 'admin', label: '管理员' }
+    : role === 'vip' ? { key: 'vip', label: '特权用户' }
+    : { key: 'user', label: '普通用户' };
+}
+// 头像即换头像入口：不再单列“从相册更换头像”按钮，点头像本身走同一条 data-choose-avatar 链路。
+function accountIdentityHtml() {
+  const account = state.account;
+  const role = accountRoleInfo();
+  return `<section class="account-identity"><button type="button" class="account-avatar-pick" data-choose-avatar="1" aria-label="点击头像从相册更换"><img src="${esc(account.avatar || 'user.svg')}" alt=""><span class="account-avatar-pick-hint">更换头像</span></button><div><strong>${esc(account.username)}</strong><span class="account-role is-${role.key}">${role.label}</span></div></section>`;
+}
+
 function renderAccountManagement() {
   const account = state.account;
   content.innerHTML = `<div class="settings-page account-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回设置</button><h1>账号管理</h1>
-    ${account.loggedIn ? `<section class="account-identity"><img src="${esc(account.avatar || 'user.svg')}" alt=""><div><strong>${esc(account.username)}</strong><span>已登录应用账号</span></div></section>
-      <section class="settings-account"><h2>个人资料</h2><button type="button" data-choose-avatar="1">从相册更换头像</button></section>
+    ${account.loggedIn ? `${accountIdentityHtml()}
       <section class="settings-account"><h2>修改密码</h2><p>先验证旧密码，再设置新密码（1 位起，不限长度）。</p>
         <form id="password-form" class="password-form">
           <label for="old-password">旧密码</label><input id="old-password" type="password" autocomplete="current-password" required>
@@ -1281,8 +1295,7 @@ var accountPop = null;
 function buildAccountPopHtml() {
   const account = state.account;
   const body = account.loggedIn
-    ? `<section class="account-identity"><img src="${esc(account.avatar || 'user.svg')}" alt=""><div><strong>${esc(account.username)}</strong><span>已登录应用账号</span></div></section>
-      <section class="settings-account"><h2>个人资料</h2><button type="button" data-choose-avatar="1">从相册更换头像</button></section>
+    ? `${accountIdentityHtml()}
       <section class="settings-account"><h2>修改密码</h2><p>先验证旧密码，再设置新密码（1 位起，不限长度）。</p>
         <form id="password-form" class="password-form">
           <label for="old-password">旧密码</label><input id="old-password" type="password" autocomplete="current-password" required>
@@ -1331,9 +1344,10 @@ function updateProxySummary() {
 }
 var proxyPop = null;
 function buildProxyPopHtml() {
-  return `<div class="appearance-pop account-pop" role="dialog" aria-modal="true" aria-labelledby="proxy-title">
+  return `<div class="appearance-pop account-pop proxy-pop" role="dialog" aria-modal="true" aria-labelledby="proxy-title">
     <div class="appearance-head"><h2 id="proxy-title">黄果网络通道</h2><button type="button" class="appearance-close" data-proxy-close aria-label="关闭">✕</button></div>
     <p class="appearance-note">仅黄果/私密模式生效，红果永远直连不受影响；选择后立即生效，无需重启。</p>
+    <div class="settings-storage">${privateMode() ? '<button type="button" data-return-public>返回红果（公开模式）</button>' : '<button type="button" data-enter-private>进入私密模式</button>'}</div>
     <div class="proxy-test-row">
       <input id="proxy-address" class="settings-input" type="text" placeholder="代理地址 host:port，如 192.168.31.108:7893" value="${esc(state.proxy || '')}" autocomplete="off" aria-label="黄果代理地址">
       <button type="button" id="proxy-test" class="proxy-test-btn">检测</button>
@@ -1347,7 +1361,6 @@ function buildProxyPopHtml() {
         <button type="button" data-mode="3">走后端转发</button>
       </div>
     </div>
-    <div class="settings-storage">${privateMode() ? '<button type="button" data-return-public>返回红果（公开模式）</button>' : '<button type="button" data-enter-private>进入私密模式</button>'}</div>
   </div>`;
 }
 function ensureProxyPop() {

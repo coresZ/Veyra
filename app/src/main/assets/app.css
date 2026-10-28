@@ -361,7 +361,7 @@ html[data-theme=dark] #dock button.drag-over{color:var(--accent)}
 /* 弹窗开着时锁住背后的页面滚动，避免手指在遮罩上滑动把设置页带跑 */
 body.appearance-open #scroll{overflow:hidden}
 .appearance-pop{
-  width:100%;max-width:430px;max-height:86vh;overflow:auto;overscroll-behavior:contain;
+  width:100%;max-width:430px;max-height:90vh;overflow:auto;overscroll-behavior:contain;
   padding:16px;border-radius:calc(var(--mat-radius,22px) * var(--corner-scale,1));
   background:var(--mat-fill);border:1px solid var(--mat-edge);
   box-shadow:var(--mat-shadow,0 18px 46px rgba(12,10,6,.24));
@@ -407,3 +407,18 @@ body.appearance-open #scroll{overflow:hidden}
 html[data-theme=dark] .color-dot{background:var(--dot-d,var(--dot,#ccc))}
 .color-dot[aria-pressed=true]{box-shadow:0 0 0 2px var(--surface),0 0 0 4px var(--accent)}
 @media(prefers-reduced-motion:reduce){.appearance *{transition:none!important}}
+
+/* v0.18.111 第二轮改动：黄果网络通道弹窗加高 + 点头像换头像 + 用户名下方显示用户组 */
+.appearance-pop.proxy-pop{min-height:min(520px,88vh)}
+.proxy-pop .settings-storage{margin-top:2px}
+.proxy-mode-dd-menu{max-height:min(240px,40vh);overflow:auto}
+.account-avatar-pick{position:relative;flex:none;width:56px;height:56px;padding:0;border:0;background:none;border-radius:50%;overflow:visible}
+.account-avatar-pick img{width:56px;height:56px;object-fit:cover;border-radius:50%;background:var(--panel)}
+.account-avatar-pick:active{transform:scale(.94)}
+.account-avatar-pick-hint{position:absolute;left:50%;bottom:-3px;transform:translateX(-50%);padding:2px 6px;border-radius:calc(7px * var(--corner-scale,1));background:var(--mat-fill);border:1px solid var(--line);color:var(--muted);font-size:9px;line-height:1.4;white-space:nowrap;opacity:.92}
+.account-role{font-size:12px;font-weight:700;color:var(--muted)}
+.account-role.is-admin{color:#b3332a}
+.account-role.is-vip{color:#a0741f}
+.account-role.is-user{color:var(--muted)}
+html[data-theme=dark] .account-role.is-admin{color:#e57368}
+html[data-theme=dark] .account-role.is-vip{color:#e0b64a}
