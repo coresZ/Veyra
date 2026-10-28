@@ -4,6 +4,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: '可选：release tag 名（留空则按运行时间自动生成，如 v20261021-1430）'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -13,6 +18,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Apply DownloadManager concat-engine patch
+        run: |
+          if git apply --check --reverse patches/downloadmanager-concat-engine.patch 2>/dev/null; then
+            echo "concat-engine 补丁已包含在源码中，跳过"
+          else
+            git apply patches/downloadmanager-concat-engine.patch
+            echo "concat-engine 补丁已应用"
+          fi
 
       - name: Set up JDK
         uses: actions/setup-java@v4
@@ -50,6 +64,12 @@ jobs:
       - name: Prepare release assets
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
+          if [ "$TAG" = "$GITHUB_REF" ]; then
+            TAG="${{ github.event.inputs.tag_name }}"
+          fi
+          if [ -z "$TAG" ]; then
+            TAG="v$(date +%Y%m%d-%H%M)"
+          fi
           echo "TAG=$TAG" >> $GITHUB_ENV
           # APK 改名：Veyra-<tag>.apk（CI 正式签名 keystore 构建）
           cp app/build/outputs/apk/release/app-release.apk Veyra-$TAG.apk
@@ -72,5 +92,5 @@ jobs:
             "Veyra-$TAG.apk" \
             veyra-backend-latest.tar.gz \
             --title "Veyra $TAG" \
-            --notes "$TAG: 红果直连签名取流1080p + NAS按剧名目录 + WebUI分类/播放/下载 + 自动检测更新" \
+            --notes "$TAG: 红果直连签名取流1080p + NAS按剧名目录 + WebUI分类/播放/下载 + 自动检测更新 + 多集合并concat明文版" \
             --latest
