@@ -14,10 +14,6 @@ on:
         options:
           - release
           - debug
-  # workflow_dispatch 只能触发默认分支上已注册的 workflow，新增文件时靠分支 push 自触发。
-  push:
-    branches:
-      - 'fix/update-dialog-overlay'
 
 permissions:
   contents: read
