@@ -1303,6 +1303,51 @@ function renderAccountManagement() {
       <section class="settings-account"><h2>同步与登录</h2><button type="button" data-sync-now="1">立即同步片单</button><button type="button" data-logout="1" aria-live="polite">退出登录</button></section>` : `<section class="settings-account"><p>登录后可同步收藏和观看历史，并管理头像与密码。</p><button type="button" data-account-action="1">登录或注册</button></section>`}</div>`;
 }
 
+// v0.18.108：账号管理弹窗（复用外观弹窗 scrim/pop 结构，body 锁滚动共用 .appearance-open）
+var accountPop = null;
+function buildAccountPopHtml() {
+  const account = state.account;
+  const body = account.loggedIn
+    ? `<section class="account-identity"><img src="${esc(account.avatar || 'user.svg')}" alt=""><div><strong>${esc(account.username)}</strong><span>已登录应用账号</span></div></section>
+      <section class="settings-account"><h2>个人资料</h2><button type="button" data-choose-avatar="1">从相册更换头像</button></section>
+      <section class="settings-account"><h2>修改密码</h2><p>先验证旧密码，再设置新密码（1 位起，不限长度）。</p>
+        <form id="password-form" class="password-form">
+          <label for="old-password">旧密码</label><input id="old-password" type="password" autocomplete="current-password" required>
+          <label for="new-password">新密码</label><input id="new-password" type="password" autocomplete="new-password" required>
+          <label for="confirm-password">再次输入新密码</label><input id="confirm-password" type="password" autocomplete="new-password" required>
+          <p id="password-error" class="auth-error" role="alert" hidden></p><button type="submit">确认修改</button>
+        </form></section>
+      <section class="settings-account"><h2>同步与登录</h2><button type="button" data-sync-now="1">立即同步片单</button><button type="button" data-logout="1" aria-live="polite">退出登录</button></section>`
+    : `<section class="settings-account"><p>登录后可同步收藏和观看历史，并管理头像与密码。</p><button type="button" data-account-action="1">登录或注册</button></section>`;
+  return `<div class="appearance-pop account-pop" role="dialog" aria-modal="true" aria-labelledby="account-title">
+    <div class="appearance-head"><h2 id="account-title">账号管理</h2><button type="button" class="appearance-close" data-account-close aria-label="关闭">✕</button></div>
+    ${body}</div>`;
+}
+function ensureAccountPop() {
+  if (accountPop && document.body.contains(accountPop)) return accountPop;
+  accountPop = document.createElement('div');
+  accountPop.className = 'appearance-scrim';
+  accountPop.hidden = true;
+  accountPop.addEventListener('click', event => {
+    if (event.target === accountPop || event.target.closest('[data-account-close]')) { closeAccountPop(); return; }
+  });
+  document.body.appendChild(accountPop);
+  return accountPop;
+}
+function openAccountPop() {
+  ensureAccountPop();
+  accountPop.innerHTML = buildAccountPopHtml();
+  accountPop.hidden = false;
+  document.body.classList.add('appearance-open');
+}
+function closeAccountPop() {
+  if (!accountPop || accountPop.hidden) return;
+  accountPop.hidden = true;
+  document.body.classList.remove('appearance-open');
+}
+window.__veyraAccountBack = () => { if (accountPop && !accountPop.hidden) { closeAccountPop(); return true; } return false; };
+window.__veyraAccountOpen = () => !!(accountPop && !accountPop.hidden);
+
 function renderSearch() {
   const filters = privateMode() ? [['all', '全部'], ['ai-duanju', '成人短剧'], ['ai-manju', '成人漫剧'], ['ai-huanlian', 'AI换脸'], ['ai-mogai', 'AI魔改']] : [['all', '全部'], ['short', '短剧'], ['comic', '漫剧']];
   const all = asArray(state.search?.items);
@@ -1538,7 +1583,7 @@ function clearPredictivePreview() {
 
 window.hgPredictiveBackStart = fromRight => {
   clearPredictivePreview();
-  if (!downloadOverlay.hidden || (window.__veyraAppearanceOpen && window.__veyraAppearanceOpen())) return false;
+  if (!downloadOverlay.hidden || (window.__veyraAppearanceOpen && window.__veyraAppearanceOpen()) || (window.__veyraAccountOpen && window.__veyraAccountOpen())) return false;
   if (state.route === 'detail' && detailCard && authOverlay.hidden && confirmOverlay.hidden && updateOverlay.hidden && unlockOverlay.hidden) {
     detailCard.fromRight = fromRight;
     return detailCard.begin();
@@ -1613,6 +1658,7 @@ window.hgPredictiveBackCancel = () => {
 window.hgPredictiveBackCommit = () => {
   if (!downloadOverlay.hidden) { hideDownloadSheet(); return true; }
   if (window.__veyraAppearanceBack && window.__veyraAppearanceBack()) return true;
+  if (window.__veyraAccountBack && window.__veyraAccountBack()) return true;
   if (state.route === 'detail' && detailCard && downloadOverlay.hidden && authOverlay.hidden && confirmOverlay.hidden && updateOverlay.hidden && unlockOverlay.hidden) {
     detailCard.close(); return true;
   }
@@ -1985,6 +2031,7 @@ function returnFromDetail() {
 
 window.hgBack = () => {
   if (window.__veyraAppearanceBack && window.__veyraAppearanceBack()) return true;
+  if (window.__veyraAccountBack && window.__veyraAccountBack()) return true;
   if (!downloadOverlay.hidden) { hideDownloadSheet(); return true; }
   if (!unlockOverlay.hidden) { closeUnlock(); return true; }
   if (!authOverlay.hidden) { if (state.account.loggedIn) hideAuth(); return true; }
@@ -2256,7 +2303,7 @@ document.addEventListener('click', async event => {
     return;
   }
   if (event.target.closest('[data-apply-resources]')) { api('apply-hot-update').catch(error => toast(error.message, true)); return; }
-  if (event.target.closest('[data-account-management]')) { goAccountManagement(); return; }
+  if (event.target.closest('[data-account-management]')) { openAccountPop(); return; }
   const openUrl = event.target.closest('[data-open-url]');
   if (openUrl) {
     api('open-url', { url: openUrl.dataset.openUrl }).catch(error => toast(error.message, true));
@@ -2352,8 +2399,8 @@ function refreshCurrentDownloads() {
 }
   if (event.target.closest('[data-choose-avatar]')) { api('choose-avatar').catch(error => toast(error.message, true)); return; }
   if (event.target.closest('[data-account-action]')) {
-    if (state.account.loggedIn) goAccountManagement();
-    else showAuth();
+    if (state.account.loggedIn) openAccountPop();
+    else { if (accountPop && !accountPop.hidden) closeAccountPop(); showAuth(); }
     return;
   }
   if (event.target.closest('[data-sync-now]')) {
@@ -2371,6 +2418,7 @@ function refreshCurrentDownloads() {
     try {
       setAccount(await api('logout'));
       state.library = await api('library');
+      if (accountPop && !accountPop.hidden) closeAccountPop();
       setRoute('settings'); renderSettings();
       showAuth(); // 退出登录后锁住：未登录状态强制回到全屏登录页
       toast('已退出登录');
