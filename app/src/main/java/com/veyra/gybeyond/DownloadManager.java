@@ -524,11 +524,9 @@ final class DownloadManager {
             }
             // 下载完成后：逐集 ffmpeg 解密归一化并导出到公共 Downloads（文件管理器立即可见可播）
             String subDir = task.title.replaceAll("[\\\\/:*?\"<>|]", "_");
-            // 导出前先把剧集目录里的旧分集全部清掉（含「第03集_1793036388994.mp4」这种漂移名）。
-            // 上一轮下载留下的「第03集.mp4」只要还在盘上，这一轮写同名文件就会被 MediaStore 撞名
-            // 改成「第03集_<毫秒>.mp4」；而它又是异步删除的，删完不一定会立刻落地 —— 所以这里
-            // 先删、再轮询等它真的消失，然后才开始写。
-            purgeEpisodeArtifacts(subDir);
+            // 不再做「导出前清空剧集目录」：上一批下载的正式分集（第01/02/03集.mp4）会被当残留误删
+            //（用户实测：先下1-3集再下4-6集，4-6导出前把1-3全清了）。单文件同名撞 MediaStore 的
+            // 问题由 exportToDownloads 的 cleanExportTarget 在写之前逐文件处理，不需要全目录清。
             StringBuilder outList = new StringBuilder();
             int directOk = 0;
             for (int i = 0; i < plain.size(); i++) {
@@ -3429,84 +3427,34 @@ final class DownloadManager {
     private void purgePublicExports(Task t) {
         try {
             String base = t.title == null ? "" : t.title.replaceAll("[\\\\/:*?\"<>|]", "_");
-            String displayBase = base + ".mp4";
+            // 按用户要求：点删除 = 直接删掉 Download/Veyra/<剧名>/ 整个剧集文件夹，
+            // 一次清干净分集、合并产物、以及 MediaStore 撞名产生的「第NN集_<时间戳>.mp4」残留。
             if (Build.VERSION.SDK_INT >= 29) {
+                // ① MediaStore：按目录前缀删全部行（不再逐名正则匹配，漂移名也全覆盖）
                 String rel = Environment.DIRECTORY_DOWNLOADS + "/Veyra" + (base.isEmpty() ? "" : "/" + base);
-                try (android.database.Cursor c = context.getContentResolver().query(
-                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                        new String[]{MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME},
-                        MediaStore.Downloads.RELATIVE_PATH + "=?", new String[]{rel}, null)) {
-                    if (c != null) {
-                        while (c.moveToNext()) {
-                            String name = c.getString(1);
-                            if (name == null) continue;
-                            boolean hit = name.equals(displayBase)
-                                    || isEpisodeArtifact(name)        // 分集（含第01集_<毫秒>.mp4 这种漂移名）
-                                    || (!base.isEmpty() && name.length() > displayBase.length()
-                                    && name.startsWith(displayBase) && name.charAt(displayBase.length()) == '_'
-                                    && name.endsWith(".mp4"));
-                            if (hit) {
-                                try {
-                                    context.getContentResolver().delete(
-                                            ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)),
-                                            null, null);
-                                } catch (Exception ignored) { }
-                            }
-                        }
-                    }
-                } catch (Exception ignored) { }
-                // 补一刀文件系统删除：直写导出的文件可能还没被扫描入库（扫描是异步的），
-                // 只按 MediaStore 行删会漏，留下删不掉的产物。
                 try {
-                    File pub = new File(Environment.getExternalStoragePublicDirectory(
-                            Environment.DIRECTORY_DOWNLOADS), "Veyra/" + base);
-                    // 直写文件删除 + 复查重试：MediaStore 行删除是异步的，刚删完可能立刻又被扫描
-                    // 恢复，或文件正被占用导致 delete() 返回 false 但没人看 → 残留（用户实测的
-                    // 「第NN集_<时间戳>.mp4 删不掉」）。删不掉就重试几次，仍失败则写入 native.log，
-                    // 下次删除/清理再收尾，绝不静默跳过。
-                    File pubLog = new File(context.getFilesDir(), "native.log");
-                    for (int attempt = 0; attempt < 5; attempt++) {
-                        File[] kids = pub.listFiles();
-                        boolean dirty = false;
-                        if (kids != null) for (File f : kids) {
-                            if (!f.isFile()) continue;
-                            String n = f.getName();
-                            boolean hit = n.equals(displayBase) || isEpisodeArtifact(n)
-                                    || n.endsWith(".part")
-                                    || (!base.isEmpty() && n.startsWith(displayBase) && n.endsWith(".mp4"));
-                            if (hit) dirty |= !f.delete();
-                        }
-                        if (!dirty) break;
-                        if (attempt < 4) try { Thread.sleep(200); } catch (InterruptedException ie) { break; }
-                        if (attempt == 4) {
-                            StringBuilder sb = new StringBuilder();
-                            File[] left = pub.listFiles();
-                            if (left != null) for (File f : left) {
-                                String n = f.getName();
-                                if (n.equals(displayBase) || isEpisodeArtifact(n)) sb.append(n).append(';');
-                            }
-                            try (java.io.FileWriter fw = new java.io.FileWriter(pubLog, true)) {
-                                fw.append("删除残留（5 次仍删不掉）: ").append(sb).append('\n');
-                            } catch (Exception ignored) { }
-                        }
-                    }
+                    context.getContentResolver().delete(MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                            MediaStore.Downloads.RELATIVE_PATH + " LIKE ?", new String[]{rel + "%"});
                 } catch (Exception ignored) { }
-                // MediaStore 删除后尝试删物理空目录（部分 ROM 删除异步，删不掉就留给系统回收）
-                try {
-                    File pub = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Veyra/" + base);
-                    String[] left = pub.list();
-                    if (left != null && left.length == 0) pub.delete();
-                } catch (Exception ignored) { }
+                // ② 文件系统：递归删除整个剧集文件夹（文件 + 目录）。
+                //    MediaStore 删除是异步的，文件可能被扫描器短暂占用 → 复查重试 10 轮 × 300ms；
+                //    仍删不掉就把目录路径写进 native.log（记录现场，下次删除再收尾），绝不静默。
+                File pub = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Veyra/" + base);
+                File pubLog = new File(context.getFilesDir(), "native.log");
+                boolean gone = !pub.exists();
+                for (int attempt = 0; attempt < 10 && !gone; attempt++) {
+                    if (attempt > 0) try { Thread.sleep(300); } catch (InterruptedException ie) { break; }
+                    if (pub.exists()) deleteRecursive(pub);
+                    gone = !pub.exists();
+                }
+                if (!gone) {
+                    try (java.io.FileWriter fw = new java.io.FileWriter(pubLog, true)) {
+                        fw.append("删除残留目录（10 轮仍删不掉）: ").append(pub.getAbsolutePath()).append('\n');
+                    } catch (Exception ignored) { }
+                }
             } else {
                 File dir = new File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "Veyra/" + base);
-                if (dir.exists() && dir.isDirectory()) {
-                    File[] kids = dir.listFiles();
-                    if (kids != null) for (File f : kids) {
-                        if (f.isFile() && (f.getName().endsWith(".mp4") || f.getName().matches("第\\d+集\\.mp4"))) f.delete();
-                    }
-                    String[] left = dir.list();
-                    if (left == null || left.length == 0) dir.delete();
-                }
+                if (dir.exists() && dir.isDirectory()) deleteRecursive(dir);
             }
         } catch (Exception ignored) { }
     }
