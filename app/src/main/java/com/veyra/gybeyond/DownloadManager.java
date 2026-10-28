@@ -592,9 +592,11 @@ final class DownloadManager {
             }
             // 兜一层：个别 ROM 连「直接改名」都不让，名字会留成「第01集_1793034343293.mp4」。
             // 导出全部结束后再统一正名一次，保证文件管理器里看到的就是「第01集.mp4」。
-            // 连做两遍：MediaStore 的删除/改名是异步的，第一遍可能被它事后覆盖掉。
+            // MediaScanner 是异步的：写完后它可能稍后才做撞名去重，把文件改成「第NN集_<毫秒>.mp4」，
+            // 而正名若跑在扫描落地之前就白做。所以：等 1.2s（扫描窗口）→ 正名 → 再等 0.5s → 再正名复查。
+            try { Thread.sleep(1200); } catch (InterruptedException ignored) { }
             normalizeEpisodeNames(episodeDir(task.title));
-            try { Thread.sleep(250); } catch (InterruptedException ignored) { }
+            try { Thread.sleep(500); } catch (InterruptedException ignored) { }
             normalizeEpisodeNames(episodeDir(task.title));
             task.status = "ready";
             task.percent = 100;
@@ -3308,7 +3310,17 @@ final class DownloadManager {
                             context.getContentResolver().delete(ContentUris.withAppendedId(
                                     MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)), null, null);
                         } catch (Exception ignored) { }
-                        if (dir != null) { try { new File(dir, name).delete(); } catch (Exception ignored) { } }
+                        if (dir != null) {
+                            File df = new File(dir, name);
+                            try { df.delete(); } catch (Exception ignored) { }
+                            // MediaStore 行删除是异步的：行删了、底层文件可能还被扫描器挂一会儿。
+                            // 不等它真正消失就写同名文件 → 扫描器撞名 →「第NN集_<毫秒>.mp4」（时间戳根因）。
+                            // 这里轮询直到盘上确实没了（最多 3s），写新文件时目录里才是干净的。
+                            for (int w = 0; w < 15 && df.exists(); w++) {
+                                try { Thread.sleep(200); } catch (InterruptedException ie) { break; }
+                                try { df.delete(); } catch (Exception ignored) { }
+                            }
+                        }
                     }
                 }
             } catch (Exception ignored) { }
@@ -3427,29 +3439,39 @@ final class DownloadManager {
     private void purgePublicExports(Task t) {
         try {
             String base = t.title == null ? "" : t.title.replaceAll("[\\\\/:*?\"<>|]", "_");
-            // 按用户要求：点删除 = 直接删掉 Download/Veyra/<剧名>/ 整个剧集文件夹，
+            // 用户要求：点删除 = 直接删掉 Download/Veyra/<剧名>/ 整个剧集文件夹，
             // 一次清干净分集、合并产物、以及 MediaStore 撞名产生的「第NN集_<时间戳>.mp4」残留。
             if (Build.VERSION.SDK_INT >= 29) {
-                // ① MediaStore：按目录前缀删全部行（不再逐名正则匹配，漂移名也全覆盖）
                 String rel = Environment.DIRECTORY_DOWNLOADS + "/Veyra" + (base.isEmpty() ? "" : "/" + base);
-                try {
-                    context.getContentResolver().delete(MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                            MediaStore.Downloads.RELATIVE_PATH + " LIKE ?", new String[]{rel + "%"});
-                } catch (Exception ignored) { }
+                // ① MediaStore 删除：Downloads 集合 + Files 全库（部分 ROM 索引放在 Files 集合）按目录前缀删全部行。
+                //    先删行让扫描器放弃文件，底层删除是异步的 —— 删完必须等它落地再动盘，否则文件被占用删不掉。
+                for (int round = 0; round < 2; round++) {
+                    try {
+                        context.getContentResolver().delete(MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                                MediaStore.Downloads.RELATIVE_PATH + " LIKE ?", new String[]{rel + "%"});
+                    } catch (Exception ignored) { }
+                    try {
+                        context.getContentResolver().delete(MediaStore.Files.getContentUri("external"),
+                                MediaStore.Files.FileColumns.RELATIVE_PATH + " LIKE ?", new String[]{rel + "%"});
+                    } catch (Exception ignored) { }
+                    try { Thread.sleep(800); } catch (InterruptedException ignored) { }
+                }
                 // ② 文件系统：递归删除整个剧集文件夹（文件 + 目录）。
-                //    MediaStore 删除是异步的，文件可能被扫描器短暂占用 → 复查重试 10 轮 × 300ms；
+                //    扫描器/系统进程可能短暂占用文件，重试 20 轮 × 500ms（最长 10s）；
                 //    仍删不掉就把目录路径写进 native.log（记录现场，下次删除再收尾），绝不静默。
                 File pub = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Veyra/" + base);
                 File pubLog = new File(context.getFilesDir(), "native.log");
                 boolean gone = !pub.exists();
-                for (int attempt = 0; attempt < 10 && !gone; attempt++) {
-                    if (attempt > 0) try { Thread.sleep(300); } catch (InterruptedException ie) { break; }
+                for (int attempt = 0; attempt < 20 && !gone; attempt++) {
+                    if (attempt > 0) try { Thread.sleep(500); } catch (InterruptedException ie) { break; }
                     if (pub.exists()) deleteRecursive(pub);
                     gone = !pub.exists();
                 }
                 if (!gone) {
                     try (java.io.FileWriter fw = new java.io.FileWriter(pubLog, true)) {
-                        fw.append("删除残留目录（10 轮仍删不掉）: ").append(pub.getAbsolutePath()).append('\n');
+                        fw.append("删除残留目录（20 轮仍删不掉）: ").append(pub.getAbsolutePath()).append('\n');
+                        String[] left = pub.list();
+                        if (left != null) fw.append("  残留: ").append(String.join(";", left)).append('\n');
                     } catch (Exception ignored) { }
                 }
             } else {
