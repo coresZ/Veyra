@@ -50,7 +50,7 @@ jobs:
 
       - name: Restore signing keystore
         run: |
-          echo "${{ secrets.Veyra_KEYSTORE_B64 }}" | base64 -d > $RUNNER_TEMP/veyra-release.keystore
+          echo "${{ secrets.VEYRA_KEYSTORE_B64 }}" | base64 -d > $RUNNER_TEMP/veyra-release.keystore
 
       - name: Build release APK
         env:

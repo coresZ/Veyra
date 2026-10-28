@@ -273,7 +273,7 @@ function showUpdate(result) {
   document.getElementById('update-progress').hidden = true;
   updateDownloadButton.textContent = '立即下载';
   updateDownloadButton.disabled = false;
-  // 弹窗重新显示时把左按钮复位成静态文案，别残留上一轮的“后台下载中…”。
+  // 弹窗重新显示时把左按钮复位成静态文案，别残留上一轮的“后台下载”。
   updateLaterButton.textContent = '取消';
   updateLaterButton.disabled = false;
   // 【修复 Bug1】z-index 已提到所有弹层之上；再把节点挪到 #app 末尾，
@@ -324,8 +324,9 @@ updateDownloadButton.addEventListener('click', async () => {
   if (updateDownloading) return;
   updateDownloading = true;
   updateDownloadButton.disabled = true;
-  // 【修复 Bug2】下载期间不再禁用取消入口，只把文案切成后台状态提示，弹窗随时能关。
-  updateLaterButton.textContent = '后台下载中…';
+  // 【修复 Bug2】下载期间不再禁用取消入口。左键是“转到后台”的动作入口，
+  // 所以保持动作文案“后台下载”；只有点了它之后才进入后台下载状态。
+  updateLaterButton.textContent = '后台下载';
   updateDownloadButton.textContent = '正在下载…';
   window.hgUpdateProgress(0);
   try {
@@ -2352,14 +2353,33 @@ document.addEventListener('submit', async event => {
   catch (failure) { error.textContent = failure.message || '修改失败，请稍后重试'; error.hidden = false; button.disabled = false; }
 });
 
-// ---- 全局左右滑动：底栏页之间 + 页内子标签之间（带滑入滑出过渡）----
+// ---- 全局左右滑动：底栏页之间 + 页内子标签之间（实时跟手，带滑入滑出过渡）----
 const DOCK_ORDER = ['home', 'adult', 'ai', 'library'];
 const LIBRARY_TABS = ['history', 'bookmarks', 'downloads'];
-let swiping = false;
-let swipeTouch = null;
+const SWIPE_MIN = 56;       // 触发翻页的最小横向位移
+const SWIPE_MAX_MS = 900;   // 拖太久就不算翻页手势
+let swiping = false;        // 翻页动画进行中
+let swipeStart = null;      // { x, y, at, target }
+let swipeAxis = null;       // null | 'x' | 'y'
+let swipeAction = null;     // 本次手势要执行的切换（null = 已在首/末页）
 
-// 这些元素自身要横向滚动/轮播，手势让位给它们，不触发翻页。
-const SWIPE_IGNORE = '.filter-row,.home-tag-scroll,.film-row,.hero,.search-form,input,textarea,select,.proxy-mode-dd-menu,.episode-grid';
+// 只有"自身能横向滚动"的容器才让位（筛选条、tag 条、轮播等）。
+// 首页 .film-row 是 3 列网格、根本不能横滚，所以不能拦——否则触摸落在推荐卡片上就没反应。
+const SWIPE_IGNORE = '.filter-row,.home-tag-scroll,.search-form,input,textarea,select,.proxy-mode-dd-menu,.episode-grid';
+
+// 向上找还能横向滚动的祖先：还能滚就让它滚，滚到头了才把手势交回页面切换。
+function swipeScrollOwner(node, dx) {
+  let el = node;
+  while (el && el !== scroll && el.nodeType === 1) {
+    if (el.scrollWidth - el.clientWidth > 4) {
+      const max = el.scrollWidth - el.clientWidth;
+      if (dx < 0 && el.scrollLeft < max - 1) return el;
+      if (dx > 0 && el.scrollLeft > 1) return el;
+    }
+    el = el.parentElement;
+  }
+  return null;
+}
 
 function swipeSubTabs() {
   if (state.route === 'library') return { list: LIBRARY_TABS, current: state.libraryTab };
@@ -2370,44 +2390,60 @@ function swipeSubTabs() {
   return { list: [], current: null };
 }
 
-function applySwipeSub(sub, delta) {
-  const next = sub.list[sub.list.indexOf(sub.current) + delta];
-  if (state.route === 'library') { state.libraryTab = next; renderLibrary(); scroll.scrollTop = 0; }
-  else goCategory(state.tab, next);
-}
-
-function applySwipeDock(delta) {
+// 先切页内子标签，切到头才溢出到底栏页，都没有就是边界（null → 跟手阻尼，不翻页）。
+function swipeResolve(delta) {
+  const sub = swipeSubTabs();
+  const pos = sub.list.indexOf(sub.current);
+  if (sub.list.length > 1 && pos >= 0 && sub.list[pos + delta] !== undefined) {
+    const next = sub.list[pos + delta];
+    return () => {
+      if (state.route === 'library') { state.libraryTab = next; renderLibrary(); scroll.scrollTop = 0; }
+      else goCategory(state.tab, next);
+    };
+  }
   const index = DOCK_ORDER.indexOf(state.route === 'category' ? state.tab : state.route);
   const next = DOCK_ORDER[index + delta];
-  if (next) navigateDock(next);
-  return Boolean(next);
+  if (next) return () => navigateDock(next);
+  return null;
 }
 
-// 先滑动离场，再渲染目标页，然后从另一侧滑入；transitionend 兜底用定时器，避免动画被打断卡住。
-function swipeTransition(delta, apply) {
-  if (swiping) return;
+function swipePaint(px, ms, fade) {
+  scroll.style.transition = ms
+    ? `transform ${ms}ms cubic-bezier(.22,.61,.36,1)${fade ? `,opacity ${Math.round(ms * 0.8)}ms ease` : ''}`
+    : 'none';
+  scroll.style.transform = `translateX(${px}px)`;
+}
+
+function swipeClear() {
+  scroll.style.transition = '';
+  scroll.style.transform = '';
+  scroll.style.opacity = '';
+}
+
+function swipeSettleBack() {
+  swipePaint(0, 170, true);
+  scroll.style.opacity = '';
+  setTimeout(swipeClear, 180);
+}
+
+// 顺着手指方向滑出 → 渲染目标页 → 从另一侧滑入；定时器兜底，避免动画被打断卡住。
+function swipeCommit(dir) {
   swiping = true;
-  const out = delta < 0 ? -26 : 26;
-  scroll.style.transition = 'transform .14s ease,opacity .14s ease';
-  scroll.style.transform = `translateX(${out}px)`;
+  const width = scroll.clientWidth || 320;
+  const out = dir * (width * 0.3 + 24);
+  swipePaint(out, 130, true);
   scroll.style.opacity = '0';
   setTimeout(() => {
-    let moved = true;
-    try { moved = apply() !== false; } catch (error) { moved = false; }
-    scroll.style.transition = 'none';
-    scroll.style.transform = `translateX(${-out}px)`;
+    const action = swipeAction;
+    swipeAction = null;
+    if (action) { try { action(); } catch (error) { /* 切换失败就留在原页 */ } }
+    swipePaint(-out * 0.4, 0, false);
     requestAnimationFrame(() => {
-      scroll.style.transition = 'transform .18s cubic-bezier(.22,.61,.36,1),opacity .18s ease';
-      scroll.style.transform = 'translateX(0)';
+      swipePaint(0, 185, true);
       scroll.style.opacity = '';
-      setTimeout(() => {
-        scroll.style.transition = '';
-        scroll.style.transform = '';
-        scroll.style.opacity = '';
-        swiping = false;
-      }, 190);
+      setTimeout(() => { swipeClear(); swiping = false; }, 195);
     });
-  }, 145);
+  }, 135);
 }
 
 function swipeBlocked() {
@@ -2418,33 +2454,57 @@ function swipeBlocked() {
 
 scroll.addEventListener('touchstart', event => {
   const touch = event.touches[0];
-  if (!touch || swipeBlocked() || !DOCK_ORDER.includes(state.route === 'category' ? state.tab : state.route)) {
-    swipeTouch = null;
+  // 卡片转场进行中一律不抢手势
+  if (!touch || swiping || swipeBlocked() || document.querySelector('.card-transition-stage')
+    || !DOCK_ORDER.includes(state.route === 'category' ? state.tab : state.route)) {
+    swipeStart = null;
     return;
   }
-  if (event.target.closest && event.target.closest(SWIPE_IGNORE)) { swipeTouch = null; return; }
-  swipeTouch = { x: touch.clientX, y: touch.clientY, at: Date.now() };
+  if (event.target.closest && event.target.closest(SWIPE_IGNORE)) { swipeStart = null; return; }
+  swipeStart = { x: touch.clientX, y: touch.clientY, at: Date.now(), target: event.target };
+  swipeAxis = null;
+  swipeAction = null;
 }, { passive: true });
 
-scroll.addEventListener('touchend', event => {
-  const start = swipeTouch;
-  swipeTouch = null;
-  if (!start || swipeBlocked()) return;
-  const touch = event.changedTouches[0];
+scroll.addEventListener('touchmove', event => {
+  const start = swipeStart;
+  if (!start) return;
+  const touch = event.touches[0];
   if (!touch) return;
   const dx = touch.clientX - start.x, dy = touch.clientY - start.y;
-  if (Date.now() - start.at > 800 || Math.abs(dx) < 64 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
-  const delta = dx < 0 ? 1 : -1;   // 手指左滑=前进，右滑=后退
-  const sub = swipeSubTabs();
-  const pos = sub.list.indexOf(sub.current);
-  if (sub.list.length > 1 && pos >= 0 && sub.list[pos + delta] !== undefined) {
-    swipeTransition(delta, () => applySwipeSub(sub, delta));
-  } else {
-    swipeTransition(delta, () => applySwipeDock(delta));
+  if (!swipeAxis) {
+    if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+    if (Math.abs(dx) < Math.abs(dy) * 1.3) { swipeAxis = 'y'; swipeStart = null; return; }  // 竖向滚动，交还页面
+    if (swipeScrollOwner(start.target, dx)) { swipeStart = null; return; }                   // 让位给横滚容器
+    swipeAxis = 'x';
+    swipeAction = swipeResolve(dx < 0 ? 1 : -1);
   }
+  if (swipeAxis !== 'x') return;
+  if (event.cancelable) event.preventDefault();
+  // 实时跟手；已在首/末页时加阻尼，明确告诉用户"没有下一页了"
+  swipePaint(swipeAction ? dx : dx * 0.3, 0, false);
+}, { passive: false });
+
+scroll.addEventListener('touchend', event => {
+  const start = swipeStart;
+  const axis = swipeAxis, action = swipeAction;
+  swipeStart = null; swipeAxis = null; swipeAction = null;
+  if (!start || axis !== 'x') return;
+  if (swiping) return;
+  const touch = event.changedTouches[0];
+  if (!touch) { swipeSettleBack(); return; }
+  const dx = touch.clientX - start.x, dy = touch.clientY - start.y;
+  const passed = Date.now() - start.at <= SWIPE_MAX_MS
+    && Math.abs(dx) >= SWIPE_MIN && Math.abs(dx) >= Math.abs(dy) * 1.3;
+  if (!passed || !action) { swipeSettleBack(); return; }
+  swipeAction = action;
+  swipeCommit(dx < 0 ? -1 : 1);   // 手指左滑=前进，右滑=后退
 }, { passive: true });
 
-scroll.addEventListener('touchcancel', () => { swipeTouch = null; });
+scroll.addEventListener('touchcancel', () => {
+  if (swipeAxis === 'x') swipeSettleBack();
+  swipeStart = null; swipeAxis = null; swipeAction = null;
+});
 
 function navigateDock(tab) {
   if (state.route === 'detail') state.previous = null;
