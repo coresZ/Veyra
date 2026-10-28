@@ -1180,58 +1180,10 @@ function renderSettings() {
   content.innerHTML = `<div class="settings-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回我的</button><h1>设置</h1>
     ${window.renderAppearance ? window.renderAppearance() : ''}
     <section><button type="button" class="settings-link" data-account-management="1"><span><strong>账号管理</strong><small>${state.account.loggedIn ? esc(state.account.username) : '登录或注册账号'}</small></span>${icon('arrow')}</button></section>
-    <section class="update-settings"><div><h2>黄果网络通道</h2><p>仅黄果/私密模式生效，红果永远直连不受影响；选择后立即生效，无需重启。</p>
-      <div class="proxy-test-row">
-        <input id="proxy-address" class="settings-input" type="text" placeholder="代理地址 host:port，如 192.168.31.108:7893" value="${esc(state.proxy || '')}" autocomplete="off" aria-label="黄果代理地址">
-        <button type="button" id="proxy-test" class="proxy-test-btn">检测</button>
-      </div>
-      <span id="proxy-test-result" class="proxy-test-result" hidden></span>
-      <div class="proxy-mode-dd" id="proxy-mode-dd">
-        <button type="button" class="proxy-mode-dd-btn" data-mode-toggle aria-haspopup="listbox" aria-expanded="false"><span id="proxy-mode-label">走后端转发</span>${icon('arrow')}</button>
-        <div class="proxy-mode-dd-menu" id="proxy-mode-menu" hidden>
-          <button type="button" data-mode="1">仅直连</button>
-          <button type="button" data-mode="2">仅代理</button>
-          <button type="button" data-mode="3">走后端转发</button>
-        </div>
-      </div>
-      ${privateMode() ? '<button type="button" data-return-public>返回红果（公开模式）</button>' : '<button type="button" data-enter-private>进入私密模式</button>'}
-      </div></section>
-    <section class="settings-storage"><h2>关于 Veyra</h2><p>项目地址：<button type="button" class="settings-url" data-open-url="https://github.com/gybeyond1/Veyra">github.com/gybeyond1/Veyra</button> <button type="button" data-check-update>检查更新</button></p><p>Veyra 基于开源项目二次开发，遵循 GPL-3.0 开源协议发布，完整源码、自建后端与 Docker 部署说明见仓库。</p></section></div>`;
+    <section><button type="button" class="settings-link" data-proxy-open><span><strong>黄果网络通道</strong><small data-proxy-summary>${esc(proxySummaryText())}</small></span>${icon('arrow')}</button></section>
+    <section><button type="button" class="settings-link" data-about-open><span><strong>关于 Veyra</strong><small>项目地址 · GPL-3.0 开源</small></span>${icon('arrow')}</button></section></div>`;
   if (window.bindAppearance) window.bindAppearance();
   api('hot-update-status').then(window.hgHotUpdateStatus).catch(() => {});
-  api('get-proxy').then(value => {
-    state.proxy = value || '';
-    const input = document.getElementById('proxy-address');
-    if (input) input.value = state.proxy;
-  }).catch(() => {});
-  api('get-proxy-mode').then(value => {
-    state.proxyMode = Number(value) || 3;
-    setProxyModeLabel(state.proxyMode);
-  }).catch(() => {});
-  const proxyInput = document.getElementById('proxy-address');
-  if (proxyInput) {
-    proxyInput.addEventListener('change', () => {
-      const value = proxyInput.value.trim();
-      state.proxy = value;
-      api('set-proxy', { value }).then(() => toast('代理地址已保存')).catch(error => toast(error.message, true));
-    });
-  }
-  const testBtn = document.getElementById('proxy-test');
-  const testResult = document.getElementById('proxy-test-result');
-  if (testBtn && testResult) {
-    testBtn.addEventListener('click', () => {
-      testBtn.disabled = true; testBtn.textContent = '检测中…'; testResult.hidden = true;
-      api('test-proxy').then(value => {
-        const v = value || {};
-        testResult.textContent = `通 · ${Number(v.ms) || '?'}ms`;
-        testResult.classList.remove('fail'); testResult.classList.add('ok'); testResult.hidden = false;
-      }).catch(error => {
-        testResult.textContent = `不通：${error.message}`;
-        testResult.classList.remove('ok'); testResult.classList.add('fail'); testResult.hidden = false;
-      }).finally(() => { testBtn.disabled = false; testBtn.textContent = '检测'; });
-    });
-  }
-  initProxyModeDropdown();
 }
 
 const PROXY_MODE_NAMES = { 1: '仅直连', 2: '仅代理', 3: '走后端转发' };
@@ -1251,6 +1203,7 @@ function setProxyModeLabel(mode) {
       item.toggleAttribute('disabled', Number(item.dataset.mode) === 3 && !roleCanUseBackend());
     }
   }
+  updateProxySummary();
 }
 function initProxyModeDropdown() {
   const root = document.getElementById('proxy-mode-dd');
@@ -1347,6 +1300,123 @@ function closeAccountPop() {
 }
 window.__veyraAccountBack = () => { if (accountPop && !accountPop.hidden) { closeAccountPop(); return true; } return false; };
 window.__veyraAccountOpen = () => !!(accountPop && !accountPop.hidden);
+// v0.18.109：黄果网络通道/关于 Veyra 弹窗化（同账号管理弹窗，复用外观 scrim/pop 结构）
+function proxySummaryText() {
+  const m = PROXY_MODE_NAMES[state.proxyMode] || '走后端转发';
+  return state.proxy ? `${m} · ${state.proxy}` : m;
+}
+function updateProxySummary() {
+  const el = document.querySelector('[data-proxy-summary]');
+  if (el) el.textContent = proxySummaryText();
+}
+var proxyPop = null;
+function buildProxyPopHtml() {
+  return `<div class="appearance-pop account-pop" role="dialog" aria-modal="true" aria-labelledby="proxy-title">
+    <div class="appearance-head"><h2 id="proxy-title">黄果网络通道</h2><button type="button" class="appearance-close" data-proxy-close aria-label="关闭">✕</button></div>
+    <p class="appearance-note">仅黄果/私密模式生效，红果永远直连不受影响；选择后立即生效，无需重启。</p>
+    <div class="proxy-test-row">
+      <input id="proxy-address" class="settings-input" type="text" placeholder="代理地址 host:port，如 192.168.31.108:7893" value="${esc(state.proxy || '')}" autocomplete="off" aria-label="黄果代理地址">
+      <button type="button" id="proxy-test" class="proxy-test-btn">检测</button>
+    </div>
+    <span id="proxy-test-result" class="proxy-test-result" hidden></span>
+    <div class="proxy-mode-dd" id="proxy-mode-dd">
+      <button type="button" class="proxy-mode-dd-btn" data-mode-toggle aria-haspopup="listbox" aria-expanded="false"><span id="proxy-mode-label">${esc(PROXY_MODE_NAMES[state.proxyMode] || '走后端转发')}</span>${icon('arrow')}</button>
+      <div class="proxy-mode-dd-menu" id="proxy-mode-menu" hidden>
+        <button type="button" data-mode="1">仅直连</button>
+        <button type="button" data-mode="2">仅代理</button>
+        <button type="button" data-mode="3">走后端转发</button>
+      </div>
+    </div>
+    <div class="settings-storage">${privateMode() ? '<button type="button" data-return-public>返回红果（公开模式）</button>' : '<button type="button" data-enter-private>进入私密模式</button>'}</div>
+  </div>`;
+}
+function ensureProxyPop() {
+  if (proxyPop && document.body.contains(proxyPop)) return proxyPop;
+  proxyPop = document.createElement('div');
+  proxyPop.className = 'appearance-scrim';
+  proxyPop.hidden = true;
+  proxyPop.addEventListener('click', event => {
+    if (event.target === proxyPop || event.target.closest('[data-proxy-close]')) { closeProxyPop(); return; }
+  });
+  document.body.appendChild(proxyPop);
+  return proxyPop;
+}
+function openProxyPop() {
+  ensureProxyPop();
+  proxyPop.innerHTML = buildProxyPopHtml();
+  proxyPop.hidden = false;
+  document.body.classList.add('appearance-open');
+  api('get-proxy').then(value => {
+    state.proxy = value || '';
+    const input = document.getElementById('proxy-address');
+    if (input) input.value = state.proxy;
+    updateProxySummary();
+  }).catch(() => {});
+  api('get-proxy-mode').then(value => { setProxyModeLabel(Number(value) || 3); }).catch(() => {});
+  const input = document.getElementById('proxy-address');
+  if (input) input.addEventListener('change', () => {
+    const value = input.value.trim();
+    state.proxy = value;
+    api('set-proxy', { value }).then(() => { toast('代理地址已保存'); updateProxySummary(); }).catch(error => toast(error.message, true));
+  });
+  const testBtn = document.getElementById('proxy-test');
+  const testResult = document.getElementById('proxy-test-result');
+  if (testBtn && testResult) {
+    testBtn.addEventListener('click', () => {
+      testBtn.disabled = true; testBtn.textContent = '检测中…'; testResult.hidden = true;
+      api('test-proxy').then(value => {
+        const v = value || {};
+        testResult.textContent = `通 · ${Number(v.ms) || '?'}ms`;
+        testResult.classList.remove('fail'); testResult.classList.add('ok'); testResult.hidden = false;
+      }).catch(error => {
+        testResult.textContent = `不通：${error.message}`;
+        testResult.classList.remove('ok'); testResult.classList.add('fail'); testResult.hidden = false;
+      }).finally(() => { testBtn.disabled = false; testBtn.textContent = '检测'; });
+    });
+  }
+  initProxyModeDropdown();
+}
+function closeProxyPop() {
+  if (!proxyPop || proxyPop.hidden) return;
+  proxyPop.hidden = true;
+  document.body.classList.remove('appearance-open');
+}
+window.__veyraProxyBack = () => { if (proxyPop && !proxyPop.hidden) { closeProxyPop(); return true; } return false; };
+window.__veyraProxyOpen = () => !!(proxyPop && !proxyPop.hidden);
+
+var aboutPop = null;
+function buildAboutPopHtml() {
+  return `<div class="appearance-pop account-pop" role="dialog" aria-modal="true" aria-labelledby="about-title">
+    <div class="appearance-head"><h2 id="about-title">关于 Veyra</h2><button type="button" class="appearance-close" data-about-close aria-label="关闭">✕</button></div>
+    <p class="appearance-note">项目地址：<button type="button" class="settings-url" data-open-url="https://github.com/gybeyond1/Veyra">github.com/gybeyond1/Veyra</button> <button type="button" data-check-update>检查更新</button></p>
+    <p class="appearance-note">Veyra 基于开源项目二次开发，遵循 GPL-3.0 开源协议发布，完整源码、自建后端与 Docker 部署说明见仓库。</p>
+  </div>`;
+}
+function ensureAboutPop() {
+  if (aboutPop && document.body.contains(aboutPop)) return aboutPop;
+  aboutPop = document.createElement('div');
+  aboutPop.className = 'appearance-scrim';
+  aboutPop.hidden = true;
+  aboutPop.addEventListener('click', event => {
+    if (event.target === aboutPop || event.target.closest('[data-about-close]')) { closeAboutPop(); return; }
+  });
+  document.body.appendChild(aboutPop);
+  return aboutPop;
+}
+function openAboutPop() {
+  ensureAboutPop();
+  aboutPop.innerHTML = buildAboutPopHtml();
+  aboutPop.hidden = false;
+  document.body.classList.add('appearance-open');
+}
+function closeAboutPop() {
+  if (!aboutPop || aboutPop.hidden) return;
+  aboutPop.hidden = true;
+  document.body.classList.remove('appearance-open');
+}
+window.__veyraAboutBack = () => { if (aboutPop && !aboutPop.hidden) { closeAboutPop(); return true; } return false; };
+window.__veyraAboutOpen = () => !!(aboutPop && !aboutPop.hidden);
+
 
 function renderSearch() {
   const filters = privateMode() ? [['all', '全部'], ['ai-duanju', '成人短剧'], ['ai-manju', '成人漫剧'], ['ai-huanlian', 'AI换脸'], ['ai-mogai', 'AI魔改']] : [['all', '全部'], ['short', '短剧'], ['comic', '漫剧']];
@@ -1583,7 +1653,7 @@ function clearPredictivePreview() {
 
 window.hgPredictiveBackStart = fromRight => {
   clearPredictivePreview();
-  if (!downloadOverlay.hidden || (window.__veyraAppearanceOpen && window.__veyraAppearanceOpen()) || (window.__veyraAccountOpen && window.__veyraAccountOpen())) return false;
+  if (!downloadOverlay.hidden || (window.__veyraAppearanceOpen && window.__veyraAppearanceOpen()) || (window.__veyraAccountOpen && window.__veyraAccountOpen()) || (window.__veyraProxyOpen && window.__veyraProxyOpen()) || (window.__veyraAboutOpen && window.__veyraAboutOpen())) return false;
   if (state.route === 'detail' && detailCard && authOverlay.hidden && confirmOverlay.hidden && updateOverlay.hidden && unlockOverlay.hidden) {
     detailCard.fromRight = fromRight;
     return detailCard.begin();
@@ -1659,6 +1729,8 @@ window.hgPredictiveBackCommit = () => {
   if (!downloadOverlay.hidden) { hideDownloadSheet(); return true; }
   if (window.__veyraAppearanceBack && window.__veyraAppearanceBack()) return true;
   if (window.__veyraAccountBack && window.__veyraAccountBack()) return true;
+  if (window.__veyraProxyBack && window.__veyraProxyBack()) return true;
+  if (window.__veyraAboutBack && window.__veyraAboutBack()) return true;
   if (state.route === 'detail' && detailCard && downloadOverlay.hidden && authOverlay.hidden && confirmOverlay.hidden && updateOverlay.hidden && unlockOverlay.hidden) {
     detailCard.close(); return true;
   }
@@ -2032,6 +2104,8 @@ function returnFromDetail() {
 window.hgBack = () => {
   if (window.__veyraAppearanceBack && window.__veyraAppearanceBack()) return true;
   if (window.__veyraAccountBack && window.__veyraAccountBack()) return true;
+  if (window.__veyraProxyBack && window.__veyraProxyBack()) return true;
+  if (window.__veyraAboutBack && window.__veyraAboutBack()) return true;
   if (!downloadOverlay.hidden) { hideDownloadSheet(); return true; }
   if (!unlockOverlay.hidden) { closeUnlock(); return true; }
   if (!authOverlay.hidden) { if (state.account.loggedIn) hideAuth(); return true; }
@@ -2304,6 +2378,8 @@ document.addEventListener('click', async event => {
   }
   if (event.target.closest('[data-apply-resources]')) { api('apply-hot-update').catch(error => toast(error.message, true)); return; }
   if (event.target.closest('[data-account-management]')) { openAccountPop(); return; }
+  if (event.target.closest('[data-proxy-open]')) { openProxyPop(); return; }
+  if (event.target.closest('[data-about-open]')) { openAboutPop(); return; }
   const openUrl = event.target.closest('[data-open-url]');
   if (openUrl) {
     api('open-url', { url: openUrl.dataset.openUrl }).catch(error => toast(error.message, true));
