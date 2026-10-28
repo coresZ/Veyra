@@ -1155,10 +1155,6 @@ function renderSettings() {
   content.innerHTML = `<div class="settings-page"><button type="button" class="listing-back" data-back="1">${icon('back')} 返回我的</button><h1>设置</h1>
     ${window.renderAppearance ? window.renderAppearance() : ''}
     <section><button type="button" class="settings-link" data-account-management="1"><span><strong>账号管理</strong><small>${state.account.loggedIn ? esc(state.account.username) : '登录或注册账号'}</small></span>${icon('arrow')}</button></section>
-    <section class="settings-library"><h2>片单管理</h2><p>${state.account.loggedIn ? '清空后会同步到当前账号的其他设备。' : '清空当前设备保存的片单。'}</p>
-      <button type="button" data-clear="history" ${asArray(state.library?.progress).length ? '' : 'disabled'}>清空观看历史</button>
-      <button type="button" data-clear="bookmarks" ${asArray(state.library?.bookmarks).length ? '' : 'disabled'}>清空我的收藏</button></section>
-    <section class="settings-library"><h2>下载管理</h2><p>手机下载到本地，NAS 下载由后端处理并合并。</p><button type="button" data-downloads="1">打开下载管理</button></section>
     <section class="update-settings"><div><h2>黄果网络通道</h2><p>仅黄果/私密模式生效，红果永远直连不受影响；选择后立即生效，无需重启。</p>
       <div class="proxy-test-row">
         <input id="proxy-address" class="settings-input" type="text" placeholder="代理地址 host:port，如 192.168.31.108:7893" value="${esc(state.proxy || '')}" autocomplete="off" aria-label="黄果代理地址">
@@ -1173,7 +1169,6 @@ function renderSettings() {
           <button type="button" data-mode="3">走后端转发</button>
         </div>
       </div></div></section>
-    <section class="update-settings"><div><h2>界面与站点资源</h2><p data-resource-status>后台自动检查，已下载的更新在合适时机启用。</p><button type="button" data-apply-resources hidden>启用已下载资源</button></div><button type="button" data-check-resources>检查资源</button></section>
     <section class="update-settings"><div><h2>应用更新</h2><button type="button" class="app-version ${updateAvailable ? 'has-update' : ''}" aria-label="当前版本 ${esc(appVersion)}"><span class="app-version-text">版本 ${appVersion ? `v${esc(appVersion)}` : '读取中…'}</span></button><p>启动后自动检查，也可以在这里手动检查。</p></div><button type="button" data-check-update>检查更新</button></section>
     <section class="settings-storage"><h2>内容模式</h2><p>${state.privateUnlocked ? '该账号已解锁私密模式，切换无需动态码。' : '首次进入私密模式需输入后端动态码（鉴权一次，跟账号走）。'}</p>${privateMode() ? '<button type="button" data-return-public>返回红果（公开模式）</button>' : '<button type="button" data-enter-private>进入私密模式</button>'}</section><section class="settings-storage"><h2>本地存储</h2><button type="button" data-clear="cache">清理内容缓存</button></section>
     <section class="settings-storage"><h2>关于 Veyra</h2><p>项目地址：<button type="button" class="settings-url" data-open-url="https://github.com/gybeyond1/Veyra">github.com/gybeyond1/Veyra</button></p><p>Veyra 基于开源项目二次开发，遵循 GPL-3.0 开源协议发布，完整源码、自建后端与 Docker 部署说明见仓库。</p></section></div>`;
