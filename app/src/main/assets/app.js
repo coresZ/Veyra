@@ -1537,6 +1537,7 @@ function clearPredictivePreview() {
 
 window.hgPredictiveBackStart = fromRight => {
   clearPredictivePreview();
+  if (!downloadOverlay.hidden || (window.__veyraAppearanceOpen && window.__veyraAppearanceOpen())) return false;
   if (state.route === 'detail' && detailCard && authOverlay.hidden && confirmOverlay.hidden && updateOverlay.hidden && unlockOverlay.hidden) {
     detailCard.fromRight = fromRight;
     return detailCard.begin();
@@ -1609,7 +1610,9 @@ window.hgPredictiveBackCancel = () => {
 };
 
 window.hgPredictiveBackCommit = () => {
-  if (state.route === 'detail' && detailCard && authOverlay.hidden && confirmOverlay.hidden && updateOverlay.hidden && unlockOverlay.hidden) {
+  if (!downloadOverlay.hidden) { hideDownloadSheet(); return true; }
+  if (window.__veyraAppearanceBack && window.__veyraAppearanceBack()) return true;
+  if (state.route === 'detail' && detailCard && downloadOverlay.hidden && authOverlay.hidden && confirmOverlay.hidden && updateOverlay.hidden && unlockOverlay.hidden) {
     detailCard.close(); return true;
   }
   if (!predictivePreview) return window.hgBack();
@@ -1622,13 +1625,7 @@ window.hgPredictiveBackCommit = () => {
     const oldPage = content.firstElementChild;
     if (!window.hgBack()) { clearPredictivePreview(); return; }
     if (content.firstElementChild !== oldPage) { clearPredictivePreview(); return; }
-    const changed = new MutationObserver(() => {
-      if (content.firstElementChild === oldPage) return;
-      changed.disconnect();
-      clearPredictivePreview();
-    });
-    changed.observe(content, { childList: true });
-    predictiveTimer = setTimeout(() => { changed.disconnect(); clearPredictivePreview(); }, 1500);
+    clearPredictivePreview();
   }, 150);
   return true;
 };
