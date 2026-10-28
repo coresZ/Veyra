@@ -534,9 +534,10 @@ final class DownloadManager {
             for (int i = 0; i < plain.size(); i++) {
                 if (task.canceled) return;
                 task.percent = 90 + Math.min(9, (int) ((i + 1) * 9.0 / Math.max(1, plain.size())));
-                task.detail = "解密导出 第" + (i + 1) + "/" + n + "集";
-                task.doneCount = i + 1;
                 JSONObject ep = task.episodes.optJSONObject(i);
+                int realSeq = ep != null ? ep.optInt("index", i + 1) : i + 1;
+                task.detail = "解密导出 第" + realSeq + "集（" + (i + 1) + "/" + n + "）";
+                task.doneCount = i + 1;
                 String key = ep != null ? ep.optString("key", "") : "";
                 boolean isHg = ep != null && "hg".equals(ep.optString("src", ""));
                 try {
@@ -549,15 +550,23 @@ final class DownloadManager {
                                 java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                         }
                     } else if (!norm.exists() || norm.length() == 0) {
-                        List<File> single = new ArrayList<>();
-                        single.add(plain.get(i));
-                        List<String> singleKey = new ArrayList<>();
-                        singleKey.add(key);
-                        StringBuilder dbg = new StringBuilder();
-                        FFmpegConcat.concat(single, singleKey, norm, "hvc1", dbg,
-                            new File(context.getFilesDir(), "native.log"));
+                        // 红果 CENC 密文分集：先本地解密成明文 MP4（等价后端 ffmpeg -decryption_key -c copy）。
+                        // 不能直接走 native concat —— C 层"直接 concat"路径打开分集时不传 decryption_key，
+                        // 产物是未解密的密文（大小完整、容器/时长正常，但样本全是密文，任何播放器都播不了）。
+                        byte[] kb = com.hongguotv.core.LocalRemux.INSTANCE.keyFromHex(key);
+                        if (kb != null) {
+                            com.hongguotv.core.LocalRemux.INSTANCE.decrypt(plain.get(i), norm, kb);
+                        } else {
+                            List<File> single = new ArrayList<>();
+                            single.add(plain.get(i));
+                            List<String> singleKey = new ArrayList<>();
+                            singleKey.add(key);
+                            StringBuilder dbg = new StringBuilder();
+                            FFmpegConcat.concat(single, singleKey, norm, "hvc1", dbg,
+                                new File(context.getFilesDir(), "native.log"));
+                        }
                     }
-                    String epName = String.format(Locale.US, "第%02d集.mp4", i + 1);
+                    String epName = String.format(Locale.US, "第%02d集.mp4", realSeq);
                     long normLen = norm.length();
                     Uri u = exportToDownloads(norm, subDir, epName);
                     if (lastExportDirect) directOk++;
@@ -733,37 +742,63 @@ final class DownloadManager {
             // 与 plain 一一对应的解密密钥：中间产物可能是 CENC 密文 → 要 key；
             // 剧集目录里的「第NN集.mp4」是已解密归一化的正式分集 → 传空串，让 C 层按明文处理。
             List<String> plainKeys = new ArrayList<>();
+            // 本任务真实集号 → 批次序号映射（中间产物 epNNN 是下载批次顺序，需要时按此兜底）
+            java.util.Map<Integer, Integer> seqToBatch = new java.util.HashMap<>();
+            java.util.Set<Integer> wanted = new java.util.TreeSet<>();
             for (int i = 0; i < n; i++) {
                 JSONObject ep = task.episodes.optJSONObject(i);
-                String k = ep != null ? ep.optString("key", "") : "";
-                // 查找顺序：
-                //   ① 任务目录 epNNN.mp4    —— 下载中间产物（导出失败时还在，可能是密文）
-                //   ② 剧集目录 第NN集.mp4   —— 正常路径：用户看得见的正式分集（明文）
-                //   ③ 剧集目录 集号匹配      —— 兼容被 ROM 改成「第NN集_<毫秒>.mp4」的
-                //   ④ 剧集目录 epNNN.mp4    —— 旧版本遗留位置
-                File f = new File(dir, String.format(Locale.US, "ep%03d.mp4", i + 1));
-                if (f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(k); continue; }
-                f = publicEpisodeFile(task.title, String.format(Locale.US, "第%02d集.mp4", i + 1));
-                if (f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(""); continue; }
-                f = named.get(i + 1);
-                if (f != null && f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(""); continue; }
-                f = new File(edir, String.format(Locale.US, "ep%03d.mp4", i + 1));
-                if (f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(k); }
+                int seq = ep != null ? ep.optInt("index", i + 1) : i + 1;
+                wanted.add(seq);
+                seqToBatch.put(seq, i);
             }
-            if (plain.size() != n) throw new java.io.IOException("分集不完整（" + plain.size() + "/" + n + "），请重新下载");
+            // 收集顺序（同剧分次下载 → 一次合并整部，产物自然累积，不再互相覆盖）：
+            //   ① 已有合并产物「剧名.mp4」  —— 此前批次合并的成品，作为第一段，后续分集接在其后
+            //   ② 剧集目录全部「第NN集.mp4」 —— 本任务 + 同剧其它批次导出的正式分集（明文，升序）
+            //   ③ 本任务在剧集目录缺失的集   —— 任务目录 epNNN 中间产物兜底（可能密文，带 key）
+            List<File> plain = new ArrayList<>();
+            List<String> plainKeys = new ArrayList<>();
+            List<Integer> plainSeqs = new ArrayList<>();
+            File existing = new File(edir, task.title.replaceAll("[\\\\/:*?\"<>|]", "_") + ".mp4");
+            if (existing.exists() && existing.length() > 0) { plain.add(existing); plainKeys.add(""); plainSeqs.add(0); }
+            java.util.Set<Integer> allSeq = new java.util.TreeSet<>(named.keySet());
+            allSeq.addAll(wanted);
+            for (int seq : allSeq) {
+                File f = named.get(seq);
+                if (f != null && f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(""); plainSeqs.add(seq); continue; }
+                if (!wanted.contains(seq)) continue;   // 同剧其它批次缺失的那几集，下次下载后再合并补上
+                Integer batch = seqToBatch.get(seq);
+                if (batch == null) continue;
+                f = new File(dir, String.format(Locale.US, "ep%03d.mp4", batch + 1));
+                if (f.exists() && f.length() > 0) { plain.add(f); plainKeys.add(task.episodes.optJSONObject(batch).optString("key", "")); plainSeqs.add(seq); }
+            }
+            // 完整性：本任务每集必须命中（同剧其它批次缺失不阻塞）
+            int got = 0;
+            for (int seq : wanted) if (plainSeqs.contains(seq)) got++;
+            if (got != wanted.size()) throw new java.io.IOException("分集不完整（" + got + "/" + wanted.size() + "），请重新下载");
             // 优先合并成单个文件；若合并仍失败（个别设备 MediaMuxer 兼容问题），自动回退为分集逐个导出，下载不白费。
             String subDir = task.title.replaceAll("[\\\\/:*?\"<>|]", "_");
             String displayName = task.title.replaceAll("[\\\\/:*?\"<>|]", "_") + ".mp4";
             try {
                 task.detail = "合并分集";
-                File merged = new File(dir, "merged.mp4");
-                if (plain.size() == 1) {
-                    // 单集也要 C 层规范化（解密+时间轴归零），不能直接复制密文分集
-                    List<String> k1 = new ArrayList<>();
-                    k1.add(plainKeys.get(0));
-                    StringBuilder dbg = new StringBuilder();
-                    FFmpegConcat.concat(plain, k1, merged, "hvc1", dbg, new File(context.getFilesDir(), "native.log"));
-                    task.debug = dbg.toString();
+                File merged = null;
+                if (plain.size() == 1 && plainSeqs.get(0) == 0) {
+                    // 只有已有合并产物、没有新分集：已是最新成品，直接复用，跳过重封装
+                    merged = existing;
+                    mergedOk = true;
+                } else if (plain.size() == 1) {
+                    merged = new File(dir, "merged.mp4");
+                    // 红果 CENC 密文：本地解密成明文 MP4（等价后端 ffmpeg -decryption_key -c copy）。
+                    // 不能直接走 native concat —— C 层"直接 concat"路径不传 decryption_key，产物是密文播不了。
+                    byte[] kb = com.hongguotv.core.LocalRemux.INSTANCE.keyFromHex(plainKeys.get(0));
+                    if (kb != null) {
+                        com.hongguotv.core.LocalRemux.INSTANCE.decrypt(plain.get(0), merged, kb);
+                    } else {
+                        List<String> k1 = new ArrayList<>();
+                        k1.add(plainKeys.get(0));
+                        StringBuilder dbg = new StringBuilder();
+                        FFmpegConcat.concat(plain, k1, merged, "hvc1", dbg, new File(context.getFilesDir(), "native.log"));
+                        task.debug = dbg.toString();
+                    }
                 } else mergeMp4(plain, plainKeys, merged, task);
                 if (task.canceled) return;
                 task.percent = 97;
@@ -791,8 +826,9 @@ final class DownloadManager {
                 StringBuilder outList = new StringBuilder();
                 for (int i = 0; i < plain.size(); i++) {
                     if (task.canceled) return;
+                    if (plainSeqs.get(i) == 0) continue;   // 已有合并产物不重导出
                     task.percent = 90 + Math.min(9, (int) ((i + 1) * 9.0 / Math.max(1, plain.size())));
-                    String epName = String.format(Locale.US, "第%02d集.mp4", i + 1);
+                    String epName = String.format(Locale.US, "第%02d集.mp4", plainSeqs.get(i));
                     Uri u = exportToDownloads(plain.get(i), subDir, epName);
                     if (u != null) { if (outList.length() > 0) outList.append('|'); outList.append(u); }
                 }
@@ -804,6 +840,17 @@ final class DownloadManager {
                 task.detail = "完成（已合并）";
                 // 合并成功：删除分集（app 私有 ep*.mp4/norm_* + 公共 Downloads 第XX集.mp4），只保留合并产物
                 deleteEpisodesAfterMerge(task, subDir);
+                // 同剧其它待合并任务：分集已并入完整产物，同步标记完成，避免列表残留「待合并」假象
+                synchronized (tasks) {
+                    for (DownloadTask t : tasks) {
+                        if (t == task || t.canceled) continue;
+                        if (t.title != null && t.title.equals(task.title)
+                                && ("ready".equals(t.status) || "failed".equals(t.status))) {
+                            t.status = "done"; t.percent = 100; t.detail = "完成（已合并）";
+                        }
+                    }
+                }
+                persist();
             } else {
                 // 合并失败：状态置 failed → 下载列表显示「重试」按钮（分集已导出保留，
                 // 点重试会复用已下载分集直接合并，无需重新下载）。
@@ -2690,6 +2737,7 @@ final class DownloadManager {
     private void mergeMp4(List<File> inputs, List<String> keys, File output, Task task) throws Exception {
         StringBuilder debug = new StringBuilder("合并详细日志\n分集数=").append(inputs.size()).append('\n');
         String stage = "初始化";
+        java.util.List<File> decryptTmp = new java.util.ArrayList<>();
         try {
             // 0 集保护：分集列表为空（如旧版本任务未持久化 episodes 被重试）直接报明确错误，不进 concat（避免 native 层异常/闪退）
             if (inputs == null || inputs.isEmpty()) {
@@ -2746,38 +2794,69 @@ final class DownloadManager {
             // MediaExtractor 读不了 → muxer 直接失败 → 自动落到 native；私密模式（黄果）的分集已是
             // 明文 mp4，muxer 能读 → 于是正好走了那条会毁 B 帧的路。
             File nativeLog = new File(context.getFilesDir(), "native.log");
-            boolean nativeOk = false;
+            // 合并引擎：FFmpeg concat（修之前 v0.18.71+ 一直用的 C 层 direct concat 引擎，时间轴正确
+            // —— concat demuxer 保留源 stts/ctts）。上轮试过"系统 MediaMuxer 优先"，实测卡顿/音画
+            // 不同步：muxer 逐片写入必须按写入序单调化时间戳，交错时间轴被压平（C 层注释同款教训：
+            // 两段式把 501 帧挤进 9.7s → 播放加速卡顿、seek 崩溃）。
+            // 红果分集是 CENC 密文，先本地解密成明文再交给 concat（修之前直接 concat 密文，
+            // 产物是未解密密文，大小完整但样本全是密文，任何播放器都播不了）。
+            java.util.List<File> plainInputs = new java.util.ArrayList<>();
+            java.util.List<String> plainKeys = new java.util.ArrayList<>();
+            boolean ok = false;
             try {
+                stage = "解密分集";
+                debug.append("解密 CENC 分集 ").append(inputs.size()).append(" 集…\n");
+                for (int i = 0; i < inputs.size(); i++) {
+                    String k = keys.get(i);
+                    byte[] kb = com.hongguotv.core.LocalRemux.INSTANCE.keyFromHex(k);
+                    if (kb != null) {
+                        File tmp = new File(output.getParentFile(), "dec_" + i + ".mp4");
+                        com.hongguotv.core.LocalRemux.INSTANCE.decrypt(inputs.get(i), tmp, kb);
+                        decryptTmp.add(tmp);
+                        plainInputs.add(tmp);
+                    } else {
+                        plainInputs.add(inputs.get(i));   // 明文源（黄果已解密 mp4 / 无 key 源）
+                    }
+                    plainKeys.add("");
+                }
                 stage = "libffconcat 合并多集";
-                debug.append("libffconcat（FFmpeg concat）合并 ").append(inputs.size()).append(" 集…\n");
+                debug.append("libffconcat（FFmpeg concat）合并 ").append(plainInputs.size()).append(" 集…\n");
                 if (output.exists()) output.delete();   // native 侧「存在即不覆盖」，残片会让它直接失败
-                FFmpegConcat.concat(inputs, keys, output, tag, debug, nativeLog);
+                FFmpegConcat.concat(plainInputs, plainKeys, output, tag, debug, nativeLog);
                 stage = "校验产物";
-                FFmpegConcat.verify(output, inputs, debug);
+                FFmpegConcat.verify(output, plainInputs, debug);
                 if (checkPicture(output, debug) == 2)
                     throw new java.io.IOException("产物抽帧全是纯色/全黑（打开会黑屏）");
-                nativeOk = true;
-            } catch (Throwable natErr) {
-                debug.append("libffconcat 合并失败：").append(natErr.getMessage()).append('\n');
+                ok = true;
+            } catch (Throwable e1) {
+                debug.append("libffconcat 合并失败：").append(e1.getMessage()).append('\n');
                 if (output.exists()) output.delete();
+                try {
+                    stage = "兜底系统 muxer 合并";
+                    debug.append("兜底系统 MediaMuxer 合并（时间轴可能被压平）").append(plainInputs.size()).append(" 集…\n");
+                    concatTsByMuxer(plainInputs.toArray(new File[0]), output, debug);
+                    stage = "兜底产物校验";
+                    FFmpegConcat.verify(output, plainInputs, debug);
+                    if (checkPicture(output, debug) == 2)
+                        throw new java.io.IOException("兜底合并后抽帧仍是纯色/全黑（打开会黑屏）");
+                    ok = true;
+                } catch (Throwable e2) {
+                    debug.append("兜底合并也失败：").append(e2.getMessage()).append('\n');
+                    if (output.exists()) output.delete();
+                }
             }
-            if (!nativeOk) {
-                stage = "回退系统 muxer 合并";
-                debug.append("回退系统 muxer 合并 ").append(inputs.size()).append(" 集…\n");
-                concatTsByMuxer(inputs.toArray(new File[0]), output, debug);
-                FFmpegConcat.verify(output, inputs, debug);
-                if (checkPicture(output, debug) == 2)
-                    throw new java.io.IOException("回退 muxer 合并后抽帧仍是纯色/全黑（打开会黑屏）");
-            }
+            if (!ok) throw new java.io.IOException("两种合并引擎均失败（详见合并日志）");
             stage = "完成";
             debug.append("完成: 产物=").append(output.length() / 1048576).append("MB 引擎=")
-                    .append(nativeOk ? "libffconcat(tag=" + tag + ")" : "系统 muxer（B 帧时间戳可能被压平）").append('\n');
+                    .append(ok ? "libffconcat(tag=" + tag + ")" : "系统 muxer（B 帧时间戳可能被压平）").append('\n');
             task.debug = debug.toString();
         } catch (Exception e) {
             debug.append("失败阶段: ").append(stage).append('\n');
             debug.append("异常: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append('\n');
             task.debug = debug.toString();
             throw e;
+        } finally {
+            for (File tmp : decryptTmp) try { tmp.delete(); } catch (Exception ignored) {}
         }
     }
 
@@ -2917,7 +2996,7 @@ final class DownloadManager {
      *  分集规则、也匹配不到清理规则，会永久留在剧集目录里。 */
     private static boolean isEpisodeArtifact(String name) {
         if (name == null) return false;
-        return name.matches("第\\d+集\\.mp4") || name.matches("第\\d+集_\\d{10,}\\.mp4")
+        return name.matches("第\\d+集.*\\.mp4")
                 || name.matches("ep\\d+\\.mp4")
                 // 调试模式下导出的素材包，删任务时也要一起清掉，别留在剧集目录里
                 || name.matches("第\\d+集_调试包\\.zip")
@@ -2930,7 +3009,7 @@ final class DownloadManager {
         java.util.Map<Integer, File> map = new java.util.HashMap<>();
         File[] kids = dir == null ? null : dir.listFiles();
         if (kids == null) return map;
-        java.util.regex.Pattern p = java.util.regex.Pattern.compile("^第(\\d+)集(?:_\\d{10,})?\\.mp4$");
+        java.util.regex.Pattern p = java.util.regex.Pattern.compile("^第(\\d+)集.*\\.mp4$");
         for (File f : kids) {
             if (!f.isFile() || f.length() <= 0) continue;
             java.util.regex.Matcher m = p.matcher(f.getName());
@@ -2951,7 +3030,7 @@ final class DownloadManager {
         try {
             File[] kids = dir == null ? null : dir.listFiles();
             if (kids == null) return;
-            java.util.regex.Pattern p = java.util.regex.Pattern.compile("^第(\\d+)集_(\\d{10,})\\.mp4$");
+            java.util.regex.Pattern p = java.util.regex.Pattern.compile("^第(\\d+)集(?:[._\\-()\\s]+\\d{1,})\\S*\\.mp4$");
             String rel = Environment.DIRECTORY_DOWNLOADS + "/Veyra/" + dir.getName();
             for (File f : kids) {
                 if (!f.isFile()) continue;
@@ -3380,14 +3459,35 @@ final class DownloadManager {
                 try {
                     File pub = new File(Environment.getExternalStoragePublicDirectory(
                             Environment.DIRECTORY_DOWNLOADS), "Veyra/" + base);
-                    File[] kids = pub.listFiles();
-                    if (kids != null) for (File f : kids) {
-                        if (!f.isFile()) continue;
-                        String n = f.getName();
-                        boolean hit = n.equals(displayBase) || isEpisodeArtifact(n)
-                                || n.endsWith(".part")
-                                || (!base.isEmpty() && n.startsWith(displayBase) && n.endsWith(".mp4"));
-                        if (hit) f.delete();
+                    // 直写文件删除 + 复查重试：MediaStore 行删除是异步的，刚删完可能立刻又被扫描
+                    // 恢复，或文件正被占用导致 delete() 返回 false 但没人看 → 残留（用户实测的
+                    // 「第NN集_<时间戳>.mp4 删不掉」）。删不掉就重试几次，仍失败则写入 native.log，
+                    // 下次删除/清理再收尾，绝不静默跳过。
+                    File pubLog = new File(context.getFilesDir(), "native.log");
+                    for (int attempt = 0; attempt < 5; attempt++) {
+                        File[] kids = pub.listFiles();
+                        boolean dirty = false;
+                        if (kids != null) for (File f : kids) {
+                            if (!f.isFile()) continue;
+                            String n = f.getName();
+                            boolean hit = n.equals(displayBase) || isEpisodeArtifact(n)
+                                    || n.endsWith(".part")
+                                    || (!base.isEmpty() && n.startsWith(displayBase) && n.endsWith(".mp4"));
+                            if (hit) dirty |= !f.delete();
+                        }
+                        if (!dirty) break;
+                        if (attempt < 4) try { Thread.sleep(200); } catch (InterruptedException ie) { break; }
+                        if (attempt == 4) {
+                            StringBuilder sb = new StringBuilder();
+                            File[] left = pub.listFiles();
+                            if (left != null) for (File f : left) {
+                                String n = f.getName();
+                                if (n.equals(displayBase) || isEpisodeArtifact(n)) sb.append(n).append(';');
+                            }
+                            try (java.io.FileWriter fw = new java.io.FileWriter(pubLog, true)) {
+                                fw.append("删除残留（5 次仍删不掉）: ").append(sb).append('\n');
+                            } catch (Exception ignored) { }
+                        }
                     }
                 } catch (Exception ignored) { }
                 // MediaStore 删除后尝试删物理空目录（部分 ROM 删除异步，删不掉就留给系统回收）
