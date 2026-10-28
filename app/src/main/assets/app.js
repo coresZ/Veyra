@@ -488,6 +488,11 @@ scroll.addEventListener('scroll', () => {
   clearTimeout(coverScrollTimer);
   coverScrollTimer = setTimeout(() => retryFailedImages(), 160);
 }, { passive: true });
+// 首页滚动上限：内容顶最多滚到搜索框上边缘上方 5px（搜索框顶=7px+status，状态栏底=status，绝不到状态栏/滑出屏幕）
+scroll.addEventListener('scroll', () => {
+  if (state.route !== 'home') return;
+  if (scroll.scrollTop > 56) scroll.scrollTop = 56;
+});
 window.addEventListener('online', () => retryFailedImages(true));
 function hydrateImages(root = content) {
   if (observer) observer.disconnect();
