@@ -355,7 +355,7 @@ final class DownloadManager {
         if (!ContentMode.get(context).active().equals(found.source))
             throw new IllegalStateException("内容已切换，请重新打开");
         String safe = found.title == null || found.title.isEmpty() ? "download"
-                : found.title.replaceAll("[\\/:*?"<>|]", "_");
+                : found.title.replaceAll("[\\\\/:*?\"<>|]", "_");
         File dir = episodeDir(found.title);
         JSONObject out = new JSONObject();
         JSONArray episodes = new JSONArray();
