@@ -934,7 +934,32 @@ function renderDownloadSection(label, tasks, kind) {
 // 手机/NAS 不单独分类：一个列表，来源以标记显示
 function renderDownloadList(tasks) {
   if (!tasks.length) return '<div class="empty-state">还没有下载内容，去详情页点击「下载」吧</div>';
-  const rows = tasks.map(task => downloadTaskRow(task, task.kind || (task.nas ? 'nas' : 'phone'))).join('');
+  // 手机任务按剧名归并：同一部剧分多次下载（分批集数）显示为一条，集数合计；
+  // 合并按钮取第一个未完成任务（后端合并已是「整剧合并」：一次合并该剧全部分集+已有产物）
+  const grouped = [];
+  const byTitle = new Map();
+  for (const t of tasks) {
+    if (t.kind === 'phone') {
+      const key = t.title || '';
+      if (!byTitle.has(key)) byTitle.set(key, []);
+      byTitle.get(key).push(t);
+    } else grouped.push(t);
+  }
+  for (const [title, list] of byTitle) {
+    if (list.length === 1) { grouped.push(list[0]); continue; }
+    const first = Object.assign({}, list.find(t => t.status !== 'done') || list[0]);
+    first.totalCount = list.reduce((s, t) => s + (Number(t.totalCount) || 0), 0);
+    first.doneCount = list.reduce((s, t) => s + (Number(t.doneCount) || 0), 0);
+    const anyActive = list.some(downloadTaskActive);
+    const anyReady = list.some(t => t.status === 'ready' || (t.status === 'failed' && (t.error || '').includes('合并失败')));
+    const anyFailed = list.some(t => t.status === 'failed' && !(t.error || '').includes('合并失败'));
+    first.status = anyActive ? 'running' : (anyReady ? 'ready' : (anyFailed ? 'failed' : 'done'));
+    first.percent = list.reduce((s, t) => s + (Number(t.percent) || 0), 0) / list.length;
+    if (!anyActive && anyReady) first.detail = `已下载 ${first.doneCount} 集，待合并`;
+    first.children = list;
+    grouped.push(first);
+  }
+  const rows = grouped.map(task => downloadTaskRow(task, task.kind || (task.nas ? 'nas' : 'phone'))).join('');
   return `<div class="downloads-list">${rows}</div>`;
 }
 
