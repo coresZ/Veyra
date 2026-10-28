@@ -755,8 +755,6 @@ final class DownloadManager {
             //   ① 已有合并产物「剧名.mp4」  —— 此前批次合并的成品，作为第一段，后续分集接在其后
             //   ② 剧集目录全部「第NN集.mp4」 —— 本任务 + 同剧其它批次导出的正式分集（明文，升序）
             //   ③ 本任务在剧集目录缺失的集   —— 任务目录 epNNN 中间产物兜底（可能密文，带 key）
-            List<File> plain = new ArrayList<>();
-            List<String> plainKeys = new ArrayList<>();
             List<Integer> plainSeqs = new ArrayList<>();
             File existing = new File(edir, task.title.replaceAll("[\\\\/:*?\"<>|]", "_") + ".mp4");
             if (existing.exists() && existing.length() > 0) { plain.add(existing); plainKeys.add(""); plainSeqs.add(0); }
@@ -799,7 +797,10 @@ final class DownloadManager {
                         FFmpegConcat.concat(plain, k1, merged, "hvc1", dbg, new File(context.getFilesDir(), "native.log"));
                         task.debug = dbg.toString();
                     }
-                } else mergeMp4(plain, plainKeys, merged, task);
+                } else {
+                    merged = new File(dir, "merged.mp4");
+                    mergeMp4(plain, plainKeys, merged, task);
+                }
                 if (task.canceled) return;
                 task.percent = 97;
                 task.detail = "保存到手机";
@@ -842,7 +843,7 @@ final class DownloadManager {
                 deleteEpisodesAfterMerge(task, subDir);
                 // 同剧其它待合并任务：分集已并入完整产物，同步标记完成，避免列表残留「待合并」假象
                 synchronized (tasks) {
-                    for (DownloadTask t : tasks) {
+                    for (Task t : tasks) {
                         if (t == task || t.canceled) continue;
                         if (t.title != null && t.title.equals(task.title)
                                 && ("ready".equals(t.status) || "failed".equals(t.status))) {
