@@ -1,0 +1,94 @@
+name: Build Test APK
+
+# 只构建签名 APK 并作为 artifact 供下载，不创建 Release、不动 latest 标签。
+# 与 release.yml 用同一套 keystore / SDK / Kotlin 环境，产物可直接覆盖安装现有版本。
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: '构建类型（release=正式签名，可直接覆盖安装）'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        run: |
+          SDK=/usr/local/lib/android/sdk
+          echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
+          yes | $SDK/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
+          yes | $SDK/cmdline-tools/latest/bin/sdkmanager --channel=0 "platforms;android-37" > /dev/null 2>&1 || true
+          yes | $SDK/cmdline-tools/latest/bin/sdkmanager --channel=0 "build-tools;37.0.0" > /dev/null 2>&1 || true
+
+      - name: Set up Kotlin compiler
+        run: |
+          curl -fsSL -o /tmp/kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.2.10/kotlin-compiler-2.2.10.zip
+          unzip -q /tmp/kotlin.zip -d /opt/kotlin/
+          echo "KOTLIN_HOME=/opt/kotlin/kotlinc" >> $GITHUB_ENV
+
+      - name: Resolve version name
+        run: |
+          VN=$(grep -oE 'versionName "[^"]+"' app/build.gradle | head -1 | sed 's/.*"\(.*\)"/\1/')
+          VC=$(grep -oE 'versionCode [0-9]+' app/build.gradle | head -1 | awk '{print $2}')
+          echo "VERSION_NAME=$VN" >> $GITHUB_ENV
+          echo "VERSION_CODE=$VC" >> $GITHUB_ENV
+          echo "building v$VN (code $VC)"
+
+      - name: Build release APK (signed)
+        if: github.event.inputs.build_type != 'debug'
+        env:
+          CHENGZI_KEYSTORE: ${{ runner.temp }}/veyra-release.keystore
+          CHENGZI_STORE_PASS: ${{ secrets.VEYRA_STORE_PASS }}
+          CHENGZI_KEY_PASS: ${{ secrets.VEYRA_KEY_PASS }}
+          CHENGZI_KEY_ALIAS: ${{ secrets.VEYRA_KEY_ALIAS }}
+        run: |
+          if [ -z "${CHENGZI_STORE_PASS}" ]; then
+            echo "VEYRA_STORE_PASS 未设置，无法做正式签名构建" >&2
+            exit 1
+          fi
+          echo "${{ secrets.VEYRA_KEYSTORE_B64 }}" | base64 -d > "$RUNNER_TEMP/veyra-release.keystore"
+          test -s "$RUNNER_TEMP/veyra-release.keystore" || { echo "keystore 解出为空文件" >&2; exit 1; }
+          ./gradlew :app:assembleRelease --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk "Veyra-v${VERSION_NAME}-fix.apk"
+          echo "APK=app/build/outputs/apk/release/app-release.apk" >> $GITHUB_ENV
+
+      - name: Build debug APK
+        if: github.event.inputs.build_type == 'debug'
+        run: |
+          ./gradlew :app:assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk "Veyra-v${VERSION_NAME}-debug.apk"
+          echo "APK=app/build/outputs/apk/debug/app-debug.apk" >> $GITHUB_ENV
+
+      - name: Show apk info
+        run: |
+          ls -la app/build/outputs/apk/*/*/*.apk
+          sha256sum "$APK"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: veyra-apk-v${{ env.VERSION_NAME }}-${{ github.event.inputs.build_type || 'release' }}
+          path: |
+            Veyra-v*-fix.apk
+            Veyra-v*-debug.apk
+          if-no-files-found: error
+          retention-days: 30

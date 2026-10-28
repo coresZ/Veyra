@@ -271,8 +271,15 @@ function showUpdate(result) {
   notes.textContent = String(result.notes || '').trim().slice(0, 1200);
   notes.hidden = !notes.textContent;
   document.getElementById('update-progress').hidden = true;
-  updateDownloadButton.textContent = '下载并安装';
+  updateDownloadButton.textContent = '立即下载';
   updateDownloadButton.disabled = false;
+  // 弹窗重新显示时把左按钮复位成静态文案，别残留上一轮的“后台下载中…”。
+  updateLaterButton.textContent = '取消';
+  updateLaterButton.disabled = false;
+  // 【修复 Bug1】z-index 已提到所有弹层之上；再把节点挪到 #app 末尾，
+  // 保证同一层叠上下文里 DOM 顺序也最高，不会被页面内容或其它 overlay 挡住。
+  const appRoot = document.getElementById('app');
+  if (appRoot) appRoot.appendChild(updateOverlay);
   updateOverlay.hidden = false;
   updateBackEnabled();
 }
@@ -317,22 +324,35 @@ updateDownloadButton.addEventListener('click', async () => {
   if (updateDownloading) return;
   updateDownloading = true;
   updateDownloadButton.disabled = true;
-  updateLaterButton.disabled = true;
+  // 【修复 Bug2】下载期间不再禁用取消入口，只把文案切成后台状态提示，弹窗随时能关。
+  updateLaterButton.textContent = '后台下载中…';
   updateDownloadButton.textContent = '正在下载…';
   window.hgUpdateProgress(0);
   try {
     await api('download-update');
-    updateDownloadButton.textContent = '重新打开安装程序';
+    // 原生侧 download-update 返回前已自动拉起系统安装页（缺权限时先跳授权页），
+    // 这里收起弹窗，避免 WebView 盖在系统安装界面下面。
+    updateOverlay.hidden = true;
+    updateDownloadButton.textContent = '立即下载';
+    updateLaterButton.textContent = '取消';
+    toast('下载完成，正在打开安装程序');
   } catch (error) {
     updateDownloadButton.textContent = '重试下载';
+    updateLaterButton.textContent = '取消';
     toast(error.message || '下载失败，请重试', true);
   } finally {
     updateDownloading = false;
     updateDownloadButton.disabled = false;
     updateLaterButton.disabled = false;
+    updateBackEnabled();
   }
 });
-updateLaterButton.addEventListener('click', () => { if (!updateDownloading) { updateOverlay.hidden = true; updateBackEnabled(); } });
+updateLaterButton.addEventListener('click', () => {
+  // 【修复 Bug2】正在下载也允许关闭：下载在原生线程继续，完成后照常弹出安装。
+  updateOverlay.hidden = true;
+  updateBackEnabled();
+  if (updateDownloading) toast('已转入后台下载，完成后会自动弹出安装', true);
+});
 
 window.hgTheme = dark => {
   // 外观（明暗/质感/配色/圆角）现在由 appearance.js 管理并存在 localStorage：
@@ -2110,7 +2130,7 @@ window.hgBack = () => {
   if (!unlockOverlay.hidden) { closeUnlock(); return true; }
   if (!authOverlay.hidden) { if (state.account.loggedIn) hideAuth(); return true; }
   if (!confirmOverlay.hidden) { closeConfirmation(false); return true; }
-  if (!updateOverlay.hidden) { if (!updateDownloading) { updateOverlay.hidden = true; updateBackEnabled(); } return true; }
+  if (!updateOverlay.hidden) { updateOverlay.hidden = true; updateBackEnabled(); if (updateDownloading) toast('已转入后台下载，完成后会自动弹出安装', true); return true; }
   if (isRootColumn()) return false;
   if (state.route === 'campaign') { restoreScreen(state.campaignReturn); return true; }
   if (state.route === 'account-management') { restoreScreen(state.accountReturn); return true; }
