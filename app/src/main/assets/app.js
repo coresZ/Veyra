@@ -1986,6 +1986,8 @@ function returnFromDetail() {
 }
 
 window.hgBack = () => {
+  if (window.__veyraAppearanceBack && window.__veyraAppearanceBack()) return true;
+  if (!downloadOverlay.hidden) { hideDownloadSheet(); return true; }
   if (!unlockOverlay.hidden) { closeUnlock(); return true; }
   if (!authOverlay.hidden) { if (state.account.loggedIn) hideAuth(); return true; }
   if (!confirmOverlay.hidden) { closeConfirmation(false); return true; }
