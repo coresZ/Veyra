@@ -182,6 +182,11 @@ var SUNNY_CORNERS = [{"id":"tight","name":"紧致"},{"id":"default","name":"标�
     return false;
   }
 
+  /** 供 hgPredictiveBackStart 判断：外观弹窗是否打开（开着时不启动预测性返回预览）。 */
+  window.__veyraAppearanceOpen = function () {
+    return !!(scrim && !scrim.hidden);
+  }
+
   /** 设置页渲染完调用：刷新入口文案/选中态，并挂一次性全局事件。 */
   window.bindAppearance = function () {
     updateSummary();
