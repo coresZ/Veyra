@@ -2353,17 +2353,18 @@ document.addEventListener('submit', async event => {
   catch (failure) { error.textContent = failure.message || '修改失败，请稍后重试'; error.hidden = false; button.disabled = false; }
 });
 
-// ---- 全局左右滑动：底栏页之间 + 页内子标签之间（实时跟手，带滑入滑出过渡）----
+// ---- 全局左右滑动：微信式双页跟随（拖动时两页同时可见，松手按位移/速度决定去留）----
 const DOCK_ORDER = ['home', 'adult', 'ai', 'library'];
 const LIBRARY_TABS = ['history', 'bookmarks', 'downloads'];
-const SWIPE_MIN = 56;       // 触发翻页的最小横向位移
-const SWIPE_MAX_MS = 900;   // 拖太久就不算翻页手势
-let swiping = false;        // 翻页动画进行中
-let swipeStart = null;      // { x, y, at, target }
-let swipeAxis = null;       // null | 'x' | 'y'
-let swipeAction = null;     // 本次手势要执行的切换（null = 已在首/末页）
+const SWIPE_MIN_PX = 40;        // 最短触发位移（快速甩动时用）
+const SWIPE_MIN_RATIO = 0.22;   // 或者拖过屏宽 22%
+const SWIPE_MAX_MS = 900;       // 拖太久不算翻页手势
+let swiping = false;            // 收尾动画进行中
+let swipeStart = null;          // { x, y, at, target }
+let swipeAxis = null;           // null | 'x' | 'y'
+let swipeTrack = null;          // 双页跟随状态
 
-// 只有"自身能横向滚动"的容器才让位（筛选条、tag 条、轮播等）。
+// 只有“自身能横向滚动”的容器才让位（筛选条、tag 条、轮播等）。
 // 首页 .film-row 是 3 列网格、根本不能横滚，所以不能拦——否则触摸落在推荐卡片上就没反应。
 const SWIPE_IGNORE = '.filter-row,.home-tag-scroll,.search-form,input,textarea,select,.proxy-mode-dd-menu,.episode-grid';
 
@@ -2407,49 +2408,107 @@ function swipeResolve(delta) {
   return null;
 }
 
-function swipePaint(px, ms, fade) {
-  scroll.style.transition = ms
-    ? `transform ${ms}ms cubic-bezier(.22,.61,.36,1)${fade ? `,opacity ${Math.round(ms * 0.8)}ms ease` : ''}`
-    : 'none';
-  scroll.style.transform = `translateX(${px}px)`;
-}
-
-function swipeClear() {
-  scroll.style.transition = '';
-  scroll.style.transform = '';
-  scroll.style.opacity = '';
-}
-
-function swipeSettleBack() {
-  swipePaint(0, 170, true);
-  scroll.style.opacity = '';
-  setTimeout(swipeClear, 180);
-}
-
-// 顺着手指方向滑出 → 渲染目标页 → 从另一侧滑入；定时器兜底，避免动画被打断卡住。
-function swipeCommit(dir) {
-  swiping = true;
-  const width = scroll.clientWidth || 320;
-  const out = dir * (width * 0.3 + 24);
-  swipePaint(out, 130, true);
-  scroll.style.opacity = '0';
-  setTimeout(() => {
-    const action = swipeAction;
-    swipeAction = null;
-    if (action) { try { action(); } catch (error) { /* 切换失败就留在原页 */ } }
-    swipePaint(-out * 0.4, 0, false);
-    requestAnimationFrame(() => {
-      swipePaint(0, 185, true);
-      scroll.style.opacity = '';
-      setTimeout(() => { swipeClear(); swiping = false; }, 195);
-    });
-  }, 135);
-}
-
 function swipeBlocked() {
   return swiping || state.route === 'detail'
     || [unlockOverlay, authOverlay, confirmOverlay, updateOverlay, downloadOverlay].some(overlay => !overlay.hidden)
     || document.body.classList.contains('predictive-active');
+}
+
+function swipeMakePanel() {
+  const panel = document.createElement('div');
+  panel.className = 'swipe-page';
+  const inner = document.createElement('div');
+  inner.className = 'swipe-page-inner';
+  panel.appendChild(inner);
+  (document.getElementById('app') || document.body).appendChild(panel);
+  return { panel, inner };
+}
+
+// 建双页：cur 装原页快照，next 装目标页（渲染出来后被观察器搬进来）。
+function swipeOpenTrack(delta, dx) {
+  const snapshotNode = content.firstElementChild;
+  if (!snapshotNode || swiping || swipeTrack) return false;
+  const action = swipeResolve(delta);
+  if (!action) return false;                 // 已在首/末页
+  const box = scroll.getBoundingClientRect();
+  const width = Math.round(box.width || scroll.clientWidth || 360);
+  const cur = swipeMakePanel(), next = swipeMakePanel();
+  [cur, next].forEach(({ panel }) => {
+    panel.style.top = `${Math.round(box.top)}px`;
+    panel.style.height = `${Math.round(box.height)}px`;
+  });
+  const scrollTop = scroll.scrollTop;
+  cur.inner.style.transform = `translateY(${-scrollTop}px)`;
+  cur.inner.appendChild(snapshotNode);       // 原页节点整个搬到面板里（取消时可原样放回，不用重新请求）
+  scroll.style.visibility = 'hidden';
+  // 目标页是异步渲染的：一旦 content 里出现新页面就搬到右侧面板，不等网络。
+  const observer = new MutationObserver(() => {
+    const el = content.firstElementChild;
+    if (el && el !== snapshotNode && !next.inner.firstElementChild) next.inner.appendChild(el);
+  });
+  observer.observe(content, { childList: true });
+  swipeTrack = {
+    cur, next, width, snapshotNode, scrollTop, observer,
+    dirSign: delta > 0 ? 1 : -1,             // 前进时目标页在右（+1）
+    saved: {
+      route: state.route, tab: state.tab, sub: { ...state.sub },
+      libraryTab: state.libraryTab, query: state.query,
+      filter: state.filter, compactHeld: state.compactHeld,
+    },
+  };
+  action();
+  swipeLayTrack(dx);
+  // 兜底：万一 touchend/touchcancel 丢失，3 秒后强制收尾，避免 scroll 一直 hidden 白屏
+  swipeTrack.guard = setTimeout(() => { if (swipeTrack && swipeTrack.snapshotNode === snapshotNode) swipeCloseTrack(false); }, 3000);
+  return true;
+}
+
+function swipeLayTrack(dx) {
+  const t = swipeTrack;
+  if (!t) return;
+  t.cur.panel.style.transform = `translateX(${dx}px)`;
+  t.next.panel.style.transform = `translateX(${t.dirSign * t.width + dx}px)`;
+}
+
+// 松手：提交就把目标页落回 content，取消就把原页快照原样放回。
+function swipeCloseTrack(commit) {
+  const t = swipeTrack;
+  if (!t) return;
+  swipeTrack = null;
+  swiping = true;
+  clearTimeout(t.guard);
+  t.observer.disconnect();
+  const freshNode = content.firstElementChild !== t.snapshotNode ? content.firstElementChild : null;
+  const targetNode = freshNode || t.next.inner.firstElementChild;
+  const done = commit && targetNode;
+  const ease = 'transform .22s cubic-bezier(.22,.61,.36,1)';
+  t.cur.panel.style.transition = ease;
+  t.next.panel.style.transition = ease;
+  t.cur.panel.style.transform = `translateX(${done ? -t.dirSign * t.width : 0}px)`;
+  t.next.panel.style.transform = `translateX(${done ? 0 : t.dirSign * t.width}px)`;
+  setTimeout(() => {
+    if (done) {
+      content.replaceChildren(targetNode);
+      scroll.scrollTop = 0;
+    } else {
+      content.replaceChildren(t.snapshotNode);
+      state.route = t.saved.route; state.tab = t.saved.tab; state.sub = t.saved.sub;
+      state.libraryTab = t.saved.libraryTab; state.query = t.saved.query;
+      state.filter = t.saved.filter; state.compactHeld = t.saved.compactHeld;
+      setNav(t.saved.route === 'category' ? t.saved.tab : t.saved.route);
+      scroll.scrollTop = t.scrollTop;
+    }
+    t.cur.panel.remove();
+    t.next.panel.remove();
+    scroll.style.visibility = '';
+    swiping = false;
+  }, 230);
+}
+
+function swipeSettleBack() {
+  scroll.style.transition = 'transform .17s cubic-bezier(.22,.61,.36,1)';
+  scroll.style.transform = 'translateX(0)';
+  setTimeout(() => { scroll.style.transition = ''; scroll.style.transform = ''; }, 180);
 }
 
 scroll.addEventListener('touchstart', event => {
@@ -2463,7 +2522,6 @@ scroll.addEventListener('touchstart', event => {
   if (event.target.closest && event.target.closest(SWIPE_IGNORE)) { swipeStart = null; return; }
   swipeStart = { x: touch.clientX, y: touch.clientY, at: Date.now(), target: event.target };
   swipeAxis = null;
-  swipeAction = null;
 }, { passive: true });
 
 scroll.addEventListener('touchmove', event => {
@@ -2475,35 +2533,39 @@ scroll.addEventListener('touchmove', event => {
   if (!swipeAxis) {
     if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
     if (Math.abs(dx) < Math.abs(dy) * 1.3) { swipeAxis = 'y'; swipeStart = null; return; }  // 竖向滚动，交还页面
-    if (swipeScrollOwner(start.target, dx)) { swipeStart = null; return; }                   // 让位给横滚容器
+    if (swipeScrollOwner(start.target, dx)) { swipeStart = null; return; }                  // 让位给横滚容器
     swipeAxis = 'x';
-    swipeAction = swipeResolve(dx < 0 ? 1 : -1);
+    swipeOpenTrack(dx < 0 ? 1 : -1, dx);   // 手指左滑=前进，右滑=后退
   }
   if (swipeAxis !== 'x') return;
   if (event.cancelable) event.preventDefault();
-  // 实时跟手；已在首/末页时加阻尼，明确告诉用户"没有下一页了"
-  swipePaint(swipeAction ? dx : dx * 0.3, 0, false);
+  if (swipeTrack) swipeLayTrack(dx);
+  else scroll.style.transform = `translateX(${dx * 0.3}px)`;   // 首/末页：阻尼跟手
 }, { passive: false });
 
 scroll.addEventListener('touchend', event => {
   const start = swipeStart;
-  const axis = swipeAxis, action = swipeAction;
-  swipeStart = null; swipeAxis = null; swipeAction = null;
+  const axis = swipeAxis, track = swipeTrack;
+  swipeStart = null; swipeAxis = null;
   if (!start || axis !== 'x') return;
-  if (swiping) return;
   const touch = event.changedTouches[0];
-  if (!touch) { swipeSettleBack(); return; }
-  const dx = touch.clientX - start.x, dy = touch.clientY - start.y;
-  const passed = Date.now() - start.at <= SWIPE_MAX_MS
-    && Math.abs(dx) >= SWIPE_MIN && Math.abs(dx) >= Math.abs(dy) * 1.3;
-  if (!passed || !action) { swipeSettleBack(); return; }
-  swipeAction = action;
-  swipeCommit(dx < 0 ? -1 : 1);   // 手指左滑=前进，右滑=后退
+  const dx = touch ? touch.clientX - start.x : 0;
+  const dy = touch ? touch.clientY - start.y : 0;
+  const elapsed = Math.max(1, Date.now() - start.at);
+  const width = track ? track.width : (scroll.clientWidth || 360);
+  const fling = Math.abs(dx) / elapsed > 0.45 && Math.abs(dx) > 24;   // 快速甩动
+  const passed = elapsed <= SWIPE_MAX_MS
+    && Math.abs(dx) >= Math.abs(dy) * 1.3
+    && (Math.abs(dx) >= width * SWIPE_MIN_RATIO || (fling && Math.abs(dx) >= SWIPE_MIN_PX));
+  if (track) { swipeCloseTrack(passed); return; }
+  swipeSettleBack();
 }, { passive: true });
 
 scroll.addEventListener('touchcancel', () => {
-  if (swipeAxis === 'x') swipeSettleBack();
-  swipeStart = null; swipeAxis = null; swipeAction = null;
+  const track = swipeTrack, axis = swipeAxis;
+  swipeStart = null; swipeAxis = null;
+  if (track) swipeCloseTrack(false);
+  else if (axis === 'x') swipeSettleBack();
 });
 
 function navigateDock(tab) {
