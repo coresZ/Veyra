@@ -1,0 +1,30 @@
+diff --git a/app/src/main/java/com/veyra/gybeyond/DownloadManager.java b/app/src/main/java/com/veyra/gybeyond/DownloadManager.java
+--- a/app/src/main/java/com/veyra/gybeyond/DownloadManager.java
++++ b/app/src/main/java/com/veyra/gybeyond/DownloadManager.java
+@@ -2963,7 +2963,7 @@
+      *  分集规则、也匹配不到清理规则，会永久留在剧集目录里。 */
+     private static boolean isEpisodeArtifact(String name) {
+         if (name == null) return false;
+-        return name.matches("第\\d+集\\.mp4") || name.matches("第\\d+集_\\d{10,}\\.mp4")
++        return name.matches("第\\d+集.*\\.mp4")
+                 || name.matches("ep\\d+\\.mp4")
+                 // 调试模式下导出的素材包，删任务时也要一起清掉，别留在剧集目录里
+                 || name.matches("第\\d+集_调试包\\.zip")
+@@ -2976,7 +2976,7 @@
+         java.util.Map<Integer, File> map = new java.util.HashMap<>();
+         File[] kids = dir == null ? null : dir.listFiles();
+         if (kids == null) return map;
+-        java.util.regex.Pattern p = java.util.regex.Pattern.compile("^第(\\d+)集(?:_\\d{10,})?\\.mp4$");
++        java.util.regex.Pattern p = java.util.regex.Pattern.compile("^第(\\d+)集.*\\.mp4$");
+         for (File f : kids) {
+             if (!f.isFile() || f.length() <= 0) continue;
+             java.util.regex.Matcher m = p.matcher(f.getName());
+@@ -2997,7 +2997,7 @@
+         try {
+             File[] kids = dir == null ? null : dir.listFiles();
+             if (kids == null) return;
+-            java.util.regex.Pattern p = java.util.regex.Pattern.compile("^第(\\d+)集_(\\d{10,})\\.mp4$");
++            java.util.regex.Pattern p = java.util.regex.Pattern.compile("^第(\\d+)集(?:[._\\-()\\s]+\\d{1,})\\S*\\.mp4$");
+             String rel = Environment.DIRECTORY_DOWNLOADS + "/Veyra/" + dir.getName();
+             for (File f : kids) {
+                 if (!f.isFile()) continue;
