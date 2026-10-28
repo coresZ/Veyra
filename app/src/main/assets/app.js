@@ -2437,6 +2437,10 @@ function swipeOpenTrack(delta, dx) {
     panel.style.top = `${Math.round(box.top)}px`;
     panel.style.height = `${Math.round(box.height)}px`;
   });
+  const loading = document.createElement('div');
+  loading.className = 'swipe-loading';
+  loading.innerHTML = '<i></i>';
+  next.inner.appendChild(loading);
   const scrollTop = scroll.scrollTop;
   cur.inner.style.transform = `translateY(${-scrollTop}px)`;
   cur.inner.appendChild(snapshotNode);       // 原页节点整个搬到面板里（取消时可原样放回，不用重新请求）
@@ -2444,9 +2448,17 @@ function swipeOpenTrack(delta, dx) {
   // 目标页是异步渲染的：一旦 content 里出现新页面就搬到右侧面板，不等网络。
   const observer = new MutationObserver(() => {
     const el = content.firstElementChild;
-    if (el && el !== snapshotNode && !next.inner.firstElementChild) next.inner.appendChild(el);
+    if (el && el !== snapshotNode && !next.inner.querySelector('.swipe-page-node')) {
+      loading.hidden = true;
+      el.classList.add('swipe-page-node');
+      next.inner.appendChild(el);
+    }
   });
   observer.observe(content, { childList: true });
+  // 目标页 700ms 还没渲染出来就自动回弹，不让用户停在半截
+  const renderWatch = setTimeout(() => {
+    if (swipeTrack && swipeTrack.next.inner.querySelector('.swipe-loading:not([hidden])')) swipeCloseTrack(false);
+  }, 700);
   swipeTrack = {
     cur, next, width, snapshotNode, scrollTop, observer,
     dirSign: delta > 0 ? 1 : -1,             // 前进时目标页在右（+1）
@@ -2456,10 +2468,11 @@ function swipeOpenTrack(delta, dx) {
       filter: state.filter, compactHeld: state.compactHeld,
     },
   };
-  action();
+  try { Promise.resolve(action()).catch(() => {}); } catch (ignore) { }
   swipeLayTrack(dx);
-  // 兜底：万一 touchend/touchcancel 丢失，3 秒后强制收尾，避免 scroll 一直 hidden 白屏
-  swipeTrack.guard = setTimeout(() => { if (swipeTrack && swipeTrack.snapshotNode === snapshotNode) swipeCloseTrack(false); }, 3000);
+  // 兜底：万一 touchend/touchcancel 丢失，1.5 秒后强制收尾，避免 scroll 一直 hidden 白屏
+  swipeTrack.guard = setTimeout(() => { if (swipeTrack && swipeTrack.snapshotNode === snapshotNode) swipeCloseTrack(false); }, 1500);
+  swipeTrack.renderWatch = renderWatch;
   return true;
 }
 
@@ -2477,9 +2490,11 @@ function swipeCloseTrack(commit) {
   swipeTrack = null;
   swiping = true;
   clearTimeout(t.guard);
+  clearTimeout(t.renderWatch);
   t.observer.disconnect();
   const freshNode = content.firstElementChild !== t.snapshotNode ? content.firstElementChild : null;
-  const targetNode = freshNode || t.next.inner.firstElementChild;
+  const panelNode = [...t.next.inner.children].find(el => !el.classList.contains('swipe-loading')) || null;
+  const targetNode = freshNode || panelNode;
   const done = commit && targetNode;
   const ease = 'transform .22s cubic-bezier(.22,.61,.36,1)';
   t.cur.panel.style.transition = ease;

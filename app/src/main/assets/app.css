@@ -437,5 +437,10 @@ html[data-theme=dark] .account-role.is-vip{color:#e0b64a}
 /* v0.19.2 全局左右滑动：#scroll 由 JS 内联样式驱动，这里只保证过渡期间不出现横向滚动条抖动 */
 #scroll{will-change:transform}
 
-.swipe-page{position:fixed;left:0;width:100%;z-index:15;overflow:hidden;background:var(--bg);will-change:transform;contain:layout paint}
+.swipe-page{position:fixed;left:0;width:100%;z-index:8;overflow:hidden;background:var(--bg);will-change:transform;contain:layout paint}
 .swipe-page-inner{position:absolute;top:0;left:0;width:100%;will-change:transform}
+
+#search-form{z-index:9}
+.swipe-loading{position:absolute;inset:0;display:grid;place-items:center}
+.swipe-loading i{width:26px;height:26px;border:3px solid #00000022;border-top-color:#8a8a8a;border-radius:50%;animation:swipe-spin .8s linear infinite}
+@keyframes swipe-spin{to{transform:rotate(360deg)}}
