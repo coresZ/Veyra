@@ -2446,33 +2446,33 @@ function swipeOpenTrack(delta, dx) {
   cur.inner.appendChild(snapshotNode);       // 原页节点整个搬到面板里（取消时可原样放回，不用重新请求）
   scroll.style.visibility = 'hidden';
   // 目标页是异步渲染的：一旦 content 里出现新页面就搬到右侧面板，不等网络。
-  const observer = new MutationObserver(() => {
-    const el = content.firstElementChild;
-    if (el && el !== snapshotNode && !next.inner.querySelector('.swipe-page-node')) {
-      loading.hidden = true;
-      el.classList.add('swipe-page-node');
-      next.inner.appendChild(el);
-    }
-  });
-  observer.observe(content, { childList: true });
-  // 目标页 700ms 还没渲染出来就自动回弹，不让用户停在半截
-  const renderWatch = setTimeout(() => {
-    if (swipeTrack && swipeTrack.next.inner.querySelector('.swipe-loading:not([hidden])')) swipeCloseTrack(false);
-  }, 700);
-  swipeTrack = {
-    cur, next, width, snapshotNode, scrollTop, observer,
+  const t = {
+    cur, next, width, snapshotNode, scrollTop, loading,
     dirSign: delta > 0 ? 1 : -1,             // 前进时目标页在右（+1）
+    awaiting: false, waitTimer: 0, guard: 0,
     saved: {
       route: state.route, tab: state.tab, sub: { ...state.sub },
       libraryTab: state.libraryTab, query: state.query,
       filter: state.filter, compactHeld: state.compactHeld,
     },
   };
+  const observer = new MutationObserver(() => {
+    const el = content.firstElementChild;
+    if (el && el !== snapshotNode && !next.inner.querySelector('.swipe-page-node')) {
+      loading.hidden = true;
+      el.classList.add('swipe-page-node');
+      next.inner.appendChild(el);
+      // 已经松手判定要切、但当时目标页还没渲染出来 —— 现在出来了，补做收尾动画
+      if (t.awaiting) { clearTimeout(t.waitTimer); t.awaiting = false; swipeFinishTrack(t, true); }
+    }
+  });
+  observer.observe(content, { childList: true });
+  t.observer = observer;
+  swipeTrack = t;
   try { Promise.resolve(action()).catch(() => {}); } catch (ignore) { }
   swipeLayTrack(dx);
   // 兜底：万一 touchend/touchcancel 丢失，1.5 秒后强制收尾，避免 scroll 一直 hidden 白屏
-  swipeTrack.guard = setTimeout(() => { if (swipeTrack && swipeTrack.snapshotNode === snapshotNode) swipeCloseTrack(false); }, 1500);
-  swipeTrack.renderWatch = renderWatch;
+  t.guard = setTimeout(() => { if (swipeTrack === t) swipeCloseTrack(false); }, 1500);
   return true;
 }
 
@@ -2483,29 +2483,42 @@ function swipeLayTrack(dx) {
   t.next.panel.style.transform = `translateX(${t.dirSign * t.width + dx}px)`;
 }
 
-// 松手：提交就把目标页落回 content，取消就把原页快照原样放回。
+// 松手：切得过去就切，切不过去就回弹。绝不在手指还按着的时候打断拖动。
 function swipeCloseTrack(commit) {
   const t = swipeTrack;
   if (!t) return;
   swipeTrack = null;
   swiping = true;
   clearTimeout(t.guard);
-  clearTimeout(t.renderWatch);
+  const freshNode = content.firstElementChild !== t.snapshotNode ? content.firstElementChild : null;
+  const panelNode = [...t.next.inner.children].find(el => !el.classList.contains('swipe-loading')) || null;
+  if (commit && (freshNode || panelNode)) { swipeFinishTrack(t, true); return; }
+  if (!commit) { swipeFinishTrack(t, false); return; }
+  // 判定要切但目标页还没渲染出来：停在松手位置继续等（最多 1.2s），别急着弹回去
+  t.awaiting = true;
+  t.waitTimer = setTimeout(() => { t.awaiting = false; swipeFinishTrack(t, false); }, 1200);
+}
+
+function swipeFinishTrack(t, done) {
+  clearTimeout(t.guard);
+  if (t.waitTimer) clearTimeout(t.waitTimer);
   t.observer.disconnect();
   const freshNode = content.firstElementChild !== t.snapshotNode ? content.firstElementChild : null;
   const panelNode = [...t.next.inner.children].find(el => !el.classList.contains('swipe-loading')) || null;
   const targetNode = freshNode || panelNode;
-  const done = commit && targetNode;
+  const ok = done && targetNode;
   const ease = 'transform .22s cubic-bezier(.22,.61,.36,1)';
   t.cur.panel.style.transition = ease;
   t.next.panel.style.transition = ease;
-  t.cur.panel.style.transform = `translateX(${done ? -t.dirSign * t.width : 0}px)`;
-  t.next.panel.style.transform = `translateX(${done ? 0 : t.dirSign * t.width}px)`;
+  t.cur.panel.style.transform = `translateX(${ok ? -t.dirSign * t.width : 0}px)`;
+  t.next.panel.style.transform = `translateX(${ok ? 0 : t.dirSign * t.width}px)`;
   setTimeout(() => {
-    if (done) {
+    if (ok) {
       content.replaceChildren(targetNode);
       scroll.scrollTop = 0;
     } else {
+      // 撤销：作废还没落地的异步渲染，否则它会在回弹之后把 content 覆盖成目标页（表现为“卡一下然后瞬间跳过去”）
+      routeToken++;
       content.replaceChildren(t.snapshotNode);
       state.route = t.saved.route; state.tab = t.saved.tab; state.sub = t.saved.sub;
       state.libraryTab = t.saved.libraryTab; state.query = t.saved.query;
