@@ -433,3 +433,6 @@ html[data-theme=dark] .color-dot{background:var(--dot-d,var(--dot,#ccc))}
 .account-role.is-user{color:var(--muted)}
 html[data-theme=dark] .account-role.is-admin{color:#e57368}
 html[data-theme=dark] .account-role.is-vip{color:#e0b64a}
+
+/* v0.19.2 全局左右滑动：#scroll 由 JS 内联样式驱动，这里只保证过渡期间不出现横向滚动条抖动 */
+#scroll{will-change:transform}

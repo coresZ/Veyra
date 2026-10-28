@@ -2352,6 +2352,100 @@ document.addEventListener('submit', async event => {
   catch (failure) { error.textContent = failure.message || '修改失败，请稍后重试'; error.hidden = false; button.disabled = false; }
 });
 
+// ---- 全局左右滑动：底栏页之间 + 页内子标签之间（带滑入滑出过渡）----
+const DOCK_ORDER = ['home', 'adult', 'ai', 'library'];
+const LIBRARY_TABS = ['history', 'bookmarks', 'downloads'];
+let swiping = false;
+let swipeTouch = null;
+
+// 这些元素自身要横向滚动/轮播，手势让位给它们，不触发翻页。
+const SWIPE_IGNORE = '.filter-row,.home-tag-scroll,.film-row,.hero,.search-form,input,textarea,select,.proxy-mode-dd-menu,.episode-grid';
+
+function swipeSubTabs() {
+  if (state.route === 'library') return { list: LIBRARY_TABS, current: state.libraryTab };
+  if (state.route === 'category') {
+    const ids = categoryIds[state.tab] || [];
+    return { list: ids.map((id, index) => index), current: state.sub[state.tab] };
+  }
+  return { list: [], current: null };
+}
+
+function applySwipeSub(sub, delta) {
+  const next = sub.list[sub.list.indexOf(sub.current) + delta];
+  if (state.route === 'library') { state.libraryTab = next; renderLibrary(); scroll.scrollTop = 0; }
+  else goCategory(state.tab, next);
+}
+
+function applySwipeDock(delta) {
+  const index = DOCK_ORDER.indexOf(state.route === 'category' ? state.tab : state.route);
+  const next = DOCK_ORDER[index + delta];
+  if (next) navigateDock(next);
+  return Boolean(next);
+}
+
+// 先滑动离场，再渲染目标页，然后从另一侧滑入；transitionend 兜底用定时器，避免动画被打断卡住。
+function swipeTransition(delta, apply) {
+  if (swiping) return;
+  swiping = true;
+  const out = delta < 0 ? -26 : 26;
+  scroll.style.transition = 'transform .14s ease,opacity .14s ease';
+  scroll.style.transform = `translateX(${out}px)`;
+  scroll.style.opacity = '0';
+  setTimeout(() => {
+    let moved = true;
+    try { moved = apply() !== false; } catch (error) { moved = false; }
+    scroll.style.transition = 'none';
+    scroll.style.transform = `translateX(${-out}px)`;
+    requestAnimationFrame(() => {
+      scroll.style.transition = 'transform .18s cubic-bezier(.22,.61,.36,1),opacity .18s ease';
+      scroll.style.transform = 'translateX(0)';
+      scroll.style.opacity = '';
+      setTimeout(() => {
+        scroll.style.transition = '';
+        scroll.style.transform = '';
+        scroll.style.opacity = '';
+        swiping = false;
+      }, 190);
+    });
+  }, 145);
+}
+
+function swipeBlocked() {
+  return swiping || state.route === 'detail'
+    || [unlockOverlay, authOverlay, confirmOverlay, updateOverlay, downloadOverlay].some(overlay => !overlay.hidden)
+    || document.body.classList.contains('predictive-active');
+}
+
+scroll.addEventListener('touchstart', event => {
+  const touch = event.touches[0];
+  if (!touch || swipeBlocked() || !DOCK_ORDER.includes(state.route === 'category' ? state.tab : state.route)) {
+    swipeTouch = null;
+    return;
+  }
+  if (event.target.closest && event.target.closest(SWIPE_IGNORE)) { swipeTouch = null; return; }
+  swipeTouch = { x: touch.clientX, y: touch.clientY, at: Date.now() };
+}, { passive: true });
+
+scroll.addEventListener('touchend', event => {
+  const start = swipeTouch;
+  swipeTouch = null;
+  if (!start || swipeBlocked()) return;
+  const touch = event.changedTouches[0];
+  if (!touch) return;
+  const dx = touch.clientX - start.x, dy = touch.clientY - start.y;
+  if (Date.now() - start.at > 800 || Math.abs(dx) < 64 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+  const delta = dx < 0 ? 1 : -1;   // 手指左滑=前进，右滑=后退
+  const sub = swipeSubTabs();
+  const pos = sub.list.indexOf(sub.current);
+  if (sub.list.length > 1 && pos >= 0 && sub.list[pos + delta] !== undefined) {
+    swipeTransition(delta, () => applySwipeSub(sub, delta));
+  } else {
+    swipeTransition(delta, () => applySwipeDock(delta));
+  }
+}, { passive: true });
+
+scroll.addEventListener('touchcancel', () => { swipeTouch = null; });
+
 function navigateDock(tab) {
   if (state.route === 'detail') state.previous = null;
   if (tab === 'home') goHome();

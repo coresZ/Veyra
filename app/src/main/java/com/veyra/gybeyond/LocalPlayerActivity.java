@@ -1,11 +1,15 @@
 package com.veyra.gybeyond;
 
 import android.app.Activity;
+import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -24,9 +28,9 @@ import java.io.File;
 /**
  * 本地成品播放器：直接播 Download/Veyra/&lt;剧名&gt; 下已下载/已合并的 mp4，不走后端取址。
  *
- * 与在线 PlayerActivity 完全隔离（新类，不改在线播放链路），只服务「我的下载」点海报本机直看：
+ * 与在线 PlayerActivity 完全隔离（新类，不改在线播放链路），只服务「我的下载」点封面本机直看：
  *  - 合并好的整集（剧名.mp4）：单文件播放；
- *  - 未合并的分集（第NN集.mp4）：一集一个文件，播完自动接下一集，控制条上可前后切集。
+ *  - 未合并的分集（第NN集.mp4）：一集一个文件，播完自动接下一集，底部按钮可前后切集。
  * 内容模式隔离由 DownloadManager.localFiles 兜底（切换过模式会直接抛错，拿不到对方文件）。
  */
 public final class LocalPlayerActivity extends Activity {
@@ -34,9 +38,11 @@ public final class LocalPlayerActivity extends Activity {
     private ExoPlayer player;
     private PlayerView view;
     private TextView caption;
+    private LinearLayout navRow;
     private JSONArray episodes = new JSONArray();
     private int index = 0;
     private boolean merged = false;
+    private String title = "";
 
     @Override
     protected void onCreate(Bundle saved) {
@@ -44,7 +50,7 @@ public final class LocalPlayerActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         hideSystemBars();
 
-        String title = getIntent().getStringExtra("title");
+        title = getIntent().getStringExtra("title");
         String path = getIntent().getStringExtra("path");
         merged = getIntent().getBooleanExtra("merged", false);
         String raw = getIntent().getStringExtra("episodes");
@@ -57,26 +63,44 @@ public final class LocalPlayerActivity extends Activity {
         }
 
         FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(0xff000000);
+        root.setBackgroundColor(Color.BLACK);
+        root.setFitsSystemWindows(true);
+
         view = new PlayerView(this);
         view.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT);
-        view.setShowSubtitleView(false);
         view.setUseController(true);
-        if (!merged && episodes.length() > 1) {
-            view.setShowNextButton(true);
-            view.setShowPreviousButton(true);
-        }
         root.addView(view, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
         caption = new TextView(this);
-        caption.setTextColor(0xffffffff);
+        caption.setTextColor(Color.WHITE);
         caption.setTextSize(14f);
-        caption.setPadding(48, 40, 48, 0);
-        caption.setText(label(title, path));
-        FrameLayout.LayoutParams capLp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT);
-        root.addView(caption, capLp);
+        caption.setPadding(40, 32, 40, 0);
+        caption.setText(label(path));
+        root.addView(caption, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT));
+
+        if (!merged && episodes.length() > 1) {
+            navRow = new LinearLayout(this);
+            navRow.setOrientation(LinearLayout.HORIZONTAL);
+            navRow.setGravity(Gravity.CENTER);
+            navRow.setPadding(0, 0, 0, 48);
+            Button prev = new Button(this);
+            prev.setText("上一集");
+            prev.setOnClickListener(v -> advance(-1));
+            Button next = new Button(this);
+            next.setText("下一集");
+            next.setOnClickListener(v -> advance(1));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(24, 0, 24, 0);
+            navRow.addView(prev, lp);
+            navRow.addView(next, lp);
+            FrameLayout.LayoutParams navLp = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+            navLp.gravity = Gravity.BOTTOM;
+            root.addView(navRow, navLp);
+        }
 
         player = new ExoPlayer.Builder(this).build();
         view.setPlayer(player);
@@ -84,7 +108,7 @@ public final class LocalPlayerActivity extends Activity {
         setContentView(root);
     }
 
-    private String label(String title, String path) {
+    private String label(String path) {
         String file = new File(path).getName();
         String base = title == null || title.isEmpty() ? file : title;
         if (merged) return base + " · 整集合并版";
@@ -107,7 +131,7 @@ public final class LocalPlayerActivity extends Activity {
         });
     }
 
-    /** 分集播放：+1 自动连播，控制条前后按钮手动切。合并版没有下一集。 */
+    /** 分集播放：播完自动连播，底部按钮手动切集。合并版没有下一集。 */
     private void advance(int delta) {
         if (merged || episodes.length() == 0) return;
         int next = index + delta;
@@ -124,18 +148,7 @@ public final class LocalPlayerActivity extends Activity {
         }
         index = next;
         play(path);
-        if (caption != null) caption.setText(label(getIntent().getStringExtra("title"), path));
-    }
-
-    @Override
-    protected void onStart() {
-        super.onStart();
-        if (!merged && episodes.length() > 1) {
-            view.setEventListener(new PlayerView.EventListener() {
-                @Override public void onPreviousClicked(PlayerView playerView) { advance(-1); }
-                @Override public void onNextClicked(PlayerView playerView) { advance(1); }
-            });
-        }
+        if (caption != null) caption.setText(label(path));
     }
 
     @Override protected void onResume() { super.onResume(); if (player != null) player.setPlayWhenReady(true); hideSystemBars(); }
