@@ -176,6 +176,12 @@ var SUNNY_CORNERS = [{"id":"tight","name":"紧致"},{"id":"default","name":"标�
     document.body.classList.remove('appearance-open');
   }
 
+  /** 系统侧滑/返回键拦截入口（由 app.js hgBack 调用）：外观弹窗开着时先关弹窗，返回 true 表示已消费。 */
+  window.__veyraAppearanceBack = function () {
+    if (scrim && !scrim.hidden) { closePop(); return true; }
+    return false;
+  }
+
   /** 设置页渲染完调用：刷新入口文案/选中态，并挂一次性全局事件。 */
   window.bindAppearance = function () {
     updateSummary();
