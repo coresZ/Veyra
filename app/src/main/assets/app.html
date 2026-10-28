@@ -24,10 +24,12 @@
       <form id="search-form" class="search-form" role="search">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/></svg>
         <input id="search-input" class="search-input" type="search" placeholder="搜索剧名或 #标签" autocomplete="off" aria-label="搜索剧名或标签">
-        <div id="search-suggest" class="search-suggest" hidden></div>
       </form>
       <button id="header-settings" class="header-settings" type="button" aria-label="设置" hidden><img src="settings.svg" alt=""></button>
     </header>
+    <!-- v0.18.105：搜索历史/联想面板移出 .search-form（form 的 backdrop-filter 创建层叠上下文，会截断子元素的
+         backdrop 采样），放到 #app 层作为独立浮层：backdrop root 直达页面，能采样到 #scroll 滚动内容，液态玻璃折射才生效 -->
+    <div id="search-suggest" class="search-suggest" hidden></div>
     <main id="scroll"><div id="content"></div></main>
     <div id="compact-category" aria-hidden="true"></div>
     <nav id="dock" aria-label="主导航">
