@@ -356,9 +356,9 @@ public final class PlayerActivity extends Activity {
     }
 
     private void resizeVideo(PlayerView view, androidx.media3.common.VideoSize size) {
-        view.setResizeMode(size.width > 0 && size.height > 0
-                && (double) size.width * size.pixelWidthHeightRatio / size.height < 0.9
-                ? AspectRatioFrameLayout.RESIZE_MODE_ZOOM : AspectRatioFrameLayout.RESIZE_MODE_FIT);
+        // 统一 FIT：竖屏短剧视频完整显示、保持原始比例，不做 ZOOM 裁剪。
+        // 此前竖屏视频（宽/高 < 0.9）走 ZOOM 会放大铺满 view，左右/上下溢出部分被裁掉，丢画面。
+        view.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT);
     }
 
     private void updateVideoGeometry(androidx.media3.common.VideoSize size) {
