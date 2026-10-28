@@ -984,7 +984,7 @@ function downloadTaskRow(task, kind) {
   // 手动合并：下载完成（ready，含部分失败）或合并失败（分集保留）时显示合并按钮，等用户点合并才合并
   const mergeBtn = !running && (task.status === 'ready' || ((task.status === 'failed' || task.status === 'done') && (task.error || '').includes('合并失败')))
     ? `<button type="button" class="dl-cancel dl-retry" data-dl-merge="${kind}" data-dl-id="${esc(task.id)}">合并</button>` : '';
-  const deleteBtn = !running ? `<button type="button" class="dl-cancel" data-dl-delete="${kind}" data-dl-id="${esc(task.id)}">删除</button>` : '';
+  const deleteBtn = !running ? `<button type="button" class="dl-cancel" data-dl-delete="${kind}" data-dl-id="${esc(task.id)}"${task.children && task.children.length > 1 ? ` data-dl-siblings="${esc(task.children.map(c => c.id).join(','))}"` : ''}>删除</button>` : '';
   const failedInfo = failedList.length > 0
     ? `<span class="dl-error" data-dl-copy="${esc(task.id)}" data-dl-log="${esc('失败集: ' + failedList.map(f => '第' + f.index + '集(' + (f.error || '') + ')').join('；'))}" title="点击复制失败明细">失败 ${failedList.length} 集：${esc(failedList.slice(0, 3).map(f => '第' + f.index + '集').join('、'))}${failedList.length > 3 ? ' 等' : ''}</span>` : '';
   const errLog = task.error || task.debug || '';
@@ -2324,7 +2324,12 @@ document.addEventListener('click', async event => {
     const button = event.target.closest('[data-dl-delete]');
     const kind = button.dataset.dlDelete, id = button.dataset.dlId;
     const action = kind === 'nas' ? 'nas-download-cancel' : 'download-delete';
-    api(action, { id }).then(() => { toast('已删除下载内容'); removeDownloadRow(kind, id); refreshCurrentDownloads(); }).catch(error => toast(error.message, true));
+    // 归并条目（同剧分次下载合成一条）删除 = 该剧全部任务一起删；
+    // 后端每个删除都会清掉 Download/Veyra/<剧名>/ 整剧文件夹，重复调用幂等无害
+    const ids = (button.dataset.dlSiblings || '').split(',').filter(Boolean);
+    ids.unshift(id);
+    const chain = ids.reduce((p, cid) => p.then(() => api(action, { id: cid }).catch(e => toast(e.message, true))), Promise.resolve());
+    chain.then(() => { toast('已删除下载内容'); refreshCurrentDownloads(); }).catch(() => {});
     return;
   }
 
