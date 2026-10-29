@@ -23,3 +23,7 @@ Android Version/
 server/node_modules/
 chengzi-data/
 app/libs/
+
+config.env
+server/node_modules/
+data/
