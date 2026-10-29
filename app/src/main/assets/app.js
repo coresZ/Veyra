@@ -518,21 +518,38 @@ scroll.addEventListener('scroll', () => {
   coverScrollTimer = setTimeout(() => retryFailedImages(), 160);
 }, { passive: true });
 window.addEventListener('online', () => retryFailedImages(true));
-function hydrateImages(root = content) {
-  if (observer) observer.disconnect();
-  observer = new IntersectionObserver(entries => {
+// eagerLimit：前多少张不等进视口就直接补图。离屏预热可以放宽一些。
+function hydrateImages(root = content, eagerLimit = 14) {
+  const offstage = root !== content;   // 离屏预热不能动主 observer，否则会把当前页正在加载的图打断
+  const io = new IntersectionObserver(entries => {
     entries.forEach(entry => {
       if (!entry.isIntersecting) return;
       const image = entry.target;
-      observer.unobserve(image);
+      io.unobserve(image);
       loadCoverInto(image);
     });
   }, { root: scroll, rootMargin: '320px' });
+  if (!offstage) { if (observer) observer.disconnect(); observer = io; }
   root.querySelectorAll('img[data-cover]').forEach((image, index) => {
     if (image.naturalWidth > 0) return;
-    if (index < 14 || image.classList.contains('hero-image')) loadCoverInto(image);
-    else observer.observe(image);
+    if (index < eagerLimit || image.classList.contains('hero-image')) loadCoverInto(image);
+    else io.observe(image);
   });
+}
+
+// 克隆前先抹掉“正在加载”的痕迹：原 DOM 上的补图请求在它被撤下时就作废了，
+// data-loading 却跟着克隆进来，之后 loadCoverInto 见 data-loading=1 一律跳过 ——
+// 于是这些海报永远加载不出来（只有手动点 tab 重新渲染才出来）。
+function swipeCleanCloneImages(clone) {
+  clone.querySelectorAll('img').forEach(image => {
+    delete image.dataset.loading;
+    delete image.dataset.retryAfter;
+  });
+}
+// 离屏预热：clone 已挂到离屏容器上（isConnected 为真），补图才会真正落地到 clone 自己身上。
+function swipePrimeImages(clone) {
+  swipeCleanCloneImages(clone);
+  hydrateImages(clone, 24);
 }
 
 function activeCampaigns() {
@@ -2440,7 +2457,7 @@ async function swipePrefetch(keyOrFn, prepare, render) {
     }
     if (clone) {
       swipeOffstage.appendChild(clone);
-      try { hydrateImages(clone); } catch (ignore) { }
+      swipePrimeImages(clone);        // 先抹掉失效的加载标记，再离屏补图
       swipePageCache.set(key, clone);
       while (swipePageCache.size > 12) swipePageCache.delete(swipePageCache.keys().next().value);
     }
@@ -2533,6 +2550,7 @@ function swipeSaveCurrent() {
   if (!node || node.classList.contains('skeleton-home') || node.classList.contains('swipe-skel')) return;
   const clone = node.cloneNode(true);
   // 兜底净化：拖动期间页头被钉住时打过 visibility:hidden，绝不能跟着进缓存
+  swipeCleanCloneImages(clone);
   clone.querySelectorAll('*').forEach(el => { if (el.style && el.style.visibility === 'hidden') el.style.visibility = ''; });
   swipePageCache.set(swipeCacheKey(), clone);
   if (swipePageCache.size > 12) swipePageCache.delete(swipePageCache.keys().next().value);

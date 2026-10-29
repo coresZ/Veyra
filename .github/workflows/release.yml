@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: '可选：release tag 名（留空则按运行时间自动生成，如 v20261021-1430）'
+        description: '可选：release tag 名（留空则用 app/build.gradle 的 versionName，如 v0.20.1）'
         required: false
         type: string
       release_notes:
@@ -90,13 +90,13 @@ jobs:
           gh release delete "$TAG" --yes --cleanup-tag=false 2>/dev/null || true
           NOTES="${{ github.event.inputs.release_notes }}"
           if [ -z "$NOTES" ]; then
-            # 自动生成中文更新日志：取上一个 v* tag 到本次 HEAD 之间的 commit 消息
-            PREV=$(git tag --list 'v*' --sort=-version:refname | sed -n '2p')
-            if [ -n "$PREV" ]; then
-              NOTES=$(git log "$PREV..HEAD" --pretty=format:"- %s" 2>/dev/null || true)
+            # 本次 tag 还没创建，所以列表里的第 1 个就是上一个版本（取第 2 个会把整段历史都倒进更新日志）
+            PREV=$(git tag --list 'v*' --sort=-v:refname | sed -n '1p')
+            if [ -n "$PREV" ] && [ "$PREV" != "$TAG" ]; then
+              NOTES=$(git log "$PREV..HEAD" --pretty=format:"- %s" | head -40)
             fi
             if [ -z "$NOTES" ]; then
-              NOTES=$(git log -30 --pretty=format:"- %s")
+              NOTES=$(git log -15 --pretty=format:"- %s")
             fi
             NOTES=$(printf "## Veyra %s 更新内容\n\n%s" "$TAG" "$NOTES")
           fi
