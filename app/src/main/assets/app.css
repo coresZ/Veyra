@@ -442,3 +442,14 @@ html[data-theme=dark] .account-role.is-vip{color:#e0b64a}
 
 #search-form{z-index:9}
 
+/* 滑动目标页骨架：贴合目标页布局 + 与主题对比足够 + 扫光，避免看起来是“一片空白” */
+.swipe-skel{padding:4px 18px}
+.swipe-skel .skeleton,.sk-list .skeleton{background:color-mix(in srgb,var(--text) 9%,transparent);background:color-mix(in srgb,var(--text) 9%,transparent)}
+.swipe-skel .skeleton::after{content:"";position:absolute;inset:0;transform:translateX(-100%);background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--text) 8%,transparent),transparent);animation:swipe-shimmer 1.15s ease-in-out infinite}
+@keyframes swipe-shimmer{to{transform:translateX(100%)}}
+.skeleton-tabs{display:flex;gap:8px;margin:19px 0 17px}
+.skeleton-pill{height:34px;flex:1;border-radius:calc(10px * var(--corner-scale,1))}
+.sk-list{display:grid;gap:12px}
+.sk-card{height:84px;border-radius:calc(12px * var(--corner-scale,1))}
+.sk-sm{display:block;height:13px;width:104px;border-radius:calc(5px * var(--corner-scale,1))}
+@media (prefers-reduced-motion:reduce){.swipe-skel .skeleton::after{animation:none}}

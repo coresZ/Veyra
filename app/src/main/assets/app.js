@@ -2404,7 +2404,7 @@ function swipeCacheKey() {
 
 function swipeSaveCurrent() {
   const node = content.firstElementChild;
-  if (!node || node.classList.contains('skeleton-home')) return;
+  if (!node || node.classList.contains('skeleton-home') || node.classList.contains('swipe-skel')) return;
   swipePageCache.set(swipeCacheKey(), node.cloneNode(true));
   if (swipePageCache.size > 12) swipePageCache.delete(swipePageCache.keys().next().value);
 }
@@ -2414,10 +2414,43 @@ function swipeBuildCached(key) {
   return cached ? cached.cloneNode(true) : null;
 }
 
-function swipeBuildSkeleton() {
+// 骨架按目标页真实布局生成（里面 + 列表 / 我的 + 子标签 + 卡片），不再是通用一张皮。
+// key 形如 home / library:bookmarks / category:short:2
+function swipeBuildSkeleton(key) {
   const wrap = document.createElement('div');
-  wrap.innerHTML = '<div class="skeleton-home" role="status" aria-label="正在加载内容"><div class="skeleton skeleton-hero"></div><div class="skeleton skeleton-title"></div><div class="skeleton-row"><div class="skeleton skeleton-poster"></div><div class="skeleton skeleton-poster"></div><div class="skeleton skeleton-poster"></div></div><div class="skeleton skeleton-line"></div></div>';
+  if (String(key).indexOf('library:') === 0) {
+    const cards = Array.from({ length: 4 }, () => '<div class="skeleton sk-card"></div>').join('');
+    wrap.innerHTML = '<div class="library-page swipe-skel" role="status" aria-label="正在加载内容"><div class="my-heading"><h1>我的</h1></div>'
+      + '<div class="segmented library-tabs skeleton-tabs"><span class="skeleton skeleton-pill"></span><span class="skeleton skeleton-pill"></span><span class="skeleton skeleton-pill"></span></div>'
+      + '<p class="library-count"><span class="skeleton sk-sm"></span></p>'
+      + `<div class="sk-list">${cards}</div></div>`;
+  } else {
+    const posters = Array.from({ length: 3 }, () => '<div class="skeleton skeleton-poster"></div>').join('');
+    wrap.innerHTML = '<div class="swipe-skel" role="status" aria-label="正在加载内容"><div class="skeleton skeleton-hero"></div>'
+      + '<div class="skeleton skeleton-title"></div><div class="skeleton-row">' + posters
+      + '</div><div class="skeleton-row">' + posters + '</div></div>';
+  }
   return wrap.firstElementChild;
+}
+
+// 页内切换时这些 tab 栏不跟着走：整页平移后对它们做反向位移，视觉上钉在原处，只有下方内容左右换。
+const SWIPE_TAB_SELECTOR = '.library-tabs,.compact-tabs,.segmented';
+
+// 钉住集合 = tab 栏本身 + 它上方同属“页头”的区块（标题、登录条等），
+// 这样页内切换时只有下方内容左右换，上面一切纹丝不动。
+function swipeTabNodes(node) {
+  if (!node) return [];
+  const out = new Set();
+  for (const tab of node.querySelectorAll(SWIPE_TAB_SELECTOR)) {
+    out.add(tab);
+    let el = tab;
+    for (let depth = 0; el && el !== content && depth < 3; depth++) {
+      let sib = el.previousElementSibling;
+      while (sib) { out.add(sib); sib = sib.previousElementSibling; }
+      el = el.parentElement;
+    }
+  }
+  return [...out];
 }
 
 // 解析本次滑动去哪：先页内子标签，切到头溢出到底栏页；边界返回 null（阻尼回弹）。
@@ -2428,8 +2461,9 @@ function swipeResolve(delta) {
     const next = sub.list[pos + delta];
     const key = state.route === 'library' ? 'library:' + next : 'category:' + state.tab + ':' + next;
     return {
+      mode: 'inline',   // 页内子项：tab 栏与标题钉住，仅内容区平移
       go: () => { if (state.route === 'library') { state.libraryTab = next; renderLibrary(); scroll.scrollTop = 0; } else goCategory(state.tab, next); },
-      build: () => swipeBuildCached(key) || swipeBuildSkeleton(),
+      build: () => swipeBuildCached(key) || swipeBuildSkeleton(key),
     };
   }
   const index = DOCK_ORDER.indexOf(state.route === 'category' ? state.tab : state.route);
@@ -2437,8 +2471,9 @@ function swipeResolve(delta) {
   if (!next) return null;
   const key = next === 'library' ? 'library:' + state.libraryTab : next;
   return {
+    mode: 'page',       // 底栏页之间：整页平移
     go: () => navigateDock(next),
-    build: () => swipeBuildCached(key) || swipeBuildSkeleton(),
+    build: () => swipeBuildCached(key) || swipeBuildSkeleton(key),
   };
 }
 
@@ -2467,7 +2502,11 @@ function swipeOpenTrack(delta, dx) {
   inner.appendChild(node);
   panel.appendChild(inner);
   (document.getElementById('app') || document.body).appendChild(panel);
-  swipeTrack = { panel, inner, width: Math.round(box.width || scroll.clientWidth || 360), dirSign: delta > 0 ? 1 : -1, guard: 0, resolve };
+  const mode = resolve.mode === 'inline' ? 'inline' : 'page';
+  const curTabs = mode === 'inline' ? swipeTabNodes(content.firstElementChild) : [];
+  const nextTabs = mode === 'inline' ? swipeTabNodes(node) : [];
+  nextTabs.forEach(el => { el.style.visibility = 'hidden'; });   // 目标页 tab 会被当前页的同位置 tab 盖住，先隐藏避免重影
+  swipeTrack = { panel, inner, mode, curTabs, nextTabs, width: Math.round(box.width || scroll.clientWidth || 360), dirSign: delta > 0 ? 1 : -1, guard: 0, resolve };
   routeToken++;   // 作废未落地的异步渲染，防止拖动中 content 被覆盖
   swipeLayTrack(dx);
   swipeTrack.guard = setTimeout(() => { if (swipeTrack) swipeCloseTrack(false); }, 1500);
@@ -2479,6 +2518,16 @@ function swipeLayTrack(dx) {
   if (!t) return;
   scroll.style.transform = `translateX(${dx}px)`;
   t.panel.style.transform = `translateX(${t.dirSign * t.width + dx}px)`;
+  if (t.mode === 'inline') {
+    const back = `translateX(${-dx}px)`;
+    for (const el of t.curTabs) el.style.transform = back;   // 反向抵消，tab 栏留在原地不动
+  }
+}
+
+// 收拾：把为跟手临时加的行内样式全部撤掉
+function swipeClearTabs(t) {
+  for (const el of t.curTabs) el.style.transform = '';
+  for (const el of t.nextTabs) el.style.visibility = '';
 }
 
 // 松手：提交则当前页滑出、目标页落位并真正路由；取消则全部归位（零副作用）。
@@ -2496,6 +2545,7 @@ function swipeCloseTrack(commit) {
     scroll.style.transform = `translateX(${-t.dirSign * t.width}px)`;
     t.panel.style.transform = 'translateX(0)';
     setTimeout(() => {
+      swipeClearTabs(t);
       const node = t.inner.firstElementChild;
       scroll.style.transition = '';
       scroll.style.transform = '';
@@ -2508,6 +2558,7 @@ function swipeCloseTrack(commit) {
     scroll.style.transform = 'translateX(0)';
     t.panel.style.transform = `translateX(${t.dirSign * t.width}px)`;
     setTimeout(() => {
+      swipeClearTabs(t);
       scroll.style.transition = '';
       scroll.style.transform = '';
       t.panel.remove();
@@ -2581,6 +2632,7 @@ scroll.addEventListener('touchcancel', () => {
 });
 
 function navigateDock(tab) {
+  try { swipeSaveCurrent(); } catch (ignore) { }   // 点底栏离开时也存一份，滑动回来能直接秒出
   if (state.route === 'detail') state.previous = null;
   if (tab === 'home') goHome();
   else if (tab === 'library') goLibrary();
