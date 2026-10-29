@@ -2001,25 +2001,32 @@ async function goCategory(tab, sub = state.sub[tab], keepCompact = false) {
   const cached = await api('cached', { key: `category:${id}:1` }).catch(() => null);
   if (token !== routeToken) return;
   state.category = cached?.data ? { ...cached.data, refreshing: true, loading: false, error: false } : null;
-  // adopted：DOM 已是这一页，补上滚动到底加载/图片补齐就够，别整套重渲染（那一闪就是它）
-  if (adopted && state.category) { try { hydrateImages(); } catch (ignore) { } observeCategoryEnd(); }
+  // adopted：滑动已把这一页真实 DOM 放下 —— 绝不换骨架、绝不重渲染（那一闪就是它）。
+  // 只补图片 + 续上「滚动到底加载更多」；底层数据等 fresh 到了再更新（见下方 try）。
+  if (adopted) { try { hydrateImages(); } catch (ignore) { } if (state.category) observeCategoryEnd(); }
   else if (state.category) renderCategory(keepCompact); else renderSkeleton();
   try {
     const fresh = await refreshing;
     if (token !== routeToken) return;
-    const changed = state.category && listSignature(state.category) !== listSignature(fresh);
-    const firstLoad = !state.category;
-    const previousScroll = scroll.scrollTop;
     state.category = { ...fresh, refreshing: false, loading: false, error: false };
     state.categoryItems = asArray(fresh.items);
-    if (firstLoad || changed) {
-      renderCategory(keepCompact || state.compactHeld);
-      if (!firstLoad) scroll.scrollTop = previousScroll;
-    } else {
-      refreshMissingImages(asArray(fresh.items));
+    if (adopted) {
+      // 维持已落位的 DOM，只补齐图片与页脚，不整体重渲染（避免那一闪）
+      try { refreshMissingImages(asArray(fresh.items)); } catch (ignore) { }
       updateCategoryFooter();
+    } else {
+      const changed = state.category && listSignature(state.category) !== listSignature(fresh);
+      const firstLoad = !state.category;
+      const previousScroll = scroll.scrollTop;
+      if (firstLoad || changed) {
+        renderCategory(keepCompact || state.compactHeld);
+        if (!firstLoad) scroll.scrollTop = previousScroll;
+      } else {
+        refreshMissingImages(asArray(fresh.items));
+        updateCategoryFooter();
+      }
+      if (changed) toast('更新成功');
     }
-    if (changed) toast('更新成功');
   } catch (error) {
     if (token !== routeToken) return;
     if (!state.category) renderError(error, 'category');
@@ -3223,55 +3230,102 @@ function heroTapGuard(el) {
 function heroOwnsGesture(event) {
   return !!event.target.closest?.('.hero') && event.touches.length === 1;
 }
+// 顶部轮播：横滑「跟手」翻页 —— 手指拖动时当前页与相邻页一起跟着手指平移，
+// 松手过阈值才真正落定到下一/上一页；不够则弹回。竖向手势照常交给页面滚动。
+function heroBuildPartner(ht, dir) {
+  const slides = bannerSlides();
+  const count = slides.length;
+  if (count < 2) return null;
+  if (ht.partner && ht.partnerDir === dir) return ht.partner;
+  if (ht.partner) { ht.partner.remove(); ht.partner = null; }
+  const idx = (bannerIndex() + dir + count) % count;
+  const item = slides[idx];
+  const template = document.createElement('template');
+  template.innerHTML = state.route === 'category' ? categorySlide(item, idx, count) : heroSlide(item, idx, count);
+  const node = template.content.firstElementChild;
+  node.style.transition = 'none';
+  node.style.transform = `translateX(${dir > 0 ? 100 : -100}%)`;
+  ht.hero.appendChild(node);
+  const img = node.querySelector('img');
+  if (img) {
+    getCover(item.cover).then(src => { if (ht.partner === node && src) img.src = src; }).catch(() => { });
+    if (item.kind !== 'campaign' && state.route === 'home') {
+      getCover(item.cover).then(() => { if (ht.partner === node) applyBannerPalette(img); }).catch(() => { });
+    }
+  }
+  ht.partner = node; ht.partnerDir = dir;
+  return node;
+}
+function heroCommit(ht, dir, targetIndex) {
+  const cur = ht.current, partner = ht.partner, hero = ht.hero;
+  if (!partner) { changeBanner(targetIndex, dir); return; }   // 相邻页还没建好（极端），退回原动画
+  bannerChanging = true;
+  cur.classList.add('animating'); partner.classList.add('animating');
+  cur.style.transition = ''; partner.style.transition = '';
+  cur.style.transform = `translateX(${dir > 0 ? -100 : 100}%)`;
+  partner.style.transform = 'translateX(0)';
+  if (state.route === 'category') state.categoryBanner = targetIndex; else state.banner = targetIndex;
+  content.querySelectorAll('.hero-dots [data-slide]').forEach(dot => dot.classList.toggle('active', Number(dot.dataset.slide) === targetIndex));
+  setTimeout(() => {
+    if (hero.isConnected && cur.isConnected) cur.remove();
+    partner.classList.remove('animating');
+    partner.style.transform = ''; partner.style.transition = '';
+    bannerChanging = false; scheduleBannerAuto();
+  }, 340);
+}
+function heroSnap(ht, dir) {
+  const cur = ht.current, partner = ht.partner;
+  if (cur) { cur.classList.add('animating'); cur.style.transition = ''; cur.style.transform = 'translateX(0)'; setTimeout(() => { if (cur.isConnected) { cur.classList.remove('animating'); cur.style.transform = ''; cur.style.transition = ''; } }, 340); }
+  if (partner) { partner.classList.add('animating'); partner.style.transition = ''; partner.style.transform = `translateX(${dir > 0 ? 100 : -100}%)`; setTimeout(() => { if (partner.isConnected) partner.remove(); }, 340); }
+}
 content.addEventListener('touchstart', event => {
   if (!heroOwnsGesture(event)) return;
+  if (bannerChanging) return;
   stopBannerAuto();
   heroTapSuppressed = false;
   const touch = event.touches[0];
-  heroTouch = { x: touch.clientX, y: touch.clientY, moved: false, axis: null };
+  const hero = content.querySelector('.hero');
+  const current = hero && hero.querySelector('.hero-slide');
+  if (!hero || !current) { heroTouch = null; return; }
+  const rect = hero.getBoundingClientRect();
+  heroTouch = { x: touch.clientX, y: touch.clientY, moved: false, axis: null, hero, current, width: rect.width, dx: 0, dir: 0, partner: null, partnerDir: 0 };
 }, { passive: true });
 content.addEventListener('touchmove', event => {
   if (!heroTouch || !event.touches.length) return;
-  const touch = event.touches[0];
-  const dx = touch.clientX - heroTouch.x, dy = touch.clientY - heroTouch.y;
+  const t = event.touches[0];
+  const dx = t.clientX - heroTouch.x, dy = t.clientY - heroTouch.y;
   if (!heroTouch.axis) {
     if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
     heroTouch.axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+    if (heroTouch.axis === 'x') { heroTouch.moved = true; heroTouch.current.style.transition = 'none'; }
   }
-  heroTouch.moved = true;
-  // 就地抑制：竖向长滑时 Chromium 会把后续 touchmove 全部吞掉，而且 touchend 的
-  // changedTouches 坐标还会回落到起点 —— 等到 touchend 再判就太晚了。
-  heroSuppressClickUntil = performance.now() + 600;
-  heroTapSuppressed = true;
+  // 竖向：交给页面滚动，只抑制补发的点击（避免滑过 hero 弹详情）
+  if (heroTouch.axis !== 'x') { heroSuppressClickUntil = performance.now() + 600; heroTapSuppressed = true; return; }
+  heroSuppressClickUntil = performance.now() + 600; heroTapSuppressed = true;
+  const dxv = Math.max(-heroTouch.width, Math.min(heroTouch.width, dx));
+  heroTouch.dx = dxv;
+  const dir = dxv < 0 ? 1 : -1;
+  heroTouch.dir = dir;
+  heroBuildPartner(heroTouch, dir);
+  heroTouch.current.style.transform = `translateX(${dxv}px)`;
+  if (heroTouch.partner) { heroTouch.partner.style.transition = 'none'; heroTouch.partner.style.transform = `translateX(calc(${dir > 0 ? 100 : -100}% + ${dxv}px))`; }
 }, { passive: true });
 content.addEventListener('touchend', event => {
   if (!heroTouch) return;
-  const start = heroTouch;
-  heroTouch = null;
+  const ht = heroTouch; heroTouch = null;
   scheduleBannerAuto();
-  const touch = event.changedTouches[0];
-  if (!touch) return;
-  // 位移一律以 touchend 的实际坐标为准：竖向大滑动时 Chromium 会把后续 touchmove
-  // 全部吞掉（它接管去滚页面），touchmove 里记的 moved/axis 到不了这里，
-  // 于是"滑过 hero 却仍弹出详情页"——必须用起止坐标兜底。
-  const dx = touch.clientX - start.x, dy = touch.clientY - start.y;
-  if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
-    heroSuppressClickUntil = performance.now() + 600;
-    heroTapSuppressed = true;
-  }
-  const horizontal = start.axis === 'x' || (!start.moved && Math.abs(dx) > Math.abs(dy));
-  if (!horizontal || Math.abs(dx) < 42 || !isBannerRoute()) return;
-  const count = bannerSlides().length;
-  if (!count) return;
-  const direction = dx < 0 ? 1 : -1;
-  changeBanner((bannerIndex() + direction + count) % count, direction);
+  if (ht.axis !== 'x' || !ht.moved) return;
+  const dx = ht.dx, dir = ht.dir, count = bannerSlides().length;
+  if (count < 2) { heroSnap(ht, dir); return; }
+  const threshold = Math.max(42, ht.width * 0.18);
+  if (Math.abs(dx) >= threshold) heroCommit(ht, dir, (bannerIndex() + dir + count) % count);
+  else heroSnap(ht, dir);
 }, { passive: true });
 content.addEventListener('touchcancel', () => {
   if (!heroTouch) return;
-  heroTouch = null;
-  heroSuppressClickUntil = performance.now() + 600;
-  heroTapSuppressed = true;
-  scheduleBannerAuto();
+  const ht = heroTouch; heroTouch = null;
+  heroSuppressClickUntil = performance.now() + 600; heroTapSuppressed = true;
+  heroSnap(ht, ht.dir); scheduleBannerAuto();
 }, { passive: true });
 // 第三重兜底：hero 手势仍在手、页面却已经开始滚动 → 这次抬手注定不是「点开详情」。
 // 只有在 hero 上按下时才会生效，普通浏览滚动不受影响。
