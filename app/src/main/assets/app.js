@@ -2369,6 +2369,100 @@ let swipeTrack = null;
 
 // 目标页 DOM 缓存：key -> 节点克隆。滑动提交后写入，命中即免骨架。
 const swipePageCache = new Map();
+let swipePrefetchBusy = false;
+// 离屏容器：预取克隆挂在这里静默补图，不可见也不影响布局
+const swipeOffstage = document.createElement('div');
+swipeOffstage.style.cssText = 'position:fixed;left:-99999px;top:0;width:100%;visibility:hidden;pointer-events:none;';
+document.addEventListener('DOMContentLoaded', () => document.body.appendChild(swipeOffstage));
+if (document.body) document.body.appendChild(swipeOffstage);
+
+// 空闲预取：把其余底栏页用真实数据渲染一遍、克隆进缓存，滑动时直接秒出真内容（骨架只是兜底）。
+// 手法：取数据（不渲染）→ routeToken++ 作废在途渲染 → 同步渲染进 content → 克隆 → 同步恢复原页。
+// 渲染与恢复之间没有 await，浏览器不会在中间绘制，用户全程看不到闪动。
+async function swipePrefetch(keyOrFn, prepare, render) {
+  if (swipePageCache.size >= 12 || swipePrefetchBusy || document.hidden || swiping || swipeTrack || state.route === 'detail') return;
+  swipePrefetchBusy = true;
+  try {
+    // 阶段一（异步）：只取数据，绝不碰 state、绝不渲染 —— 期间用户随便操作。
+    const data = await prepare();
+    if (!data || swiping || swipeTrack || swipePageCache.size >= 12) return;
+    const key = typeof keyOrFn === 'function' ? keyOrFn() : keyOrFn;
+    if (!key || swipePageCache.has(key)) return;
+    // 阶段二（同步窗口）：改 state → 渲染 → 克隆 → 恢复，中间没有任何 await，
+    // 用户事件只能排在整个窗口之后，不存在竞态，也看不到闪动。
+    routeToken++;
+    const savedNode = content.firstElementChild;
+    const resumeTop = scroll.scrollTop;   // 同步窗口开始时的真实滚动位置（取数阶段用户可能滚过）
+    const saved = {
+      route: state.route, tab: state.tab, sub: { ...state.sub }, libraryTab: state.libraryTab,
+      library: state.library, home: state.home, category: state.category, categoryBanner: state.categoryBanner,
+      categoryItems: state.categoryItems, query: state.query, filter: state.filter, compactHeld: state.compactHeld,
+      compactHTML: compact.innerHTML,
+    };
+    let clone = null;
+    try {
+      render(data);
+      const node = content.firstElementChild;
+      if (node && !node.classList.contains('swipe-skel') && !node.classList.contains('error-state')) {
+        clone = node.cloneNode(true);
+      }
+    } finally {
+      routeToken++;
+      stopBannerAuto();
+      try { categoryObserver?.disconnect(); } catch (ignore) { }
+      state.route = saved.route; state.tab = saved.tab; state.sub = saved.sub;
+      state.libraryTab = saved.libraryTab; state.library = saved.library; state.home = saved.home;
+      state.category = saved.category; state.categoryBanner = saved.categoryBanner;
+      state.categoryItems = saved.categoryItems;
+      state.query = saved.query; state.filter = saved.filter; state.compactHeld = saved.compactHeld;
+      content.replaceChildren(savedNode);
+      compact.innerHTML = saved.compactHTML;
+      scroll.scrollTop = resumeTop;
+    }
+    if (clone) {
+      swipeOffstage.appendChild(clone);
+      try { hydrateImages(clone); } catch (ignore) { }
+      swipePageCache.set(key, clone);
+      while (swipePageCache.size > 12) swipePageCache.delete(swipePageCache.keys().next().value);
+    }
+  } catch (error) { }
+  swipePrefetchBusy = false;
+}
+
+async function swipePrefetchAll() {
+  if (swipePrefetchBusy || document.hidden || state.route === 'detail') return;
+  const homeJob = ['home', async () => {
+    const cached = await api('cached', { key: 'home' }).catch(() => null);
+    const home = cached?.data || await withTimeout(api('home'), 8000).catch(() => null);
+    if (!home) return null;
+    const library = await api('library').catch(() => null) || state.library;
+    return { home, library };
+  }, (data) => { state.home = data.home; state.library = data.library; renderHome(); }];
+  const categoryJobs = ['adult', 'ai'].map(tab => [
+    () => 'category:' + tab + ':0',
+    async () => {
+      const id = categoryIds[tab][0];
+      const cached = await api('cached', { key: `category:${id}:1` }).catch(() => null);
+      const fresh = cached?.data || await withTimeout(api('category', { id, page: 1 }), 8000).catch(() => null);
+      return fresh ? { fresh, tab } : null;
+    },
+    (data) => {
+      state.tab = data.tab; state.sub[data.tab] = 0; state.categoryBanner = 0;
+      state.category = { ...data.fresh, refreshing: false, loading: false, error: false };
+      state.categoryItems = asArray(data.fresh.items);
+      renderCategory();
+    },
+  ]);
+  const libraryJob = ['library:history', async () => {
+    const library = await withTimeout(api('library'), 8000).catch(() => null) || state.library;
+    return { library };
+  }, (data) => { state.library = data.library; state.libraryTab = 'history'; state.query = ''; renderLibrary(); }];
+  for (const [key, prepare, render] of [homeJob, ...categoryJobs, libraryJob]) {
+    if (document.hidden || swiping || swipeTrack) return;
+    if (typeof key === 'string' && swipePageCache.has(key)) continue;
+    await swipePrefetch(key, prepare, render);
+  }
+}
 
 // 这些元素自身要横向滚动，手势让位（首页 .film-row 是网格不能横滚，所以不在列）。
 const SWIPE_IGNORE = '.filter-row,.home-tag-scroll,.search-form,input,textarea,select,.proxy-mode-dd-menu,.episode-grid';
@@ -2469,7 +2563,8 @@ function swipeResolve(delta) {
   const index = DOCK_ORDER.indexOf(state.route === 'category' ? state.tab : state.route);
   const next = DOCK_ORDER[index + delta];
   if (!next) return null;
-  const key = next === 'library' ? 'library:' + state.libraryTab : next;
+  const key = next === 'library' ? 'library:' + state.libraryTab
+    : next === 'home' ? 'home' : 'category:' + next + ':' + (state.sub[next] || 0);
   return {
     mode: 'page',       // 底栏页之间：整页平移
     go: () => navigateDock(next),
@@ -2502,11 +2597,56 @@ function swipeOpenTrack(delta, dx) {
   inner.appendChild(node);
   panel.appendChild(inner);
   (document.getElementById('app') || document.body).appendChild(panel);
-  const mode = resolve.mode === 'inline' ? 'inline' : 'page';
-  const curTabs = mode === 'inline' ? swipeTabNodes(content.firstElementChild) : [];
-  const nextTabs = mode === 'inline' ? swipeTabNodes(node) : [];
-  nextTabs.forEach(el => { el.style.visibility = 'hidden'; });   // 目标页 tab 会被当前页的同位置 tab 盖住，先隐藏避免重影
-  swipeTrack = { panel, inner, mode, curTabs, nextTabs, width: Math.round(box.width || scroll.clientWidth || 360), dirSign: delta > 0 ? 1 : -1, guard: 0, resolve };
+  // inline（页内子项）：页头克隆到独立固定层绝对钉住（不可能被任何容器裁剪），
+  // 内容区单独平移；面板从内容区顶部开始，目标页页头临时摘除使内容对齐。
+  const track = { panel, inner, mode: 'page', width: Math.round(box.width || scroll.clientWidth || 360), dirSign: delta > 0 ? 1 : -1, guard: 0, resolve, pinned: [], clones: [], moving: [], savedDisplays: [] };
+  const pageNode = content.firstElementChild;
+  if (resolve.mode === 'inline' && pageNode) {
+    const tab = pageNode.querySelector(SWIPE_TAB_SELECTOR);
+    if (tab && tab.parentElement) {
+      const kids = [...tab.parentElement.children];
+      const ti = kids.indexOf(tab);
+      track.mode = 'inline';
+      track.pinned = kids.slice(0, ti + 1);      // 页头 = tab 栏及其上方全部区块
+      track.moving = kids.slice(ti + 1);          // 内容 = tab 栏下方全部
+      // 页头壳：克隆整个页面节点、删掉内容区只留页头 —— DOM 上下文完整，布局与原页绝对一致，
+      // 固定在页面原位（fixed 用视口坐标，含滚动偏移），拖动全程纹丝不动。
+      const pageRect = pageNode.getBoundingClientRect();
+      const shell = pageNode.cloneNode(true);
+      const shellTab = shell.querySelector(SWIPE_TAB_SELECTOR);
+      if (shellTab) {
+        let sib = shellTab.nextElementSibling;
+        while (sib) { const next = sib.nextElementSibling; sib.remove(); sib = next; }
+        shell.style.cssText += `;position:fixed;left:${Math.round(pageRect.left)}px;top:${Math.round(pageRect.top)}px;width:${Math.round(pageRect.width)}px;margin:0;z-index:14;pointer-events:none;`;
+        document.body.appendChild(shell);
+        track.clones.push(shell);
+      }
+      for (const el of track.pinned) el.style.visibility = 'hidden';   // 原页头让位给壳
+      // 目标页页头临时摘除（display:none），其内容上移到面板顶部与当前页内容区对齐
+      const nodeTab = node.querySelector(SWIPE_TAB_SELECTOR);
+      if (nodeTab && nodeTab.parentElement) {
+        const nk = [...nodeTab.parentElement.children];
+        const ni = nk.indexOf(nodeTab);
+        for (const el of nk.slice(0, ni + 1)) { track.savedDisplays.push([el, el.style.display]); el.style.display = 'none'; }
+      }
+    }
+  }
+  if (track.mode === 'inline') {
+    const firstMoving = track.moving[0];
+    const contentTop = firstMoving ? Math.round(firstMoving.getBoundingClientRect().top) : null;
+    if (contentTop != null && contentTop > box.top) {
+      panel.style.top = `${contentTop}px`;
+      panel.style.height = `${Math.max(80, Math.round(box.bottom - contentTop))}px`;
+      inner.style.paddingTop = '0';
+      inner.style.overflow = 'hidden';
+    } else {
+      inner.style.paddingTop = getComputedStyle(scroll).paddingTop;
+    }
+  } else {
+    inner.style.paddingTop = getComputedStyle(scroll).paddingTop;
+  }
+  inner.appendChild(node);
+  swipeTrack = track;
   routeToken++;   // 作废未落地的异步渲染，防止拖动中 content 被覆盖
   swipeLayTrack(dx);
   swipeTrack.guard = setTimeout(() => { if (swipeTrack) swipeCloseTrack(false); }, 1500);
@@ -2516,18 +2656,20 @@ function swipeOpenTrack(delta, dx) {
 function swipeLayTrack(dx) {
   const t = swipeTrack;
   if (!t) return;
-  scroll.style.transform = `translateX(${dx}px)`;
-  t.panel.style.transform = `translateX(${t.dirSign * t.width + dx}px)`;
   if (t.mode === 'inline') {
-    const back = `translateX(${-dx}px)`;
-    for (const el of t.curTabs) el.style.transform = back;   // 反向抵消，tab 栏留在原地不动
+    for (const el of t.moving) el.style.transform = `translateX(${dx}px)`;   // 只有内容区跟手
+  } else {
+    scroll.style.transform = `translateX(${dx}px)`;
   }
+  t.panel.style.transform = `translateX(${t.dirSign * t.width + dx}px)`;
 }
 
-// 收拾：把为跟手临时加的行内样式全部撤掉
+// 收拾：把为跟手临时加的行内样式/克隆全部撤掉
 function swipeClearTabs(t) {
-  for (const el of t.curTabs) el.style.transform = '';
-  for (const el of t.nextTabs) el.style.visibility = '';
+  for (const el of t.pinned || []) el.style.visibility = '';
+  for (const [el, d] of t.savedDisplays || []) el.style.display = d;
+  for (const el of t.moving || []) el.style.transform = '';
+  for (const c of t.clones || []) c.remove();
 }
 
 // 松手：提交则当前页滑出、目标页落位并真正路由；取消则全部归位（零副作用）。
@@ -2553,6 +2695,7 @@ function swipeCloseTrack(commit) {
       t.panel.remove();
       swiping = false;
       try { Promise.resolve(t.resolve.go()).catch(() => { }); } catch (ignore) { }
+      setTimeout(() => { swipePrefetchAll().catch(() => { }); }, 1500);
     }, 210);
   } else {
     scroll.style.transform = 'translateX(0)';
@@ -2969,6 +3112,7 @@ document.getElementById('age-confirm').addEventListener('click', async () => { a
 document.getElementById('age-exit').textContent = '返回红果';
 document.getElementById('age-exit').addEventListener('click', () => { document.getElementById('age-gate').hidden = true; });
 contentReady.then(() => startHome()).catch(error => renderError(error, 'home'));
+setTimeout(() => { swipePrefetchAll().catch(() => { }); }, 5000);
 
 let pendingResourceRevision = 0;
 let resourceApplyTimer = null;
