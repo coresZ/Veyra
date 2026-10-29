@@ -295,8 +295,7 @@ html[data-theme=dark] #dock::after{
     width .26s cubic-bezier(.32,1.34,.28,1),
     height .26s cubic-bezier(.32,1.34,.28,1),
     margin .26s cubic-bezier(.32,1.34,.28,1),
-    border-radius .26s cubic-bezier(.32,1.34,.28,1),
-    background .2s ease,box-shadow .2s ease;
+    border-radius .26s cubic-bezier(.32,1.34,.28,1);
 }
 html[data-theme=dark] #dock-blob b{
   background:rgba(34,40,43,.06);
@@ -311,28 +310,14 @@ html[data-theme=dark] #dock-blob b{
   -webkit-backdrop-filter:url(#dock-lens-blob);
   backdrop-filter:url(#dock-lens-blob);
 }
-/* 按住拖动：透镜整体撑大 —— 左右各外扩 8px，向上顶出底栏约 7px、向下溢出约 5px */
+/* 按住拖动：透镜整体撑大 —— 左右各外扩 8px，向上顶出底栏约 7px、向下溢出约 5px。
+ * 只改尺寸（"拿起一块更厚的玻璃"），绝不动 background/box-shadow —— 否则松手落位时
+ * 会触发一次 .2s 的颜色回弹，出现"滑完莫名其妙变个色"的割裂感。 */
 #dock.dragging #dock-blob b{
   width:calc(100% + 16px);
   height:calc(100% + 22px);
   margin:-12px -8px -10px;
   border-radius:calc(22px * var(--corner-scale,1));
-  background:rgba(255,252,244,.10);
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,.85),
-    inset 0 -1px 0 rgba(255,255,255,.26),
-    inset 1px 0 0 rgba(255,255,255,.54),
-    inset -1px 0 0 rgba(255,255,255,.54),
-    0 12px 30px rgba(8,14,24,.18);
-}
-html[data-theme=dark] #dock.dragging #dock-blob b{
-  background:rgba(34,40,43,.10);
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,.40),
-    inset 0 -1px 0 rgba(255,255,255,.14),
-    inset 1px 0 0 rgba(255,255,255,.26),
-    inset -1px 0 0 rgba(255,255,255,.26),
-    0 12px 30px rgba(8,14,24,.24);
 }
 /* 图标：不动。只改颜色/透明度 */
 #dock button{
@@ -445,7 +430,7 @@ html[data-theme=dark] .account-role.is-vip{color:#e0b64a}
  * 好处：静止态、拖动中、滑动跟手三种情况共用同一枚透镜，物理上不可能出现
  *       "拖动时一个样、落地又一个样" / "旁边的项突然变色" 这类突变。
  */
-.segmented,.compact-tabs{position:relative}
+.segmented,.compact-tabs{position:relative;touch-action:none}
 .seg-blob{
   position:absolute;top:5px;left:0;
   height:calc(100% - 10px);width:25%;
@@ -474,8 +459,7 @@ html[data-theme=dark] .account-role.is-vip{color:#e0b64a}
     width .26s cubic-bezier(.32,1.34,.28,1),
     height .26s cubic-bezier(.32,1.34,.28,1),
     margin .26s cubic-bezier(.32,1.34,.28,1),
-    border-radius .26s cubic-bezier(.32,1.34,.28,1),
-    background .2s ease,box-shadow .2s ease;
+    border-radius .26s cubic-bezier(.32,1.34,.28,1);
 }
 html[data-theme=dark] .seg-blob b{
   background:rgba(34,40,43,.12);
@@ -487,30 +471,13 @@ html[data-theme=dark] .seg-blob b{
     inset 0 0 0 1px rgba(255,255,255,.06),
     0 10px 26px rgba(8,14,24,.16);
 }
-/* 被手指「拿起」：整体撑大一点（左右各 6px、上下各 4px），像拿起一块更厚的玻璃 */
+/* 被手指「拿起」：整体撑大一点（左右各 6px、上下各 4px），像拿起一块更厚的玻璃。
+ * 只改尺寸，绝不动 background/box-shadow —— 与 dock 同源，避免松手落位时颜色回弹。 */
 .segmented.dragging .seg-blob b,.compact-tabs.dragging .seg-blob b{
   width:calc(100% + 12px);
   height:calc(100% + 8px);
   margin:-4px -6px;
   border-radius:calc(18px * var(--corner-scale,1));
-  background:rgba(255,252,244,.17);
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,.90),
-    inset 0 -1px 0 rgba(255,255,255,.30),
-    inset 1px 0 0 rgba(255,255,255,.60),
-    inset -1px 0 0 rgba(255,255,255,.60),
-    inset 0 0 0 1px rgba(8,14,24,.06),
-    0 12px 30px rgba(8,14,24,.20);
-}
-html[data-theme=dark] .segmented.dragging .seg-blob b,html[data-theme=dark] .compact-tabs.dragging .seg-blob b{
-  background:rgba(34,40,43,.18);
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,.44),
-    inset 0 -1px 0 rgba(255,255,255,.16),
-    inset 1px 0 0 rgba(255,255,255,.28),
-    inset -1px 0 0 rgba(255,255,255,.28),
-    inset 0 0 0 1px rgba(255,255,255,.07),
-    0 12px 30px rgba(8,14,24,.20);
 }
 /* 按钮只是文字：底色/阴影全交给透镜，彻底杜绝“按钮自己那一层”造成的跳色 */
 .segmented button,.compact-tabs button{
