@@ -5,8 +5,9 @@
  *   1) 每条 tab 栏内各挂一枚玻璃透镜（.seg-blob > b），静止时停在 .selected 那格下面；
  *   2) 按住任一格 → 透镜先吸附过去，横向拖动时透镜跟手并被「拿起」（.dragging 放大），
  *      被拖到的格文字加深（.drag-over），其余变淡（.dim）；
- *   3) 松手：停在别的格上 → 派发该格的 click（交给 app.js 原有 [data-library-tab] / [data-sub]
- *      导航链路），原地/空白 → 弹簧弹回当前选中格。
+ *   3) 松手：悬停在哪格就切到哪格（悬停按横坐标在栏内的最近格判定，
+ *      手指滑到栏外/栏下方也不丢目标）→ 派发该格的 click（交给 app.js 原有
+ *      [data-library-tab] / [data-sub] 导航链路），原地 → 弹簧弹回当前选中格。
  * 不接管导航，只做手势与视觉 —— 和 dock-glass.js 的分工一致。
  *
  * 对外还暴露 setProgress(from,to,q)：给「内容区横滑切页」复用同一枚透镜做跟手插值，
@@ -146,9 +147,47 @@
   }
 
   /* ---------------- 手势：与 dock-glass.js 同结构 ---------------- */
+  /* 拖动后吞掉系统补发的那次 click：
+   * - 轻点：补发 click 落在栏内，只需吃栏内的；
+   * - 拖动：手指可能已滑出栏条，补发 click 会落在栏外（误开卡片），须在 document 层全吃。
+   * 自己派发的导航 click（hit.click()）用 selfClick 放行，不被窗口误伤。 */
+  let suppressUntil = 0;
+  let suppressEverywhere = false;
+  let selfClick = false;
+  document.addEventListener('click', e => {
+    if (selfClick || performance.now() >= suppressUntil) return;
+    if (suppressEverywhere || !(e.target instanceof Element) || e.target.closest(SELECTOR)) {
+      e.stopPropagation(); e.preventDefault();
+    }
+  }, true);
+
   function bind(h) {
     const bar = h.bar;
-    let suppressClickUntil = 0;
+
+    const trackMove = e => {
+      const dx = e.clientX - h.startX, dy = e.clientY - h.startY;
+      if (!h.dragging) {
+        if (Math.abs(dx) < DRAG_SLOP && Math.abs(dy) < DRAG_SLOP) return;
+        if (Math.abs(dx) <= Math.abs(dy)) return;        // 竖向 → 让页面滚动
+        h.dragging = true;
+        h.setDragging(true);
+        buzz(8);
+      }
+      h.follow(e.clientX);
+      // 悬停判定只看横坐标在栏内的投影（离哪格最近就算哪格）：
+      // 手指拖动时经常滑到栏外/栏下方，elementFromPoint(指针位置) 会取不到按钮，
+      // 导致「透镜明明拖到了这格、松手却不切」——悬停必须与透镜位置同源。
+      const items = listOf(bar);
+      const rects = h.rects();
+      const x = e.clientX - bar.getBoundingClientRect().left;
+      let best = null, bestD = Infinity;
+      items.forEach((el, i) => {
+        const r = rects[i];
+        const dd = x < r.l ? r.l - x : (x > r.l + r.w ? x - (r.l + r.w) : 0);
+        if (dd < bestD) { bestD = dd; best = el; }
+      });
+      h.setHover(best);
+    };
 
     bar.addEventListener('pointerdown', e => {
       if (e.button != null && e.button !== 0) return;
@@ -163,34 +202,18 @@
       h.paint(btn, true);          // 按下即成为焦点：透镜先吸附过去
     }, { passive: true });
 
-    bar.addEventListener('pointermove', e => {
-      if (h.pointerId === null || e.pointerId !== h.pointerId) return;
-      const dx = e.clientX - h.startX, dy = e.clientY - h.startY;
-      if (!h.dragging) {
-        if (Math.abs(dx) < DRAG_SLOP && Math.abs(dy) < DRAG_SLOP) return;
-        if (Math.abs(dx) <= Math.abs(dy)) return;        // 竖向 → 让页面滚动
-        h.dragging = true;
-        h.setDragging(true);
-        buzz(8);
-      }
-      h.follow(e.clientX);
-      const hit = document.elementFromPoint(e.clientX, e.clientY);
-      const btn = hit ? hit.closest('button') : null;
-      h.setHover(btn && bar.contains(btn) ? btn : null);
-    }, { passive: true });
-
     const finish = (e, cancelled) => {
       if (h.pointerId === null || (e && e.pointerId !== h.pointerId)) return;
-      const pid = h.pointerId;
       const wasDragging = h.dragging;
       const target = h.hovered;
       h.pointerId = null; h.dragging = false;
-      try { bar.releasePointerCapture(pid); } catch (_) { }
+      try { bar.releasePointerCapture(e.pointerId); } catch (_) { }
       h.release();
-      if (cancelled) { suppressClickUntil = 0; return; }
+      if (cancelled) { suppressUntil = 0; return; }
       const cur = currentOf(bar);
       let hit = target;
-      if (!hit && e) {
+      if (!hit && e && !wasDragging) {
+        // 轻点兜底：手指通常就落在按钮上
         const el = document.elementFromPoint(e.clientX ?? 0, e.clientY ?? 0);
         const btn = el ? el.closest('button') : null;
         hit = btn && bar.contains(btn) ? btn : null;
@@ -199,20 +222,31 @@
       // 一律自己派发 click：pointer capture 会把浏览器补发的 click 重定向到栏身上，
       // 届时 closest('[data-library-tab]') 取不到按钮——轻点就会「没反应」。
       // 轻点（没拖动）时即使原地重复点也照常派发，保持与浏览器原生点击一致的行为。
-      if (hit && (!wasDragging || hit !== cur)) hit.click();
-      suppressClickUntil = performance.now() + 350;   // 吃掉系统补发的那次 click
+      if (hit && (!wasDragging || hit !== cur)) {
+        selfClick = true;
+        try { hit.click(); } finally { selfClick = false; }
+      }
+      suppressEverywhere = wasDragging;
+      suppressUntil = performance.now() + 350;   // 吃掉系统补发的那次 click
     };
 
-    bar.addEventListener('pointerup', e => finish(e, false));
-    bar.addEventListener('pointercancel', e => finish(e, true));
-    bar.addEventListener('lostpointercapture', e => { if (h.pointerId !== null) finish(e, true); });
+    /* 移动/松手挂 document 捕获段：指针捕获偶尔会被系统提前收回
+     * （部分 WebView、无头环境都会出现，pointerup 直接到不了栏上），
+     * 表现为「透镜拖过去了、松手却不切换」。捕获只作加速，不作依赖。 */
+    document.addEventListener('pointermove', e => {
+      if (h.pointerId === null || e.pointerId !== h.pointerId) return;
+      trackMove(e);
+    }, { passive: true, capture: true });
+    document.addEventListener('pointerup', e => {
+      if (h.pointerId === null || e.pointerId !== h.pointerId) return;
+      finish(e, false);
+    }, { passive: true, capture: true });
+    document.addEventListener('pointercancel', e => {
+      if (h.pointerId === null || e.pointerId !== h.pointerId) return;
+      finish(e, true);
+    }, { passive: true, capture: true });
 
-    /* 拖动后吞掉浏览器补发的那次 click，避免再导航一次 */
-    bar.addEventListener('click', e => {
-      if (performance.now() < suppressClickUntil) { e.stopPropagation(); e.preventDefault(); }
-    }, true);
-
-    h.__suppress = () => suppressClickUntil;
+    h.__suppress = () => suppressUntil;
 
     /* selected 类由 app.js 切换，这里同步透镜位置 */
     const mo = new MutationObserver(() => { if (!h.dragging) h.animate(); });

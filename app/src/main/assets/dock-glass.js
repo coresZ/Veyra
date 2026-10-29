@@ -21,7 +21,9 @@
   let pointerId = null;
   let startX = 0, startY = 0;
   let hovered = null;
+  let pressedBtn = null;
   let suppressClickUntil = 0;
+  let selfClick = false;   // 自己派发的导航 click 要放行，不被上一次拖动遗留的窗口误吞
   let rafId = 0;
 
   const current = () => dock.querySelector('[data-nav].active') || buttons[0];
@@ -89,14 +91,14 @@
     startY = e.clientY;
     dragging = false;
     hovered = null;
+    pressedBtn = btn;
     try { dock.setPointerCapture(pointerId); } catch (_) {}
     /* 按下即成为焦点：透镜先吸附到按下的按钮；拖动时透镜再跟手并放大 */
     btn.classList.add('holding');
     paint(btn, true);
   }, { passive: true });
 
-  dock.addEventListener('pointermove', e => {
-    if (pointerId === null || e.pointerId !== pointerId) return;
+  function trackMove(e) {
     const dx = e.clientX - startX;
     const dy = e.clientY - startY;
     if (!dragging) {
@@ -107,19 +109,29 @@
       buzz(8);
     }
     follow(e.clientX);
-    /* 命中检测：透镜 pointer-events:none，所以 elementFromPoint 拿到的是按钮 */
-    const hit = document.elementFromPoint(e.clientX, e.clientY);
-    const btn = hit ? hit.closest('#dock [data-nav]') : null;
-    setHovered(btn || null);
-  }, { passive: true });
+    /* 命中判定只看横坐标在 dock 内的投影（离哪个按钮最近就算哪个），与透镜位置同源 ——
+     * 手指拖动时经常漂到 dock 上方/下方，elementFromPoint(指针位置) 会取不到按钮，
+     * 导致「透镜明明拖到了这格、松手却不切」。 */
+    const d = dock.getBoundingClientRect();
+    const x = e.clientX - d.left;
+    let best = null, bestD = Infinity;
+    buttons.forEach(b => {
+      const m = metrics(b);
+      const dd = x < m.x ? m.x - x : (x > m.x + m.w ? x - (m.x + m.w) : 0);
+      if (dd < bestD) { bestD = dd; best = b; }
+    });
+    setHovered(best);
+  }
 
   function finish(e, cancelled) {
     if (pointerId === null || (e && e.pointerId !== pointerId)) return;
     const pid = pointerId;
     const wasDragging = dragging;
     const target = hovered;
+    const tapped = pressedBtn;
     pointerId = null;
     dragging = false;
+    pressedBtn = null;
     dock.classList.remove('dragging');
     blob.style.transition = '';
     clearHover();
@@ -131,25 +143,45 @@
        * 否则原按钮会再导航一次。 */
       if (target && !cancelled && target !== current()) {
         buzz(6);
-        target.click();               // 交给 app.js 的 tapDock 处理，含双击回顶逻辑
+        selfClick = true;
+        try { target.click(); } finally { selfClick = false; }   // 交给 app.js 的 tapDock 处理，含双击回顶逻辑
       }
       suppressClickUntil = performance.now() + 350;
     } else {
-      suppressClickUntil = 0;
+      /* 轻点：pointer capture 生效时浏览器补发的 click 会被重定向到 dock 本身
+       * （closest('[data-nav]') 取不到，导航丢失），必须自己派发 —— 与 seg-glass 同源。 */
+      if (!cancelled && tapped && tapped.isConnected) {
+        selfClick = true;
+        try { tapped.click(); } finally { selfClick = false; }
+      }
+      suppressClickUntil = performance.now() + 350;
     }
     animate();                        // 无论成败都弹回合法焦点
   }
 
-  dock.addEventListener('pointerup', e => finish(e, false));
-  dock.addEventListener('pointercancel', e => finish(e, true));
-  dock.addEventListener('lostpointercapture', e => { if (pointerId !== null) finish(e, true); });
+  /* 移动/松手挂 document 捕获段：指针捕获偶尔会被系统提前收回
+   * （部分 WebView、无头环境都会出现，pointerup 直接到不了 dock 上），
+   * 表现为「透镜拖过去了、松手却不切换」。捕获只作加速，不作依赖。 */
+  document.addEventListener('pointermove', e => {
+    if (pointerId === null || e.pointerId !== pointerId) return;
+    trackMove(e);
+  }, { passive: true, capture: true });
+  document.addEventListener('pointerup', e => {
+    if (pointerId === null || e.pointerId !== pointerId) return;
+    finish(e, false);
+  }, { passive: true, capture: true });
+  document.addEventListener('pointercancel', e => {
+    if (pointerId === null || e.pointerId !== pointerId) return;
+    finish(e, true);
+  }, { passive: true, capture: true });
 
-  /* 拖动后吞掉浏览器补发的那次 click（app.js 的导航监听在 document 上） */
-  dock.addEventListener('click', e => {
-    if (performance.now() < suppressClickUntil) {
-      e.stopPropagation();
-      e.preventDefault();
-    }
+  /* 拖动后吞掉浏览器补发的那次 click（app.js 的导航监听在 document 上）。
+   * 窗口只在拖动后开启；手指若已滑出 dock，补发 click 会落在 dock 外，
+   * 所以要在 document 捕获段吃，轻点路径不受影响（窗口未开启）。 */
+  document.addEventListener('click', e => {
+    if (selfClick || performance.now() >= suppressClickUntil) return;
+    e.stopPropagation();
+    e.preventDefault();
   }, true);
 
   /* active 类由 app.js 切换，这里监听变化同步透镜位置 */
