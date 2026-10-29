@@ -1815,6 +1815,7 @@ function setNav(tab) {
 
 async function goHome() {
   const token = ++routeToken;
+  const adopted = swipeAdopting; swipeAdopting = false;   // 滑动已把首页真实 DOM 放好了就别再画一遍
   stopBannerAuto();
   setRoute('home'); state.tab = 'home'; setNav('home');
   const refreshing = api('home');
@@ -1822,7 +1823,8 @@ async function goHome() {
   if (token !== routeToken) return;
   state.library = library;
   state.home = cached?.data || null;
-  if (state.home) renderHome(); else renderSkeleton();
+  if (adopted && state.home) { try { hydrateImages(); scheduleBannerAuto(); } catch (ignore) { } }
+  else if (state.home) renderHome(); else renderSkeleton();
   try {
     const fresh = await refreshing;
     if (token !== routeToken) return;
@@ -1972,6 +1974,7 @@ async function loadMoreListing() {
 
 async function goCategory(tab, sub = state.sub[tab], keepCompact = false) {
   const token = ++routeToken;
+  const adopted = swipeAdopting; swipeAdopting = false;
   categoryObserver?.disconnect();
   if (state.route === 'home') rememberScreen();
   setRoute('category'); state.tab = tab; state.sub[tab] = sub; state.category = null; state.categoryBanner = 0;
@@ -1981,7 +1984,9 @@ async function goCategory(tab, sub = state.sub[tab], keepCompact = false) {
   const cached = await api('cached', { key: `category:${id}:1` }).catch(() => null);
   if (token !== routeToken) return;
   state.category = cached?.data ? { ...cached.data, refreshing: true, loading: false, error: false } : null;
-  if (state.category) renderCategory(keepCompact); else renderSkeleton();
+  // adopted：DOM 已是这一页，补上滚动到底加载/图片补齐就够，别整套重渲染（那一闪就是它）
+  if (adopted && state.category) { try { hydrateImages(); } catch (ignore) { } observeCategoryEnd(); }
+  else if (state.category) renderCategory(keepCompact); else renderSkeleton();
   try {
     const fresh = await refreshing;
     if (token !== routeToken) return;
@@ -2007,10 +2012,19 @@ async function goCategory(tab, sub = state.sub[tab], keepCompact = false) {
 
 async function goLibrary(tab = 'history') {
   const token = ++routeToken;
+  const adopted = swipeAdopting; swipeAdopting = false;
   if (state.route === 'home') rememberScreen();
   state.libraryTab = tab;
-  setRoute('library'); state.tab = 'library'; setNav('library'); renderSkeleton();
-  try { const library = await api('library'); if (token !== routeToken) return; state.library = library; renderLibrary(); }
+  setRoute('library'); state.tab = 'library'; setNav('library');
+  if (!adopted) renderSkeleton();
+  try {
+    const library = await api('library'); if (token !== routeToken) return; state.library = library;
+    if (adopted) {
+      // DOM 已落位，只补图片；但下载页的任务进度要实时，交给它自己刷列表
+      try { hydrateImages(); } catch (ignore) { }
+      if (state.libraryTab === 'downloads') renderLibraryDownloads();
+    } else renderLibrary();
+  }
   catch (error) { if (token === routeToken) renderError(error, 'library'); }
 }
 
@@ -2370,6 +2384,10 @@ let swipeTrack = null;
 // 目标页 DOM 缓存：key -> 节点克隆。滑动提交后写入，命中即免骨架。
 const swipePageCache = new Map();
 let swipePrefetchBusy = false;
+// swipeSaveGuard： adopting 窗口内禁止 swipeSaveCurrent（见下方说明）
+// swipeAdopting： 告诉下一次 go*()“目标页 DOM 已经就位，别再渲染一遍”
+let swipeSaveGuard = false;
+let swipeAdopting = false;
 // 离屏容器：预取克隆挂在这里静默补图，不可见也不影响布局
 const swipeOffstage = document.createElement('div');
 swipeOffstage.style.cssText = 'position:fixed;left:-99999px;top:0;width:100%;visibility:hidden;pointer-events:none;';
@@ -2395,7 +2413,7 @@ async function swipePrefetch(keyOrFn, prepare, render) {
     const resumeTop = scroll.scrollTop;   // 同步窗口开始时的真实滚动位置（取数阶段用户可能滚过）
     const saved = {
       route: state.route, tab: state.tab, sub: { ...state.sub }, libraryTab: state.libraryTab,
-      library: state.library, home: state.home, category: state.category, categoryBanner: state.categoryBanner,
+      library: state.library, libraryQuery: state.libraryQuery, home: state.home, category: state.category, categoryBanner: state.categoryBanner,
       categoryItems: state.categoryItems, query: state.query, filter: state.filter, compactHeld: state.compactHeld,
       compactHTML: compact.innerHTML,
     };
@@ -2403,7 +2421,8 @@ async function swipePrefetch(keyOrFn, prepare, render) {
     try {
       render(data);
       const node = content.firstElementChild;
-      if (node && !node.classList.contains('swipe-skel') && !node.classList.contains('error-state')) {
+      // node === savedNode 说明 render 没真的产出新页面，绝不能把当前页当成目标页缓存
+      if (node && node !== savedNode && swipeAdoptable(node)) {
         clone = node.cloneNode(true);
       }
     } finally {
@@ -2411,7 +2430,7 @@ async function swipePrefetch(keyOrFn, prepare, render) {
       stopBannerAuto();
       try { categoryObserver?.disconnect(); } catch (ignore) { }
       state.route = saved.route; state.tab = saved.tab; state.sub = saved.sub;
-      state.libraryTab = saved.libraryTab; state.library = saved.library; state.home = saved.home;
+      state.libraryTab = saved.libraryTab; state.library = saved.library; state.libraryQuery = saved.libraryQuery; state.home = saved.home;
       state.category = saved.category; state.categoryBanner = saved.categoryBanner;
       state.categoryItems = saved.categoryItems;
       state.query = saved.query; state.filter = saved.filter; state.compactHeld = saved.compactHeld;
@@ -2438,26 +2457,35 @@ async function swipePrefetchAll() {
     const library = await api('library').catch(() => null) || state.library;
     return { home, library };
   }, (data) => { state.home = data.home; state.library = data.library; renderHome(); }];
-  const categoryJobs = ['adult', 'ai'].map(tab => [
-    () => 'category:' + tab + ':0',
-    async () => {
-      const id = categoryIds[tab][0];
-      const cached = await api('cached', { key: `category:${id}:1` }).catch(() => null);
-      const fresh = cached?.data || await withTimeout(api('category', { id, page: 1 }), 8000).catch(() => null);
-      return fresh ? { fresh, tab } : null;
-    },
-    (data) => {
-      state.tab = data.tab; state.sub[data.tab] = 0; state.categoryBanner = 0;
-      state.category = { ...data.fresh, refreshing: false, loading: false, error: false };
-      state.categoryItems = asArray(data.fresh.items);
-      renderCategory();
-    },
+  const categoryJobs = [];
+  for (const tab of ['adult', 'ai']) {
+    (categoryIds[tab] || []).forEach((id, index) => {
+      categoryJobs.push([
+        'category:' + tab + ':' + index,
+        async () => {
+          const cached = await api('cached', { key: `category:${id}:1` }).catch(() => null);
+          const fresh = cached?.data || await withTimeout(api('category', { id, page: 1 }), 8000).catch(() => null);
+          return fresh ? { fresh, tab, sub: index } : null;
+        },
+        (data) => {
+          state.tab = data.tab; state.sub[data.tab] = data.sub; state.categoryBanner = 0;
+          state.category = { ...data.fresh, refreshing: false, loading: false, error: false };
+          state.categoryItems = asArray(data.fresh.items);
+          renderCategory();
+        },
+      ]);
+    });
+  }
+  // “我的”三个子页都备一份：数据本来就在 state.library 里，纯本地渲染、不额外耗流量，
+  // 这样左右切历史/收藏时落下就有真内容，不会再先闪一帧骨架。
+  const libraryJobs = ['history', 'bookmarks'].map((tab, index) => [
+    'library:' + tab,
+    async () => (index === 0
+      ? { library: await withTimeout(api('library'), 8000).catch(() => null) || state.library }
+      : { library: state.library }),
+    (data) => { state.library = data.library; state.libraryTab = tab; state.libraryQuery = ''; state.query = ''; renderLibrary(); },
   ]);
-  const libraryJob = ['library:history', async () => {
-    const library = await withTimeout(api('library'), 8000).catch(() => null) || state.library;
-    return { library };
-  }, (data) => { state.library = data.library; state.libraryTab = 'history'; state.query = ''; renderLibrary(); }];
-  for (const [key, prepare, render] of [homeJob, ...categoryJobs, libraryJob]) {
+  for (const [key, prepare, render] of [homeJob, ...categoryJobs, ...libraryJobs]) {
     if (document.hidden || swiping || swipeTrack) return;
     if (typeof key === 'string' && swipePageCache.has(key)) continue;
     await swipePrefetch(key, prepare, render);
@@ -2497,10 +2525,22 @@ function swipeCacheKey() {
 }
 
 function swipeSaveCurrent() {
+  // 滑动提交 adopting 期间禁止保存：那时 content 已被换成目标页，
+  // 再按旧的 state.route 存会把“目标页快照”写进“当前页”的 key，
+  // 导致滑回来时预览显示成上一页的内容。
+  if (swipeSaveGuard) return;
   const node = content.firstElementChild;
   if (!node || node.classList.contains('skeleton-home') || node.classList.contains('swipe-skel')) return;
-  swipePageCache.set(swipeCacheKey(), node.cloneNode(true));
+  const clone = node.cloneNode(true);
+  // 兜底净化：拖动期间页头被钉住时打过 visibility:hidden，绝不能跟着进缓存
+  clone.querySelectorAll('*').forEach(el => { if (el.style && el.style.visibility === 'hidden') el.style.visibility = ''; });
+  swipePageCache.set(swipeCacheKey(), clone);
   if (swipePageCache.size > 12) swipePageCache.delete(swipePageCache.keys().next().value);
+}
+
+// 目标页节点是不是“真内容”（不是骨架/错误态）—— 是的话提交时直接采用，不许再重渲染一遍
+function swipeAdoptable(node) {
+  return !!node && !node.classList.contains('swipe-skel') && !node.classList.contains('error-state');
 }
 
 function swipeBuildCached(key) {
@@ -2556,7 +2596,20 @@ function swipeResolve(delta) {
     const key = state.route === 'library' ? 'library:' + next : 'category:' + state.tab + ':' + next;
     return {
       mode: 'inline',   // 页内子项：tab 栏与标题钉住，仅内容区平移
-      go: () => { if (state.route === 'library') { state.libraryTab = next; renderLibrary(); scroll.scrollTop = 0; } else goCategory(state.tab, next); },
+      step: [pos, pos + delta],   // 高亮要跟着手从 pos 滑到 pos+delta
+      // adopted：目标页 DOM 已由滑动的手放下（真内容），别再整体重渲染，否则会闪一下
+      go: () => {
+        const adopted = swipeAdopting; swipeAdopting = false; swipeSaveGuard = true;
+        try {
+          if (state.route === 'library') {
+            state.libraryTab = next;
+            // 下载页要靠定时刷新任务进度，必须走一次真实渲染；其余 tab 直接沿用放下的 DOM
+            if (!adopted || next === 'downloads') renderLibrary();
+            else { try { hydrateImages(); } catch (ignore) { } }
+            scroll.scrollTop = 0;
+          } else goCategory(state.tab, next);
+        } finally { swipeSaveGuard = false; }
+      },
       build: () => swipeBuildCached(key) || swipeBuildSkeleton(key),
     };
   }
@@ -2576,6 +2629,40 @@ function swipeBlocked() {
   return swiping || state.route === 'detail'
     || [unlockOverlay, authOverlay, confirmOverlay, updateOverlay, downloadOverlay].some(overlay => !overlay.hidden)
     || document.body.classList.contains('predictive-active');
+}
+
+// 页内子项滑动时，页头 tab 的高亮要跟手 —— 在页头壳的 tab 栏里叠一层浮标，
+// 随手指行程在两格之间连续插值（微信那种跟随感），而不是松手落下才硬跳过去。
+function swipeBuildTabAnim(bar, step) {
+  if (!bar || !step) return null;
+  const items = [...bar.querySelectorAll('button')];
+  const [from, to] = step;
+  if (items.length < 2 || !items[from] || !items[to] || from === to) return null;
+  const barRect = bar.getBoundingClientRect();
+  const rects = items.map(el => {
+    const r = el.getBoundingClientRect();
+    return { l: r.left - barRect.left, t: r.top - barRect.top, w: r.width, h: r.height };
+  });
+  const indicator = document.createElement('span');
+  indicator.className = 'swipe-tab-indicator';
+  indicator.style.borderRadius = getComputedStyle(items[from]).borderRadius;
+  bar.classList.add('swipe-tab-live');
+  bar.appendChild(indicator);
+  return { items, rects, indicator, from, to };
+}
+
+function swipeTabProgress(t, ratio) {
+  const anim = t && t.tabAnim;
+  if (!anim) return;
+  const q = Math.max(0, Math.min(1, ratio || 0));
+  const { items, rects, indicator, from, to } = anim;
+  const mix = (a, b) => a + (b - a) * q;
+  const A = rects[from], B = rects[to];
+  indicator.style.width = `${mix(A.w, B.w)}px`;
+  indicator.style.height = `${mix(A.h, B.h)}px`;
+  indicator.style.transform = `translate(${mix(A.l, B.l)}px, ${mix(A.t, B.t)}px)`;
+  const ink = share => `color-mix(in srgb, var(--accent-ink) ${Math.round(share * 100)}%, var(--muted))`;
+  items.forEach((el, i) => { el.style.color = i === from ? ink(1 - q) : i === to ? ink(q) : ''; });
 }
 
 // 建轨：底层面板装目标页，真实 scroll 保持可见等待平移。
@@ -2620,6 +2707,7 @@ function swipeOpenTrack(delta, dx) {
         shell.style.cssText += `;position:fixed;left:${Math.round(pageRect.left)}px;top:${Math.round(pageRect.top)}px;width:${Math.round(pageRect.width)}px;margin:0;z-index:14;pointer-events:none;`;
         document.body.appendChild(shell);
         track.clones.push(shell);
+        track.tabAnim = swipeBuildTabAnim(shellTab, resolve.step);
       }
       for (const el of track.pinned) el.style.visibility = 'hidden';   // 原页头让位给壳
       // 目标页页头临时摘除（display:none），其内容上移到面板顶部与当前页内容区对齐
@@ -2658,6 +2746,7 @@ function swipeLayTrack(dx) {
   if (!t) return;
   if (t.mode === 'inline') {
     for (const el of t.moving) el.style.transform = `translateX(${dx}px)`;   // 只有内容区跟手
+    swipeTabProgress(t, Math.abs(dx) / t.width);                              // 高亮同步跟到哪一格
   } else {
     scroll.style.transform = `translateX(${dx}px)`;
   }
@@ -2682,22 +2771,40 @@ function swipeCloseTrack(commit) {
   const ease = 'transform .2s cubic-bezier(.22,.61,.36,1)';
   scroll.style.transition = ease;
   t.panel.style.transition = ease;
+  const tabEase = 'transform .2s cubic-bezier(.22,.61,.36,1),width .2s cubic-bezier(.22,.61,.36,1),height .2s cubic-bezier(.22,.61,.36,1)';
   if (commit) {
-    swipeSaveCurrent();
+    if (t.tabAnim) {   // 高亮跟着收尾动画一路滑到目标格，不是落地才跳
+      const anim = t.tabAnim;
+      anim.indicator.style.transition = tabEase;
+      for (const el of anim.items) el.style.transition = 'color .2s ease';
+      swipeTabProgress(t, 1);
+    }
     scroll.style.transform = `translateX(${-t.dirSign * t.width}px)`;
     t.panel.style.transform = 'translateX(0)';
     setTimeout(() => {
-      swipeClearTabs(t);
+      swipeClearTabs(t);   // 先撤掉页头 hidden / 内容位移等临时样式，再存当前页 —— 缓存里不能有脏快照
+      swipeSaveCurrent();
       const node = t.inner.firstElementChild;
       scroll.style.transition = '';
       scroll.style.transform = '';
       if (node) { content.replaceChildren(node); scroll.scrollTop = 0; }
       t.panel.remove();
       swiping = false;
-      try { Promise.resolve(t.resolve.go()).catch(() => { }); } catch (ignore) { }
+      // 预览已经是真内容 → 让这次路由只换状态、不再重画一遍（重画就是那一闪）
+      swipeAdopting = swipeAdoptable(node);
+      swipeSaveGuard = true;   // content 已被换成目标页，期间不许再存“当前页”
+      try { const result = t.resolve.go(); if (result && result.catch) result.catch(() => { }); } catch (ignore) { }
+      swipeSaveGuard = false;
+      swipeAdopting = false;
       setTimeout(() => { swipePrefetchAll().catch(() => { }); }, 1500);
     }, 210);
   } else {
+    if (t.tabAnim) {
+      const anim = t.tabAnim;
+      anim.indicator.style.transition = tabEase;
+      for (const el of anim.items) el.style.transition = 'color .2s ease';
+      swipeTabProgress(t, 0);
+    }
     scroll.style.transform = 'translateX(0)';
     t.panel.style.transform = `translateX(${t.dirSign * t.width}px)`;
     setTimeout(() => {

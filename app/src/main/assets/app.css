@@ -439,6 +439,10 @@ html[data-theme=dark] .account-role.is-vip{color:#e0b64a}
 
 .swipe-under{position:fixed;left:0;width:100%;z-index:1;overflow:hidden;will-change:transform;contain:layout paint}
 .swipe-page-inner{position:absolute;top:0;left:0;width:100%;will-change:transform}
+/* 页内子项跟手时：tab 选中态改由浮标承担，原按钮底交给它，使其能连续位移 */
+.swipe-tab-live{position:relative}
+.swipe-tab-live>button{position:relative;z-index:1;background:none!important;box-shadow:none!important;transition:none!important}
+.swipe-tab-indicator{position:absolute;left:0;top:0;z-index:0;pointer-events:none;background:var(--accent);box-shadow:0 3px 9px #0002}
 
 #search-form{z-index:9}
 
