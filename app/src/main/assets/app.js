@@ -2623,7 +2623,15 @@ function swipeResolve(delta) {
             state.libraryTab = next;
             // 下载页要靠定时刷新任务进度，必须走一次真实渲染；其余 tab 直接沿用放下的 DOM
             if (!adopted || next === 'downloads') renderLibrary();
-            else { try { hydrateImages(); } catch (ignore) { } }
+            else {
+              // 沿用 DOM 就没人重画 tab 栏 —— 手动把选中态搬到目标格
+              for (const b of content.querySelectorAll('[data-library-tab]')) {
+                const on = b.dataset.libraryTab === next;
+                b.classList.toggle('selected', on);
+                if (on) b.setAttribute('aria-selected', 'true'); else b.removeAttribute('aria-selected');
+              }
+              try { hydrateImages(); } catch (ignore) { }
+            }
             scroll.scrollTop = 0;
           } else goCategory(state.tab, next);
         } finally { swipeSaveGuard = false; }
@@ -2663,23 +2671,32 @@ function swipeBuildTabAnim(bar, step) {
   });
   const indicator = document.createElement('span');
   indicator.className = 'swipe-tab-indicator';
-  indicator.style.borderRadius = getComputedStyle(items[from]).borderRadius;
+  // 浮标视觉直接抄选中胶囊的实际渲染值（computed）—— 滑动中和完成后是同一张皮，
+  // 不存在"拖动中一个样式、落地又一个样式"的突变。靠 CSS 类自己画（var(--accent) 等）
+  // 在真机上容易和按钮的实际渲染岔开（用户见过拖动中变白条、阴影落地才弹出）。
+  const srcCs = getComputedStyle(items[from]);
+  indicator.style.borderRadius = srcCs.borderRadius;
+  indicator.style.background = srcCs.backgroundColor;
+  if (srcCs.backgroundImage !== 'none') indicator.style.backgroundImage = srcCs.backgroundImage;
+  indicator.style.boxShadow = srcCs.boxShadow;
+  const fromInk = srcCs.color;                    // 选中态文字色
+  const restInk = getComputedStyle(items[to]).color;   // 未选中文字色
   bar.classList.add('swipe-tab-live');
   bar.appendChild(indicator);
-  return { items, rects, indicator, from, to };
+  return { items, rects, indicator, from, to, fromInk, restInk };
 }
 
 function swipeTabProgress(t, ratio) {
   const anim = t && t.tabAnim;
   if (!anim) return;
   const q = Math.max(0, Math.min(1, ratio || 0));
-  const { items, rects, indicator, from, to } = anim;
+  const { items, rects, indicator, from, to, fromInk, restInk } = anim;
   const mix = (a, b) => a + (b - a) * q;
   const A = rects[from], B = rects[to];
   indicator.style.width = `${mix(A.w, B.w)}px`;
   indicator.style.height = `${mix(A.h, B.h)}px`;
   indicator.style.transform = `translate(${mix(A.l, B.l)}px, ${mix(A.t, B.t)}px)`;
-  const ink = share => `color-mix(in srgb, var(--accent-ink) ${Math.round(share * 100)}%, var(--muted))`;
+  const ink = share => `color-mix(in srgb, ${fromInk} ${Math.round(share * 100)}%, ${restInk})`;
   items.forEach((el, i) => { el.style.color = i === from ? ink(1 - q) : i === to ? ink(q) : ''; });
 }
 
@@ -2748,6 +2765,19 @@ function swipeOpenTrack(delta, dx) {
     } else {
       inner.style.paddingTop = getComputedStyle(scroll).paddingTop;
     }
+    // 垂直对齐补偿：目标页页头摘除后，其根节点自身的 padding-top（如 .library-page 的 20px）
+    // 仍占位，预览内容被往下推 —— 落地后页头恢复、内容上抬，肉眼就是一次跳变。
+    // 测出目标内容首块与当前页内容首块的落差，用负 margin 拉平，预览与落地逐像素一致。
+    const nodeTab = node.querySelector(SWIPE_TAB_SELECTOR);
+    let firstTarget = null;
+    if (nodeTab && nodeTab.parentElement) {
+      const nk = [...nodeTab.parentElement.children];
+      firstTarget = nk[nk.indexOf(nodeTab) + 1] || null;
+    }
+    if (firstMoving && firstTarget && firstTarget.offsetHeight > 0) {
+      const align = Math.round(firstMoving.getBoundingClientRect().top - firstTarget.getBoundingClientRect().top);
+      if (align) node.style.marginTop = `${align}px`;
+    }
   } else {
     inner.style.paddingTop = getComputedStyle(scroll).paddingTop;
   }
@@ -2803,6 +2833,7 @@ function swipeCloseTrack(commit) {
       swipeClearTabs(t);   // 先撤掉页头 hidden / 内容位移等临时样式，再存当前页 —— 缓存里不能有脏快照
       swipeSaveCurrent();
       const node = t.inner.firstElementChild;
+      if (node) node.style.marginTop = '';   // 撤掉滑动时的垂直对齐补偿，别带进真实页面
       scroll.style.transition = '';
       scroll.style.transform = '';
       if (node) { content.replaceChildren(node); scroll.scrollTop = 0; }
@@ -2827,6 +2858,8 @@ function swipeCloseTrack(commit) {
     t.panel.style.transform = `translateX(${t.dirSign * t.width}px)`;
     setTimeout(() => {
       swipeClearTabs(t);
+      const node = t.inner.firstElementChild;
+      if (node) node.style.marginTop = '';   // 缓存/复用的克隆不带对齐补偿
       scroll.style.transition = '';
       scroll.style.transform = '';
       t.panel.remove();
