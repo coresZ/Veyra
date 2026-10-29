@@ -439,10 +439,59 @@ html[data-theme=dark] .account-role.is-vip{color:#e0b64a}
 
 .swipe-under{position:fixed;left:0;width:100%;z-index:1;overflow:hidden;will-change:transform;contain:layout paint}
 .swipe-page-inner{position:absolute;top:0;left:0;width:100%;will-change:transform}
+/* 分段控件选中态：与底栏 #dock-blob 同一套液态玻璃材质（拖动浮标也复用），
+   静态选中和拖动中的浮标必须是同一张皮 —— 这是滑动落位不会突变的前提 */
+.tab-glass{
+  background:rgba(255,252,244,.11);
+  -webkit-backdrop-filter:blur(2.2px) saturate(.85);
+  backdrop-filter:blur(2.2px) saturate(.85);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.72),
+    inset 0 -1px 0 rgba(255,255,255,.22),
+    inset 1px 0 0 rgba(255,255,255,.46),
+    inset -1px 0 0 rgba(255,255,255,.46),
+    inset 0 0 0 1px rgba(8,14,24,.05),
+    0 10px 26px rgba(8,14,24,.14);
+}
+html[data-theme=dark] .tab-glass{
+  background:rgba(34,40,43,.12);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.34),
+    inset 0 -1px 0 rgba(255,255,255,.12),
+    inset 1px 0 0 rgba(255,255,255,.22),
+    inset -1px 0 0 rgba(255,255,255,.22),
+    inset 0 0 0 1px rgba(255,255,255,.06),
+    0 10px 26px rgba(8,14,24,.16);
+}
+.segmented button.selected,.compact-tabs button.selected{color:var(--text);font-weight:800;background:rgba(255,252,244,.11);-webkit-backdrop-filter:blur(2.2px) saturate(.85);backdrop-filter:blur(2.2px) saturate(.85);box-shadow:inset 0 1px 0 rgba(255,255,255,.72),inset 0 -1px 0 rgba(255,255,255,.22),inset 1px 0 0 rgba(255,255,255,.46),inset -1px 0 0 rgba(255,255,255,.46),inset 0 0 0 1px rgba(8,14,24,.05),0 10px 26px rgba(8,14,24,.14)}
+html[data-theme=dark] .segmented button.selected,html[data-theme=dark] .compact-tabs button.selected{background:rgba(34,40,43,.12);color:var(--text);box-shadow:inset 0 1px 0 rgba(255,255,255,.34),inset 0 -1px 0 rgba(255,255,255,.12),inset 1px 0 0 rgba(255,255,255,.22),inset -1px 0 0 rgba(255,255,255,.22),inset 0 0 0 1px rgba(255,255,255,.06),0 10px 26px rgba(8,14,24,.16)}
 /* 页内子项跟手时：tab 选中态改由浮标承担，原按钮底交给它，使其能连续位移 */
 .swipe-tab-live{position:relative}
-.swipe-tab-live>button{position:relative;z-index:1;background:none!important;box-shadow:none!important;transition:none!important}
-.swipe-tab-indicator{position:absolute;left:0;top:0;z-index:0;pointer-events:none;background:var(--accent);box-shadow:0 3px 9px #0002}
+.swipe-tab-live>button,.swipe-tab-arm>button{position:relative;z-index:1;background:none!important;box-shadow:none!important;transition:none!important}
+/* 按住/拖动期间一律不画 :active 反馈 —— 否则相邻格会先白后变色（和落地对比像突然跳一下） */
+.swipe-tab-live>button:active,.swipe-tab-arm>button:active{background:transparent!important;box-shadow:none!important;transform:none!important}
+.swipe-tab-indicator{position:absolute;left:0;top:0;z-index:0;pointer-events:none}
+/* 手指按住时玻璃抬起：提亮底色、加深高光，与底栏 #dock.dragging 同款观感 */
+.swipe-tab-live .swipe-tab-indicator{
+  background:rgba(255,252,244,.17);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.90),
+    inset 0 -1px 0 rgba(255,255,255,.30),
+    inset 1px 0 0 rgba(255,255,255,.60),
+    inset -1px 0 0 rgba(255,255,255,.60),
+    inset 0 0 0 1px rgba(8,14,24,.06),
+    0 12px 30px rgba(8,14,24,.20);
+}
+html[data-theme=dark] .swipe-tab-live .swipe-tab-indicator{
+  background:rgba(34,40,43,.18);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.44),
+    inset 0 -1px 0 rgba(255,255,255,.16),
+    inset 1px 0 0 rgba(255,255,255,.28),
+    inset -1px 0 0 rgba(255,255,255,.28),
+    inset 0 0 0 1px rgba(255,255,255,.07),
+    0 12px 30px rgba(8,14,24,.20);
+}
 
 #search-form{z-index:9}
 

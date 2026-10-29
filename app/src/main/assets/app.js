@@ -2397,6 +2397,7 @@ let swiping = false;
 let swipeStart = null;
 let swipeAxis = null;
 let swipeTrack = null;
+let swipeArmedBar = null;   // 手指按住的 tab 栏：期间由玻璃浮标接管全部视觉
 
 // 目标页 DOM 缓存：key -> 节点克隆。滑动提交后写入，命中即免骨架。
 const swipePageCache = new Map();
@@ -2670,16 +2671,12 @@ function swipeBuildTabAnim(bar, step) {
     return { l: r.left - barRect.left, t: r.top - barRect.top, w: r.width, h: r.height };
   });
   const indicator = document.createElement('span');
-  indicator.className = 'swipe-tab-indicator';
-  // 浮标视觉直接抄选中胶囊的实际渲染值（computed）—— 滑动中和完成后是同一张皮，
-  // 不存在"拖动中一个样式、落地又一个样式"的突变。靠 CSS 类自己画（var(--accent) 等）
-  // 在真机上容易和按钮的实际渲染岔开（用户见过拖动中变白条、阴影落地才弹出）。
+  // 浮标 = 静态选中态同一套液态玻璃（.tab-glass），拖动中和落位后是同一张皮；
+  // 只拷贝圆角跟着格子走，颜色和材质交给 CSS，杜绝"拖动一个样、落地又一个样"。
+  indicator.className = 'swipe-tab-indicator tab-glass';
   const srcCs = getComputedStyle(items[from]);
   indicator.style.borderRadius = srcCs.borderRadius;
-  indicator.style.background = srcCs.backgroundColor;
-  if (srcCs.backgroundImage !== 'none') indicator.style.backgroundImage = srcCs.backgroundImage;
-  indicator.style.boxShadow = srcCs.boxShadow;
-  const fromInk = srcCs.color;                    // 选中态文字色
+  const fromInk = srcCs.color;                         // 选中态文字色
   const restInk = getComputedStyle(items[to]).color;   // 未选中文字色
   bar.classList.add('swipe-tab-live');
   bar.appendChild(indicator);
@@ -2696,8 +2693,10 @@ function swipeTabProgress(t, ratio) {
   indicator.style.width = `${mix(A.w, B.w)}px`;
   indicator.style.height = `${mix(A.h, B.h)}px`;
   indicator.style.transform = `translate(${mix(A.l, B.l)}px, ${mix(A.t, B.t)}px)`;
+  // 每一格的颜色都显式给定：留空会让没参与插值的第三格吃 :active 的深色
+  // （用户看到"选中项旁边的项突然变色"就是这么来的）
   const ink = share => `color-mix(in srgb, ${fromInk} ${Math.round(share * 100)}%, ${restInk})`;
-  items.forEach((el, i) => { el.style.color = i === from ? ink(1 - q) : i === to ? ink(q) : ''; });
+  items.forEach((el, i) => { el.style.color = i === from ? ink(1 - q) : i === to ? ink(q) : restInk; });
 }
 
 // 建轨：底层面板装目标页，真实 scroll 保持可见等待平移。
@@ -2884,9 +2883,25 @@ scroll.addEventListener('touchstart', event => {
     return;
   }
   if (event.target.closest && event.target.closest(SWIPE_IGNORE)) { swipeStart = null; return; }
+  const target = event.target;
+  let armed = null;
+  if (target && target.closest) {
+    armed = target.closest(SWIPE_TAB_SELECTOR);
+    // 手指一落在 tab 栏就接管它的视觉：按住反馈（:active 灰蓝底 + 深字）一律不画，
+    // 全部交给玻璃浮标统一负责 —— 否则相邻格会在拖动中/落地时忽白忽变色。
+    if (armed) { armed.classList.add('swipe-tab-arm'); swipeArmedBar = armed; }
+  }
   swipeStart = { x: touch.clientX, y: touch.clientY, at: Date.now(), target: event.target };
   swipeAxis = null;
 }, { passive: true });
+
+// 松开后延迟撤下接管（覆盖落地动画那 210ms 的尾巴）
+function swipeReleaseArm() {
+  const bar = swipeArmedBar;
+  swipeArmedBar = null;
+  if (!bar) return;
+  setTimeout(() => bar.classList.remove('swipe-tab-arm'), 280);
+}
 
 scroll.addEventListener('touchmove', event => {
   const start = swipeStart;
@@ -2911,6 +2926,7 @@ scroll.addEventListener('touchend', event => {
   const start = swipeStart;
   const axis = swipeAxis, track = swipeTrack;
   swipeStart = null; swipeAxis = null;
+  swipeReleaseArm();
   if (!start || axis !== 'x') return;
   const touch = event.changedTouches[0];
   const dx = touch ? touch.clientX - start.x : 0;
@@ -2928,6 +2944,7 @@ scroll.addEventListener('touchend', event => {
 scroll.addEventListener('touchcancel', () => {
   const track = swipeTrack, axis = swipeAxis;
   swipeStart = null; swipeAxis = null;
+  swipeReleaseArm();
   if (track) swipeCloseTrack(false);
   else if (axis === 'x') swipeSettleBack();
 });
