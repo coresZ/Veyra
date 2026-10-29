@@ -868,28 +868,46 @@ function renderLibrary() {
     ${historyActive ? (progress.length ? `<div class="history-list">${historyCards}</div>` : '<div class="empty-state">还没有观看记录，播放作品后会出现在这里</div>') :
       (bookmarks.length ? `<div class="search-grid library-bookmark-grid">${bookmarks.map(itemCard).join('')}</div>` : '<div class="empty-state">还没有收藏作品</div>')}`}</div>`;
   hydrateImages();
-  if (downloadsActive) renderLibraryDownloads();
+  if (downloadsActive && !swipePrefetchBusy) renderLibraryDownloads();
 }
 
 let libraryDownloadsToken = 0;
 const withTimeout = (promise, ms) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('请求超时')), ms))]);
-async function renderLibraryDownloads() {
+async function renderLibraryDownloads(prefetched) {
   const token = ++libraryDownloadsToken;
   let phone = [], nas = [];
-  try { phone = asArray(await withTimeout(api('download-list'), 4000)); } catch (error) { phone = []; }
-  if (state.account.loggedIn) {
-    try { const result = await withTimeout(api('nas-download-list'), 4000); nas = asArray(result.tasks); } catch (error) { nas = []; }
+  if (prefetched) { phone = prefetched.phone || []; nas = prefetched.nas || []; }
+  else {
+    try { phone = asArray(await withTimeout(api('download-list'), 4000)); } catch (error) { phone = []; }
+    if (state.account.loggedIn) {
+      try { const result = await withTimeout(api('nas-download-list'), 4000); nas = asArray(result.tasks); } catch (error) { nas = []; }
+    }
   }
   if (state.route !== 'library' || state.libraryTab !== 'downloads' || token !== libraryDownloadsToken) return;
   const list = document.getElementById('library-downloads');
   if (!list) return;
-  syncDownloadsTimer([...phone, ...nas]);
-  processForwardTasks(phone, nas);   // 转发模式：NAS 完成自动拉取合并（不阻塞渲染）
+  commitDownloadList(list, phone, nas, prefetched ? { noTimer: true } : {});
+}
+
+// 把下载列表填进容器并补封面；命中签名守卫时只补图、不重建 DOM（避免滑动落位后「再闪一下」）。
+function commitDownloadList(list, phone, nas, opts = {}) {
+  const sig = downloadListSignature(phone, nas);
+  if (!opts.force && list.dataset.sig === sig) { if (!opts.noTimer) syncDownloadsTimer([...phone, ...nas]); return; }
+  list.dataset.sig = sig;
+  if (!opts.noTimer) syncDownloadsTimer([...phone, ...nas]);
+  if (!opts.noTimer) processForwardTasks(phone, nas);   // 转发模式：NAS 完成自动拉取合并（不阻塞渲染）
   const phoneTasks = phone.map(t => Object.assign({}, t, { kind: 'phone' }));
   // 手机转发任务关联的 NAS 任务不在下载页单独显示（由"下载到手机"触发，属内部步骤；主动下载到 NAS 的任务正常显示）
   const forwardNas = new Set(phone.filter(t => t.nasTaskId).map(t => String(t.nasTaskId)));
   const nasTasks = nas.filter(t => !forwardNas.has(String(t.id)) && (!t.source || t.source === contentSource)).map(t => Object.assign({}, t, { kind: 'nas' }));
   list.innerHTML = renderDownloadList([...phoneTasks, ...nasTasks]);
+  hydrateImages();   // 下载封面是 data-cover，必须补 src 才出图（之前缺这步 → 灰块）
+}
+
+// 仅当任务状态真正变化时才重建列表，避免滑动落位后无谓重绘（那一闪）。
+function downloadListSignature(phone, nas) {
+  const red = t => [t.id, t.status, t.percent, t.doneCount, t.totalCount, t.nasTaskId, t.cover].map(v => v == null ? '' : v).join('|');
+  return [...phone.map(red), ...nas.map(red)].join(',');
 }
 
 // 下载任务是否仍在进行（手机端 running/pulling；NAS 端 queued/downloading/merging）
@@ -1693,6 +1711,19 @@ function setRoute(route) {
   searchInput.setAttribute('aria-label', libraryArea ? '搜索观看历史和收藏' : '搜索剧名或标签');
   if (route === 'library') searchInput.value = state.libraryQuery;
   updateBackEnabled();
+  // 落到根页面就补预取：否则用户点 tab 进来立刻横滑时，相邻页还没缓存、落的是骨架，
+  // 提交时必然整套重渲染 → 「滑完闪一下」。放在 idle 里跑，不抢首帧。
+  if (['home', 'category', 'library'].includes(route)) scheduleSwipePrefetch();
+}
+
+// 合并短时间内的多次触发；只补缺失的相邻页缓存，已有的直接跳过。
+let swipePrefetchTimer = 0;
+function scheduleSwipePrefetch(delay = 260) {
+  clearTimeout(swipePrefetchTimer);
+  swipePrefetchTimer = setTimeout(() => {
+    if (document.hidden || swiping || swipeTrack) return;
+    swipePrefetchAll().catch(() => { });
+  }, delay);
 }
 
 function isRootColumn() { return ['home', 'category', 'library'].includes(state.route); }
@@ -2502,17 +2533,34 @@ async function swipePrefetchAll() {
   }
   // “我的”三个子页都备一份：数据本来就在 state.library 里，纯本地渲染、不额外耗流量，
   // 这样左右切历史/收藏时落下就有真内容，不会再先闪一帧骨架。
-  const libraryJobs = ['history', 'bookmarks'].map((tab, index) => [
+  const libraryJobs = ['history', 'bookmarks', 'downloads'].map((tab, index) => [
     'library:' + tab,
-    async () => (index === 0
-      ? { library: await withTimeout(api('library'), 8000).catch(() => null) || state.library }
-      : { library: state.library }),
-    (data) => { state.library = data.library; state.libraryTab = tab; state.libraryQuery = ''; state.query = ''; renderLibrary(); },
+    async () => {
+      if (index === 0) return { library: await withTimeout(api('library'), 8000).catch(() => null) || state.library };
+      if (index === 1) return { library: state.library };
+      // downloads：预取时就把真实列表拉回来，克隆里才有真内容（否则滑到下载是骨架 → 提交时整套重渲染闪一下）
+      let phone = [];
+      try { phone = asArray(await withTimeout(api('download-list'), 4000)); } catch (ignore) { phone = []; }
+      let nas = [];
+      if (state.account.loggedIn) {
+        try { nas = asArray((await withTimeout(api('nas-download-list'), 4000)).tasks); } catch (ignore) { nas = []; }
+      }
+      return { library: state.library, downloads: { phone, nas } };
+    },
+    (data) => {
+      state.library = data.library; state.libraryTab = tab; state.libraryQuery = ''; state.query = '';
+      if (tab !== 'downloads') { renderLibrary(); return; }
+      // 下载页：先按正常布局搭出壳，再同步填进真实列表（克隆前就填好，免得克隆里是「正在加载…」）
+      renderLibrary();
+      const list = document.getElementById('library-downloads');
+      if (list) { list.dataset.sig = ''; commitDownloadList(list, data.downloads.phone, data.downloads.nas, { noTimer: true }); }
+    },
   ]);
   for (const [key, prepare, render] of [homeJob, ...categoryJobs, ...libraryJobs]) {
     if (document.hidden || swiping || swipeTrack) return;
     if (typeof key === 'string' && swipePageCache.has(key)) continue;
-    await swipePrefetch(key, prepare, render);
+    // 单个 job 失败（接口超时/数据格式异常）不能拖垮整轮预取，否则排在它后面的页永远补不上
+    try { await swipePrefetch(key, prepare, render); } catch (ignore) { }
   }
 }
 
@@ -2634,15 +2682,19 @@ function swipeResolve(delta) {
         try {
           if (state.route === 'library') {
             state.libraryTab = next;
-            // 下载页要靠定时刷新任务进度，必须走一次真实渲染；其余 tab 直接沿用放下的 DOM
-            if (!adopted || next === 'downloads') renderLibrary();
-            else {
-              // 沿用 DOM 就没人重画 tab 栏 —— 手动把选中态搬到目标格
+            if (!adopted) {
+              // 没落下真内容（如首次滑动前尚未预取）——正常渲染
+              renderLibrary();
+            } else {
+              // 沿用滑动放下的真内容，绝不整套重渲染（那一闪就是它）。
+              // 下载页仍需拉最新进度并启动轮询 —— 交给 renderLibraryDownloads，
+              // 命中签名守卫时只补图、不重建 DOM。
               for (const b of content.querySelectorAll('[data-library-tab]')) {
                 const on = b.dataset.libraryTab === next;
                 b.classList.toggle('selected', on);
                 if (on) b.setAttribute('aria-selected', 'true'); else b.removeAttribute('aria-selected');
               }
+              if (next === 'downloads') { try { renderLibraryDownloads(); } catch (ignore) { } }
               try { hydrateImages(); } catch (ignore) { }
             }
             scroll.scrollTop = 0;
