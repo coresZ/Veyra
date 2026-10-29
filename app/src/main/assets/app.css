@@ -439,9 +439,27 @@ html[data-theme=dark] .account-role.is-vip{color:#e0b64a}
 
 .swipe-under{position:fixed;left:0;width:100%;z-index:1;overflow:hidden;will-change:transform;contain:layout paint}
 .swipe-page-inner{position:absolute;top:0;left:0;width:100%;will-change:transform}
-/* 分段控件选中态：与底栏 #dock-blob 同一套液态玻璃材质（拖动浮标也复用），
-   静态选中和拖动中的浮标必须是同一张皮 —— 这是滑动落位不会突变的前提 */
-.tab-glass{
+/* ================= 分段控件（我的页三子项 / 分类子标签）=================
+ * 与底栏同一套「液态玻璃透镜」方案：选中态不再由按钮自己画底色，
+ * 而是由 .seg-blob（= #dock-blob 的同源实现）统一承担。
+ * 好处：静止态、拖动中、滑动跟手三种情况共用同一枚透镜，物理上不可能出现
+ *       "拖动时一个样、落地又一个样" / "旁边的项突然变色" 这类突变。
+ */
+.segmented,.compact-tabs{position:relative}
+.seg-blob{
+  position:absolute;top:5px;left:0;
+  height:calc(100% - 10px);width:25%;
+  z-index:0;pointer-events:none;
+  transform:translate3d(-999px,0,0);
+  transition:transform .46s cubic-bezier(.32,1.34,.28,1),width .46s cubic-bezier(.32,1.34,.28,1);
+  will-change:transform;
+}
+/* 拖动中关掉过渡保证跟手（同 #dock.dragging #dock-blob） */
+.segmented.dragging .seg-blob,.compact-tabs.dragging .seg-blob{transition:none}
+/* 透镜本体：与 #dock-blob b 完全同一份玻璃配方 */
+.seg-blob b{
+  position:relative;display:block;width:100%;height:100%;
+  border-radius:calc(15px * var(--corner-scale,1));
   background:rgba(255,252,244,.11);
   -webkit-backdrop-filter:blur(2.2px) saturate(.85);
   backdrop-filter:blur(2.2px) saturate(.85);
@@ -452,8 +470,14 @@ html[data-theme=dark] .account-role.is-vip{color:#e0b64a}
     inset -1px 0 0 rgba(255,255,255,.46),
     inset 0 0 0 1px rgba(8,14,24,.05),
     0 10px 26px rgba(8,14,24,.14);
+  transition:
+    width .26s cubic-bezier(.32,1.34,.28,1),
+    height .26s cubic-bezier(.32,1.34,.28,1),
+    margin .26s cubic-bezier(.32,1.34,.28,1),
+    border-radius .26s cubic-bezier(.32,1.34,.28,1),
+    background .2s ease,box-shadow .2s ease;
 }
-html[data-theme=dark] .tab-glass{
+html[data-theme=dark] .seg-blob b{
   background:rgba(34,40,43,.12);
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,.34),
@@ -463,16 +487,12 @@ html[data-theme=dark] .tab-glass{
     inset 0 0 0 1px rgba(255,255,255,.06),
     0 10px 26px rgba(8,14,24,.16);
 }
-.segmented button.selected,.compact-tabs button.selected{color:var(--text);font-weight:800;background:rgba(255,252,244,.11);-webkit-backdrop-filter:blur(2.2px) saturate(.85);backdrop-filter:blur(2.2px) saturate(.85);box-shadow:inset 0 1px 0 rgba(255,255,255,.72),inset 0 -1px 0 rgba(255,255,255,.22),inset 1px 0 0 rgba(255,255,255,.46),inset -1px 0 0 rgba(255,255,255,.46),inset 0 0 0 1px rgba(8,14,24,.05),0 10px 26px rgba(8,14,24,.14)}
-html[data-theme=dark] .segmented button.selected,html[data-theme=dark] .compact-tabs button.selected{background:rgba(34,40,43,.12);color:var(--text);box-shadow:inset 0 1px 0 rgba(255,255,255,.34),inset 0 -1px 0 rgba(255,255,255,.12),inset 1px 0 0 rgba(255,255,255,.22),inset -1px 0 0 rgba(255,255,255,.22),inset 0 0 0 1px rgba(255,255,255,.06),0 10px 26px rgba(8,14,24,.16)}
-/* 页内子项跟手时：tab 选中态改由浮标承担，原按钮底交给它，使其能连续位移 */
-.swipe-tab-live{position:relative}
-.swipe-tab-live>button,.swipe-tab-arm>button{position:relative;z-index:1;background:none!important;box-shadow:none!important;transition:none!important}
-/* 按住/拖动期间一律不画 :active 反馈 —— 否则相邻格会先白后变色（和落地对比像突然跳一下） */
-.swipe-tab-live>button:active,.swipe-tab-arm>button:active{background:transparent!important;box-shadow:none!important;transform:none!important}
-.swipe-tab-indicator{position:absolute;left:0;top:0;z-index:0;pointer-events:none}
-/* 手指按住时玻璃抬起：提亮底色、加深高光，与底栏 #dock.dragging 同款观感 */
-.swipe-tab-live .swipe-tab-indicator{
+/* 被手指「拿起」：整体撑大一点（左右各 6px、上下各 4px），像拿起一块更厚的玻璃 */
+.segmented.dragging .seg-blob b,.compact-tabs.dragging .seg-blob b{
+  width:calc(100% + 12px);
+  height:calc(100% + 8px);
+  margin:-4px -6px;
+  border-radius:calc(18px * var(--corner-scale,1));
   background:rgba(255,252,244,.17);
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,.90),
@@ -482,7 +502,7 @@ html[data-theme=dark] .segmented button.selected,html[data-theme=dark] .compact-
     inset 0 0 0 1px rgba(8,14,24,.06),
     0 12px 30px rgba(8,14,24,.20);
 }
-html[data-theme=dark] .swipe-tab-live .swipe-tab-indicator{
+html[data-theme=dark] .segmented.dragging .seg-blob b,html[data-theme=dark] .compact-tabs.dragging .seg-blob b{
   background:rgba(34,40,43,.18);
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,.44),
@@ -491,6 +511,28 @@ html[data-theme=dark] .swipe-tab-live .swipe-tab-indicator{
     inset -1px 0 0 rgba(255,255,255,.28),
     inset 0 0 0 1px rgba(255,255,255,.07),
     0 12px 30px rgba(8,14,24,.20);
+}
+/* 按钮只是文字：底色/阴影全交给透镜，彻底杜绝“按钮自己那一层”造成的跳色 */
+.segmented button,.compact-tabs button{
+  position:relative;z-index:1;
+  background:transparent!important;
+  box-shadow:none!important;
+  color:var(--muted);
+}
+.segmented button.selected,.compact-tabs button.selected,
+.segmented button.drag-over,.compact-tabs button.drag-over{
+  /* drag-over 与 selected 用同一组笔值 —— 拖动到某格、松手变成选中，肉眼看是连续的 */
+  color:var(--text);font-weight:800;
+}
+.segmented button.dim,.compact-tabs button.dim{opacity:.62}
+.segmented button.holding,.compact-tabs button.holding{opacity:1}
+/* 按住/拖动期间不画 :active 反馈（老问题：相邻格先变灰蓝、落地又弹回深色） */
+.segmented button:active,.compact-tabs button:active,
+.segmented button.selected:active,.compact-tabs button.selected:active{
+  background:transparent!important;box-shadow:none!important;transform:none!important;color:inherit;
+}
+@media(prefers-reduced-motion:reduce){
+  .seg-blob,.seg-blob b{transition:none!important}
 }
 
 #search-form{z-index:9}

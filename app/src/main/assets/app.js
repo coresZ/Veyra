@@ -2397,7 +2397,6 @@ let swiping = false;
 let swipeStart = null;
 let swipeAxis = null;
 let swipeTrack = null;
-let swipeArmedBar = null;   // 手指按住的 tab 栏：期间由玻璃浮标接管全部视觉
 
 // 目标页 DOM 缓存：key -> 节点克隆。滑动提交后写入，命中即免骨架。
 const swipePageCache = new Map();
@@ -2510,8 +2509,14 @@ async function swipePrefetchAll() {
   }
 }
 
-// 这些元素自身要横向滚动，手势让位（首页 .film-row 是网格不能横滚，所以不在列）。
-const SWIPE_IGNORE = '.filter-row,.home-tag-scroll,.search-form,input,textarea,select,.proxy-mode-dd-menu,.episode-grid';
+// 这些元素自身要横向滚动 / 有自己的横滑语义，手势让位（首页 .film-row 是网格不能横滚，所以不在列）。
+const SWIPE_TAB_BAR_SELECTOR = '[role="tablist"].segmented,[role="tablist"].compact-tabs';
+// 让位的手势区域：
+//   .hero / .hero-dots 是顶部轮播，自己要左右翻页，不能被全局切页抢走；
+//   子标签栏的手势归 seg-glass.js（按住拖动玻璃透镜，逻辑同底栏），
+//   手指落在栏上时不起整页滑动 —— 但内容区横滑仍然可以切子项、透镜跟着走。
+const SWIPE_IGNORE = '.filter-row,.home-tag-scroll,.search-form,input,textarea,select,.proxy-mode-dd-menu,.episode-grid'
+  + ',.hero,.hero-dots,' + SWIPE_TAB_BAR_SELECTOR;
 
 function swipeScrollOwner(node, dx) {
   let el = node;
@@ -2574,7 +2579,7 @@ function swipeBuildSkeleton(key) {
   if (String(key).indexOf('library:') === 0) {
     const cards = Array.from({ length: 4 }, () => '<div class="skeleton sk-card"></div>').join('');
     wrap.innerHTML = '<div class="library-page swipe-skel" role="status" aria-label="正在加载内容"><div class="my-heading"><h1>我的</h1></div>'
-      + '<div class="segmented library-tabs skeleton-tabs"><span class="skeleton skeleton-pill"></span><span class="skeleton skeleton-pill"></span><span class="skeleton skeleton-pill"></span></div>'
+      + '<div class="segmented library-tabs skeleton-tabs" role="tablist"><span class="skeleton skeleton-pill"></span><span class="skeleton skeleton-pill"></span><span class="skeleton skeleton-pill"></span></div>'
       + '<p class="library-count"><span class="skeleton sk-sm"></span></p>'
       + `<div class="sk-list">${cards}</div></div>`;
   } else {
@@ -2587,14 +2592,14 @@ function swipeBuildSkeleton(key) {
 }
 
 // 页内切换时这些 tab 栏不跟着走：整页平移后对它们做反向位移，视觉上钉在原处，只有下方内容左右换。
-const SWIPE_TAB_SELECTOR = '.library-tabs,.compact-tabs,.segmented';
+// 同时手指落在上面时不起全局整页滑动 —— 该栏的手势交给 seg-glass.js（与底栏同一套逻辑）。
 
 // 钉住集合 = tab 栏本身 + 它上方同属“页头”的区块（标题、登录条等），
 // 这样页内切换时只有下方内容左右换，上面一切纹丝不动。
 function swipeTabNodes(node) {
   if (!node) return [];
   const out = new Set();
-  for (const tab of node.querySelectorAll(SWIPE_TAB_SELECTOR)) {
+  for (const tab of node.querySelectorAll(SWIPE_TAB_BAR_SELECTOR)) {
     out.add(tab);
     let el = tab;
     for (let depth = 0; el && el !== content && depth < 3; depth++) {
@@ -2658,45 +2663,25 @@ function swipeBlocked() {
     || document.body.classList.contains('predictive-active');
 }
 
-// 页内子项滑动时，页头 tab 的高亮要跟手 —— 在页头壳的 tab 栏里叠一层浮标，
-// 随手指行程在两格之间连续插值（微信那种跟随感），而不是松手落下才硬跳过去。
+// 内容区横滑切子项时，页头 tab 的高亮必须跟手 —— 直接驱动 seg-glass 那枚玻璃透镜，
+// 在两格之间连续插值（位置、宽度、某格文字同步变深），而不是松手才硬跳过去。
+// 透镜与静止选中态是同一个元素，所以不存在"拖动中一个样、落地又一个样"。
 function swipeBuildTabAnim(bar, step) {
-  if (!bar || !step) return null;
-  const items = [...bar.querySelectorAll('button')];
+  if (!bar || !step || !window.SegGlass) return null;
   const [from, to] = step;
+  const items = [...bar.querySelectorAll('button')];
   if (items.length < 2 || !items[from] || !items[to] || from === to) return null;
-  const barRect = bar.getBoundingClientRect();
-  const rects = items.map(el => {
-    const r = el.getBoundingClientRect();
-    return { l: r.left - barRect.left, t: r.top - barRect.top, w: r.width, h: r.height };
-  });
-  const indicator = document.createElement('span');
-  // 浮标 = 静态选中态同一套液态玻璃（.tab-glass），拖动中和落位后是同一张皮；
-  // 只拷贝圆角跟着格子走，颜色和材质交给 CSS，杜绝"拖动一个样、落地又一个样"。
-  indicator.className = 'swipe-tab-indicator tab-glass';
-  const srcCs = getComputedStyle(items[from]);
-  indicator.style.borderRadius = srcCs.borderRadius;
-  const fromInk = srcCs.color;                         // 选中态文字色
-  const restInk = getComputedStyle(items[to]).color;   // 未选中文字色
-  bar.classList.add('swipe-tab-live');
-  bar.appendChild(indicator);
-  return { items, rects, indicator, from, to, fromInk, restInk };
+  const seg = window.SegGlass.handle(bar);
+  if (!seg) return null;
+  seg.setDragging(true);       // 跟手期间关掉弹簧过渡
+  return { seg, items, from, to };
 }
 
 function swipeTabProgress(t, ratio) {
   const anim = t && t.tabAnim;
   if (!anim) return;
   const q = Math.max(0, Math.min(1, ratio || 0));
-  const { items, rects, indicator, from, to, fromInk, restInk } = anim;
-  const mix = (a, b) => a + (b - a) * q;
-  const A = rects[from], B = rects[to];
-  indicator.style.width = `${mix(A.w, B.w)}px`;
-  indicator.style.height = `${mix(A.h, B.h)}px`;
-  indicator.style.transform = `translate(${mix(A.l, B.l)}px, ${mix(A.t, B.t)}px)`;
-  // 每一格的颜色都显式给定：留空会让没参与插值的第三格吃 :active 的深色
-  // （用户看到"选中项旁边的项突然变色"就是这么来的）
-  const ink = share => `color-mix(in srgb, ${fromInk} ${Math.round(share * 100)}%, ${restInk})`;
-  items.forEach((el, i) => { el.style.color = i === from ? ink(1 - q) : i === to ? ink(q) : restInk; });
+  anim.seg.progress(anim.from, anim.to, q);
 }
 
 // 建轨：底层面板装目标页，真实 scroll 保持可见等待平移。
@@ -2723,7 +2708,7 @@ function swipeOpenTrack(delta, dx) {
   const track = { panel, inner, mode: 'page', width: Math.round(box.width || scroll.clientWidth || 360), dirSign: delta > 0 ? 1 : -1, guard: 0, resolve, pinned: [], clones: [], moving: [], savedDisplays: [] };
   const pageNode = content.firstElementChild;
   if (resolve.mode === 'inline' && pageNode) {
-    const tab = pageNode.querySelector(SWIPE_TAB_SELECTOR);
+    const tab = pageNode.querySelector(SWIPE_TAB_BAR_SELECTOR);
     if (tab && tab.parentElement) {
       const kids = [...tab.parentElement.children];
       const ti = kids.indexOf(tab);
@@ -2734,18 +2719,20 @@ function swipeOpenTrack(delta, dx) {
       // 固定在页面原位（fixed 用视口坐标，含滚动偏移），拖动全程纹丝不动。
       const pageRect = pageNode.getBoundingClientRect();
       const shell = pageNode.cloneNode(true);
-      const shellTab = shell.querySelector(SWIPE_TAB_SELECTOR);
+      const shellTab = shell.querySelector(SWIPE_TAB_BAR_SELECTOR);
       if (shellTab) {
         let sib = shellTab.nextElementSibling;
         while (sib) { const next = sib.nextElementSibling; sib.remove(); sib = next; }
         shell.style.cssText += `;position:fixed;left:${Math.round(pageRect.left)}px;top:${Math.round(pageRect.top)}px;width:${Math.round(pageRect.width)}px;margin:0;z-index:14;pointer-events:none;`;
         document.body.appendChild(shell);
         track.clones.push(shell);
+        // 壳里的 tab 栏是克隆体：只要它的透镜跟手，不要再绑一套手势（它也收不到 pointer 事件）
+        shellTab.setAttribute('data-seg-no-gesture', '');
         track.tabAnim = swipeBuildTabAnim(shellTab, resolve.step);
       }
       for (const el of track.pinned) el.style.visibility = 'hidden';   // 原页头让位给壳
       // 目标页页头临时摘除（display:none），其内容上移到面板顶部与当前页内容区对齐
-      const nodeTab = node.querySelector(SWIPE_TAB_SELECTOR);
+      const nodeTab = node.querySelector(SWIPE_TAB_BAR_SELECTOR);
       if (nodeTab && nodeTab.parentElement) {
         const nk = [...nodeTab.parentElement.children];
         const ni = nk.indexOf(nodeTab);
@@ -2767,7 +2754,7 @@ function swipeOpenTrack(delta, dx) {
     // 垂直对齐补偿：目标页页头摘除后，其根节点自身的 padding-top（如 .library-page 的 20px）
     // 仍占位，预览内容被往下推 —— 落地后页头恢复、内容上抬，肉眼就是一次跳变。
     // 测出目标内容首块与当前页内容首块的落差，用负 margin 拉平，预览与落地逐像素一致。
-    const nodeTab = node.querySelector(SWIPE_TAB_SELECTOR);
+    const nodeTab = node.querySelector(SWIPE_TAB_BAR_SELECTOR);
     let firstTarget = null;
     if (nodeTab && nodeTab.parentElement) {
       const nk = [...nodeTab.parentElement.children];
@@ -2805,6 +2792,8 @@ function swipeClearTabs(t) {
   for (const el of t.pinned || []) el.style.visibility = '';
   for (const [el, d] of t.savedDisplays || []) el.style.display = d;
   for (const el of t.moving || []) el.style.transform = '';
+  // 页头壳里的透镜提前释放：它是克隆体，随壳一起移除，这里只需把「拖动态」撤干净
+  try { t.tabAnim?.seg?.blob && (t.tabAnim.seg.blob.style.transition = ''); } catch (ignore) { }
   for (const c of t.clones || []) c.remove();
 }
 
@@ -2820,9 +2809,9 @@ function swipeCloseTrack(commit) {
   t.panel.style.transition = ease;
   const tabEase = 'transform .2s cubic-bezier(.22,.61,.36,1),width .2s cubic-bezier(.22,.61,.36,1),height .2s cubic-bezier(.22,.61,.36,1)';
   if (commit) {
-    if (t.tabAnim) {   // 高亮跟着收尾动画一路滑到目标格，不是落地才跳
+    if (t.tabAnim) {   // 透镜跟着收尾动画一路滑到目标格，不是落地才跳
       const anim = t.tabAnim;
-      anim.indicator.style.transition = tabEase;
+      anim.seg.blob.style.transition = tabEase;
       for (const el of anim.items) el.style.transition = 'color .2s ease';
       swipeTabProgress(t, 1);
     }
@@ -2849,8 +2838,8 @@ function swipeCloseTrack(commit) {
   } else {
     if (t.tabAnim) {
       const anim = t.tabAnim;
-      anim.indicator.style.transition = tabEase;
       for (const el of anim.items) el.style.transition = 'color .2s ease';
+      anim.seg.blob.style.transition = tabEase;   // 行内过渡优先于 .dragging 的 none
       swipeTabProgress(t, 0);
     }
     scroll.style.transform = 'translateX(0)';
@@ -2883,25 +2872,9 @@ scroll.addEventListener('touchstart', event => {
     return;
   }
   if (event.target.closest && event.target.closest(SWIPE_IGNORE)) { swipeStart = null; return; }
-  const target = event.target;
-  let armed = null;
-  if (target && target.closest) {
-    armed = target.closest(SWIPE_TAB_SELECTOR);
-    // 手指一落在 tab 栏就接管它的视觉：按住反馈（:active 灰蓝底 + 深字）一律不画，
-    // 全部交给玻璃浮标统一负责 —— 否则相邻格会在拖动中/落地时忽白忽变色。
-    if (armed) { armed.classList.add('swipe-tab-arm'); swipeArmedBar = armed; }
-  }
   swipeStart = { x: touch.clientX, y: touch.clientY, at: Date.now(), target: event.target };
   swipeAxis = null;
 }, { passive: true });
-
-// 松开后延迟撤下接管（覆盖落地动画那 210ms 的尾巴）
-function swipeReleaseArm() {
-  const bar = swipeArmedBar;
-  swipeArmedBar = null;
-  if (!bar) return;
-  setTimeout(() => bar.classList.remove('swipe-tab-arm'), 280);
-}
 
 scroll.addEventListener('touchmove', event => {
   const start = swipeStart;
@@ -2926,7 +2899,6 @@ scroll.addEventListener('touchend', event => {
   const start = swipeStart;
   const axis = swipeAxis, track = swipeTrack;
   swipeStart = null; swipeAxis = null;
-  swipeReleaseArm();
   if (!start || axis !== 'x') return;
   const touch = event.changedTouches[0];
   const dx = touch ? touch.clientX - start.x : 0;
@@ -2944,7 +2916,6 @@ scroll.addEventListener('touchend', event => {
 scroll.addEventListener('touchcancel', () => {
   const track = swipeTrack, axis = swipeAxis;
   swipeStart = null; swipeAxis = null;
-  swipeReleaseArm();
   if (track) swipeCloseTrack(false);
   else if (axis === 'x') swipeSettleBack();
 });
@@ -3004,7 +2975,7 @@ document.addEventListener('click', async event => {
   if (event.target.closest('[data-ss-close]')) hideSearchSuggest();
   const campaignButton = event.target.closest('[data-open-campaign]');
   if (campaignButton) {
-    if (campaignButton.closest('.hero') && performance.now() < heroSuppressClickUntil) return;
+    if (heroTapGuard(campaignButton)) return;
     const item = activeCampaigns().find(item => item.id === campaignButton.dataset.openCampaign);
     if (item) goCampaign(item);
     return;
@@ -3185,7 +3156,7 @@ function refreshCurrentDownloads() {
   if (sub) { goCategory(state.tab, Number(sub.dataset.sub), !!sub.closest('#compact-category')); return; }
   const card = event.target.closest('[data-open-id]');
   if (card?.dataset.openId) {
-    if (card.closest('.hero') && performance.now() < heroSuppressClickUntil) return;
+    if (heroTapGuard(card)) return;
     goDetail(card.dataset.openId, card); return;
   }
   const filter = event.target.closest('[data-filter]');
@@ -3236,35 +3207,78 @@ function refreshCurrentDownloads() {
 
 let heroTouch;
 let heroSuppressClickUntil = 0;
+// 滑动过 hero 之后，浏览器仍会补发一次 tap→click（部分 WebView 延迟可达 600ms 以上），
+// 光靠时间窗口盖不住，于是再配一个「一次性作废」标志：下一次落在 hero 上的 click 直接丢弃。
+// 每次新的 touchstart 都会把它重置，所以不会吃掉真正的点击。
+let heroTapSuppressed = false;
+function heroTapGuard(el) {
+  if (!el || !el.closest || !el.closest('.hero')) return false;
+  if (performance.now() < heroSuppressClickUntil) return true;
+  if (heroTapSuppressed) { heroTapSuppressed = false; return true; }
+  return false;
+}
+// 顶部轮播的左右翻页：全局「切底栏页」的手势已在 touchstart 阶段对 .hero 让位，
+// 这里只需要把横滑意图判干净 —— 横向主导且够长就翻一张，竖向让页面正常滚动。
+// thr 从 55 降到 42：以前太钝，短促一划经常翻不动，看起来像"轮播滑不动"。
+function heroOwnsGesture(event) {
+  return !!event.target.closest?.('.hero') && event.touches.length === 1;
+}
 content.addEventListener('touchstart', event => {
-  if (!event.target.closest('.hero') || event.touches.length !== 1) return;
+  if (!heroOwnsGesture(event)) return;
   stopBannerAuto();
+  heroTapSuppressed = false;
   const touch = event.touches[0];
-  heroTouch = { x: touch.clientX, y: touch.clientY, moved: false };
+  heroTouch = { x: touch.clientX, y: touch.clientY, moved: false, axis: null };
 }, { passive: true });
 content.addEventListener('touchmove', event => {
   if (!heroTouch || !event.touches.length) return;
   const touch = event.touches[0];
-  heroTouch.moved ||= Math.abs(touch.clientX - heroTouch.x) > 10 || Math.abs(touch.clientY - heroTouch.y) > 10;
+  const dx = touch.clientX - heroTouch.x, dy = touch.clientY - heroTouch.y;
+  if (!heroTouch.axis) {
+    if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+    heroTouch.axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+  }
+  heroTouch.moved = true;
+  // 就地抑制：竖向长滑时 Chromium 会把后续 touchmove 全部吞掉，而且 touchend 的
+  // changedTouches 坐标还会回落到起点 —— 等到 touchend 再判就太晚了。
+  heroSuppressClickUntil = performance.now() + 600;
+  heroTapSuppressed = true;
 }, { passive: true });
 content.addEventListener('touchend', event => {
   if (!heroTouch) return;
-  const touch = event.changedTouches[0];
-  const move = touch.clientX - heroTouch.x;
-  const vertical = touch.clientY - heroTouch.y;
-  if (heroTouch.moved || Math.abs(move) > 10 || Math.abs(vertical) > 10) heroSuppressClickUntil = performance.now() + 400;
+  const start = heroTouch;
   heroTouch = null;
   scheduleBannerAuto();
-  if (Math.abs(move) < 55 || Math.abs(move) <= Math.abs(vertical) || !isBannerRoute()) return;
+  const touch = event.changedTouches[0];
+  if (!touch) return;
+  // 位移一律以 touchend 的实际坐标为准：竖向大滑动时 Chromium 会把后续 touchmove
+  // 全部吞掉（它接管去滚页面），touchmove 里记的 moved/axis 到不了这里，
+  // 于是"滑过 hero 却仍弹出详情页"——必须用起止坐标兜底。
+  const dx = touch.clientX - start.x, dy = touch.clientY - start.y;
+  if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+    heroSuppressClickUntil = performance.now() + 600;
+    heroTapSuppressed = true;
+  }
+  const horizontal = start.axis === 'x' || (!start.moved && Math.abs(dx) > Math.abs(dy));
+  if (!horizontal || Math.abs(dx) < 42 || !isBannerRoute()) return;
   const count = bannerSlides().length;
   if (!count) return;
-  const direction = move < 0 ? 1 : -1;
+  const direction = dx < 0 ? 1 : -1;
   changeBanner((bannerIndex() + direction + count) % count, direction);
 }, { passive: true });
 content.addEventListener('touchcancel', () => {
   if (!heroTouch) return;
-  heroTouch = null; heroSuppressClickUntil = performance.now() + 400;
+  heroTouch = null;
+  heroSuppressClickUntil = performance.now() + 600;
+  heroTapSuppressed = true;
   scheduleBannerAuto();
+}, { passive: true });
+// 第三重兜底：hero 手势仍在手、页面却已经开始滚动 → 这次抬手注定不是「点开详情」。
+// 只有在 hero 上按下时才会生效，普通浏览滚动不受影响。
+scroll.addEventListener('scroll', () => {
+  if (!heroTouch) return;
+  heroSuppressClickUntil = performance.now() + 600;
+  heroTapSuppressed = true;
 }, { passive: true });
 
 api('app-version').then(version => {
