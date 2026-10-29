@@ -2458,6 +2458,7 @@ function swipeOpenTrack(delta, dx) {
   const box = scroll.getBoundingClientRect();
   const panel = document.createElement('div');
   panel.className = 'swipe-under';
+  panel.style.background = getComputedStyle(scroll).background;   // 跟随当前页真实底色（主题渐变/暗色都一致）
   panel.style.top = `${Math.round(box.top)}px`;
   panel.style.height = `${Math.round(box.height)}px`;
   const inner = document.createElement('div');
@@ -2467,7 +2468,6 @@ function swipeOpenTrack(delta, dx) {
   panel.appendChild(inner);
   (document.getElementById('app') || document.body).appendChild(panel);
   swipeTrack = { panel, inner, width: Math.round(box.width || scroll.clientWidth || 360), dirSign: delta > 0 ? 1 : -1, guard: 0, resolve };
-  scroll.classList.add('swipe-live');
   routeToken++;   // 作废未落地的异步渲染，防止拖动中 content 被覆盖
   swipeLayTrack(dx);
   swipeTrack.guard = setTimeout(() => { if (swipeTrack) swipeCloseTrack(false); }, 1500);
@@ -2499,7 +2499,6 @@ function swipeCloseTrack(commit) {
       const node = t.inner.firstElementChild;
       scroll.style.transition = '';
       scroll.style.transform = '';
-      scroll.classList.remove('swipe-live');
       if (node) { content.replaceChildren(node); scroll.scrollTop = 0; }
       t.panel.remove();
       swiping = false;
@@ -2511,7 +2510,6 @@ function swipeCloseTrack(commit) {
     setTimeout(() => {
       scroll.style.transition = '';
       scroll.style.transform = '';
-      scroll.classList.remove('swipe-live');
       t.panel.remove();
       swiping = false;
       // downloads 页的轮询被 routeToken++ 打断过，重新挂上
